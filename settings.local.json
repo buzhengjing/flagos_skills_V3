@@ -1,0 +1,50 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec *)",
+      "Bash(docker cp *)",
+      "Bash(docker inspect *)",
+      "Bash(docker ps *)",
+      "Bash(docker start *)",
+      "Bash(docker logs *)",
+      "Bash(docker commit *)",
+      "Bash(docker tag *)",
+      "Bash(docker run *)",
+      "Bash(docker pull *)",
+
+      "Bash(pip install *)",
+      "Bash(pip3 install *)",
+      "Bash(pkill *)",
+      "Bash(kill *)",
+      "Bash(modelscope download *)",
+
+      "Bash(curl -s http://localhost:*)",
+      "Bash(curl -s http://127.0.0.1:*)",
+      "Bash(curl -s --connect-timeout *)",
+
+      "Bash(mkdir -p /data/flagos-workspace/*)",
+      "Bash(ls *)",
+      "Bash(cat /data/flagos-workspace/*)",
+      "Bash(tail *)",
+      "Bash(find /data/flagos-workspace/*)",
+      "Bash(wc *)",
+
+      "Bash(nvidia-smi *)",
+      "Bash(nvidia-smi)",
+      "Bash(npu-smi *)",
+      "Bash(hostname *)",
+      "Bash(hostname)",
+      "Bash(df *)",
+      "Bash(free *)",
+      "Bash(docker --version)",
+
+      "Bash(cd /tmp && git clone *)",
+      "Bash(git clone *)",
+
+      "Bash(cp *)",
+      "Bash(ln -s *)",
+
+      "Bash(bash skills/flagos-container-preparation/tools/setup_workspace.sh *)"
+    ]
+  }
+}

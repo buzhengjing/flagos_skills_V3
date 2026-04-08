@@ -1,0 +1,37 @@
+# FlagRelease 配置文件 - 从镜像开始
+# 完整流程：下载权重 -> 启动容器 -> 启动服务 -> 验证 -> 发布
+
+# ========================================
+# 必填配置
+# ========================================
+
+input_type: image
+image_path: "harbor.example.com/flagrelease/base:latest"
+
+model_info:
+  source_of_model_weights: "Qwen/Qwen3-8B"  # 必填
+
+  # 可选：评测结果
+  # evaluation_results:
+  #   - metric: ERQA
+  #     origin: 65.28
+  #     flagos: 67.79
+
+# ========================================
+# 可选配置
+# ========================================
+
+chip:
+  vendor: auto
+  harbor_registry: "harbor.baai.ac.cn/flagrelease-public"
+
+verify:
+  api_endpoint: "http://localhost:8000/v1"
+  weights_source: "Qwen/Qwen3-8B"  # 权重下载来源
+  weights_local_path: "/data/models"
+  # serve_start_cmd: |
+  #   vllm serve /data/model --tensor-parallel-size 8
+
+publish:
+  upload_weights: false
+  # weights_dir: "/data/models/Qwen3-8B"

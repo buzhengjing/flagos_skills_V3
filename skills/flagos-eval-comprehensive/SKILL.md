@@ -1,0 +1,674 @@
+---
+name: flagos-eval-comprehensive
+description: 统一精度评测 Skill，支持本地快速评测（GPQA Diamond）和远端 flageval 正式评测，含 V1 vs V2 精度对比（5% 阈值）和算子排查闭环
+version: 4.0.0
+triggers:
+  - 精度评测
+  - quick 评测
+  - 本地评测
+  - 综合评测
+  - 全面评测
+  - comprehensive eval
+  - evalscope
+  - GPQA
+  - fast gpqa
+  - 远端评测
+  - FlagRelease 评测
+  - remote eval
+  - eval correctness
+  - flageval
+depends_on:
+  - flagos-service-startup
+next_skill: flagos-performance-testing
+provides:
+  - eval_results
+  - eval_report
+  - eval.v1_score
+  - eval.v2_score
+  - eval.accuracy_aligned
+  - eval.request_id
+---
+
+# FlagOS 精度评测 Skill（统一）
+
+统一精度评测入口，包含四个模块：
+
+| 模块 | 用途 | 场景 |
+|------|------|------|
+| **A — 本地快速评测** | GPQA Diamond 快速评测（fast_gpqa.py） | 步骤④快速精度评测（V1/V2） |
+| **B — 远端 flageval 正式评测** | 远端 FlagRelease 平台，6 个数据集 | 步骤⑧正式评测（用户选择） |
+| **C — 精度对比（V1 vs V2）** | 对比两版评测结果，5% 阈值判定 | 步骤④中 V2 评测完成后自动执行 |
+| **D — 错误处理与算子排查** | 服务端报错 → 算子替换 → 重启 → 重评 | 精度不达标或评测报错时 |
+
+---
+
+## 强制约束
+
+**启动前互斥检查**：精度评测启动前，必须确认没有正在运行的性能测试进程。并发执行会互相抢占 GPU 资源，导致结果不可信。
+
+```bash
+docker exec $CONTAINER bash -c "pgrep -f 'benchmark_runner\|vllm.*bench' && echo 'BLOCKED: 性能测试运行中，等待结束' && exit 1 || echo 'OK: 无性能测试进程'"
+```
+
+---
+
+## 上下文集成
+
+### 从 shared/context.yaml 读取
+
+```yaml
+container:
+  name: <来自 container-preparation>
+model:
+  name: <来自 container-preparation>
+  url: <来自 container-preparation>
+  container_path: <来自 container-preparation>
+service:
+  cluster: <来自 service-startup>
+  external_ip: <来自 service-startup>
+  host: <来自 service-startup>
+  port: <来自 service-startup>
+  healthy: <来自 service-startup>
+  enable_oplist_path: <来自 service-startup>
+  enable_oplist_count: <来自 service-startup>
+  initial_operator_list: <来自 service-startup>
+gpu:
+  vendor: <来自 container-preparation>
+inspection:
+  flaggems_control: <来自 pre-service-inspection>
+  flaggems_logic: <来自 pre-service-inspection>
+```
+
+### 写入 shared/context.yaml
+
+```yaml
+eval:
+  request_id: "<远端评测任务 ID>"
+  domain: "<NLP|MM>"
+  mode: "<评测模式>"
+  eval_method: "<remote|local>"
+  status: "<S|F|C|OOR|running|local>"
+  results: {}
+  v1_score: <V1 GPQA Diamond 分数>
+  v2_score: <V2 GPQA Diamond 分数>
+  accuracy_diff: <|V2 - V1| 偏差>
+  accuracy_aligned: <true|false>
+  accuracy_threshold: 5.0
+  excluded_ops_accuracy: [<因精度问题关闭的算子>]
+```
+
+---
+
+## 统一工作目录
+
+```
+容器内: /flagos-workspace/
+  ├── eval/
+  │   ├── fast_gpqa.py              ← 本地快速评测脚本
+  │   ├── fast_gpqa_config.yaml     ← 快速评测配置
+  │   └── gpqa_result.json          ← 评测结果（临时）
+  ├── results/
+  │   ├── gpqa_native.json          ← V1 精度结果
+  │   ├── gpqa_flagos.json          ← V2 精度结果
+  │   ├── eval_result.json          ← 远端评测结果
+  │   └── ops_list.json             ← 当前算子列表
+  ├── logs/
+  │   └── eval_gpqa_progress.log    ← 评测进度日志
+  └── config/
+      └── eval_config.yaml          ← 评测配置快照
+```
+
+---
+
+# 模块 A：本地快速评测（GPQA Diamond）
+
+主模式：**GPQA Diamond 快速评测** — 一条命令跑完，自动适配所有模型（thinking/non-thinking），自动探测吞吐选并发。
+
+## 核心特性
+
+- **自动适配所有模型**：自动检测 thinking model（Qwen3/QwQ/DeepSeek-R1/R2），设置对应的 temperature/filters
+- **自动 max_tokens**：查询 `/v1/models` 获取 `max_model_len`，thinking 模型 `max_tokens = max(max_model_len - 8192, 8192)` 不设上限 cap，标准模型 clamp 到 [4096, 32768]
+- **截断检测**：评测前发样题检查 `finish_reason`，如果为 `length` 自动翻倍 max_tokens（在 max_model_len 允许范围内）
+- **自动选并发**：三阶段探测 — ① 直接 API 调用测单条推理延迟（剥离框架开销）② 基于延迟 + thinking 特性估算候选并发 ③ 快速验证（每档 3 题并发测试，选吞吐最高且无错误的）
+- **thinking 模型保守策略**：thinking 模型输出长度波动大，候选并发范围更保守（如延迟 ≤10s → [8,16,32]，而非 standard 的 [16,32,64]）
+
+## 使用方式
+
+**步骤 1：复制工具到容器**
+
+```bash
+CONTAINER=<container_name>
+docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa.py $CONTAINER:/flagos-workspace/eval/fast_gpqa.py
+docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml $CONTAINER:/flagos-workspace/eval/fast_gpqa_config.yaml
+```
+
+**步骤 2：安装依赖**
+
+```bash
+docker exec $CONTAINER pip install evalscope pyyaml requests
+```
+
+如使用 ModelScope 数据源（默认）：
+```bash
+docker exec $CONTAINER pip install modelscope
+```
+
+**步骤 3：配置**
+
+编辑容器内 `/flagos-workspace/eval/fast_gpqa_config.yaml`：
+
+```yaml
+model:
+  name: ""                              # 必填，与 /v1/models 返回的 id 一致
+  api_base: "http://localhost:8000/v1"  # 必填，OpenAI 兼容 API 地址
+  api_key: "EMPTY"                      # 可选
+
+dataset_dir: ""                         # 可选，预下载缓存目录
+dataset_hub: "modelscope"               # modelscope 或 huggingface
+```
+
+**步骤 4：运行评测**
+
+```bash
+# 方式一：使用配置文件
+docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+    python fast_gpqa.py --config fast_gpqa_config.yaml"
+
+# 方式二：命令行参数（无需改配置文件）
+docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+    python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
+```
+
+## 输出
+
+终端打印 + `gpqa_result.json`：
+
+```
+============================================================
+  GPQA Diamond 快速评测结果
+============================================================
+  模型:     Qwen3-30B-A3B
+  模式:     thinking (temperature=0.6, max_tokens=24576)
+  并发:     32
+  题数:     198
+  得分:     61.11%
+  耗时:     10m 25s
+  报告:     gpqa_result.json
+============================================================
+```
+
+## 自动决策逻辑
+
+| 决策项 | 逻辑 |
+|--------|------|
+| max_tokens | 查询 `/v1/models` → thinking: `max(max_model_len - 8192, 8192)` 无上限 cap；standard: `clamp(max_model_len - 8192, 4096, 32768)`；fallback thinking=16384, standard=8192 |
+| 截断检测 | 评测前发样题，`finish_reason == "length"` 时自动翻倍 max_tokens |
+| temperature | thinking model → 0.6；standard → 0.0 |
+| top_p | thinking → 0.95；standard → 1.0 |
+| dataset_filters | thinking → `remove_until: </think>`；standard → 无 |
+| eval_batch_size | 三阶段探测：API 延迟 → 候选估算 → 并发验证；探测失败 → 16 |
+| few_shot | 始终 0-shot |
+| stream | 始终开启 |
+
+## Thinking 模型检测规则
+
+模型名（不区分大小写）包含以下关键词即判定为 thinking model：
+- `qwen3`、`qwq`、`deepseek-r1`、`deepseek-r2`
+
+## 迁移流程中的用法
+
+步骤④（快速精度评测）使用模块 A + C + D，步骤⑧（正式评测）使用模块 B。
+
+**步骤④ — V1 (Native) 精度**（始终执行）：
+```bash
+docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+    python fast_gpqa.py --config fast_gpqa_config.yaml"
+# 保存结果
+docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_native.json
+```
+
+**步骤④ — V2 (FlagGems) 精度**（始终执行）：
+```bash
+docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+    python fast_gpqa.py --config fast_gpqa_config.yaml"
+# 保存结果
+docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json
+```
+
+**V2 评测完成后，自动进入模块 C（精度对比）。**
+
+
+## 工具文件
+
+```
+tools/
+├── fast_gpqa.py              ← 快速 GPQA Diamond 评测（主入口）
+├── fast_gpqa_config.yaml     ← 快速评测配置模板
+├── eval_monitor.py           ← 远端评测监控（提交→轮询→结果获取）
+├── eval_orchestrator.py      ← 全量评测编排器（保留，按需使用）
+├── evalscope_runner.py       ← EvalScope 执行器（保留）
+├── config.yaml               ← 全量评测配置（保留）
+├── benchmark_registry.yaml   ← Benchmark 注册表（保留）
+└── datasets/evalscope_cache/ ← 数据集缓存
+```
+
+### tools/fast_gpqa.py — 快速 GPQA Diamond 评测（核心）
+
+单文件约 470 行，包含完整的 GPQA Diamond 评测流程：
+
+1. 加载配置 / 解析 CLI 参数
+2. 验证 API 可达性
+3. 检测 thinking model
+4. 查询 `/v1/models` → 自动计算 max_tokens
+5. 截断检测 → 发样题检查 finish_reason，必要时自动调整 max_tokens
+6. 设置 generation_config
+7. 三阶段并发探测（API 延迟 → 候选估算 → 并发验证）→ 选并发
+8. 正式评测 198 题
+9. 解析结果 → 输出 JSON 报告 + 终端打印
+
+| CLI 参数 | 说明 |
+|----------|------|
+| `--config` | 配置文件路径 |
+| `--model-name` | 模型名称（覆盖 config） |
+| `--api-base` | API 地址（覆盖 config） |
+| `--api-key` | API 密钥（覆盖 config） |
+| `--dataset-dir` | 数据集缓存目录（覆盖 config） |
+
+---
+
+# 模块 B：远端 flageval 正式评测
+
+通过远端 FlagRelease 平台进行大模型正确性评测，支持 6 个数据集。
+
+**远端不可达时自动降级到模块 A（本地快速评测）。**
+
+## 远端评测平台 API 参考
+
+### 平台地址
+
+| 环境 | 地址 | 说明 |
+|------|------|------|
+| **公网（当前使用）** | `http://110.43.160.159:5050` | 线上环境（原 120.92.17.239 维修中） |
+| 本地 | `http://127.0.0.1:5051` | 本地测试环境 |
+
+### API 接口一览
+
+| 接口 | 方法 | 路径 | 用途 |
+|------|------|------|------|
+| 提交评测 | POST | `/evaluation` | 发起评测任务，返回 request_id |
+| 查询进度 | POST | `/evaluation_progress` | 查询任务执行进度 |
+| 获取结果 | GET | `/evaldiffs` | 获取最终评测结果 |
+| 停止评测 | POST | `/stop_evaluation` | 停止正在运行的任务 |
+| 恢复评测 | POST | `/resume_evaluation` | 恢复已停止的任务 |
+| 对比评测 | GET | `/evaluation_diffs` | 对比多个评测任务的差异 |
+
+### 正式评测数据集（6 个）
+
+| 数据集 | 说明 |
+|--------|------|
+| `gpqa_generative_cot` | GPQA 生成式 CoT |
+| `aime` | AIME 数学竞赛 |
+| `livebench_new` | LiveBench 最新版 |
+| `musr_generative` | MuSR 生成式推理 |
+| `mmlu_pro` | MMLU-Pro 专业知识 |
+| `gpqa_diamond_generative_cot` | GPQA Diamond 生成式 CoT |
+
+## 入口判断
+
+| 模式 | 说明 |
+|------|------|
+| **提交新评测** | 通过远端 FlagRelease API 提交新评测任务（默认） |
+| **查询已有任务** | 用户提供 request_id，查询进度或获取结果 |
+
+## 步骤 B1：服务稳定性预检
+
+在提交评测之前，先用一条极简 benchmark 验证服务不会崩溃：
+
+```bash
+docker exec $CONTAINER bash -c "vllm bench serve \
+  --host <service_host> --port <service_port> \
+  --model <model_name> --tokenizer <tokenizer_path> \
+  --dataset-name random --random-input-len 1024 --random-output-len 15 \
+  --num-prompts 1 --endpoint /v1/completions --ignore-eos --trust-remote-code"
+```
+
+- 返回码 `0` → 服务稳定，继续
+- 返回码非 `0` → 停止评测，跳转到模块 D（错误处理）
+
+## 步骤 B2：确定评测参数
+
+从 context.yaml 读取服务信息，询问用户确认或补充：
+
+| 参数 | 来源 | 说明 |
+|------|------|------|
+| `eval_model` | 用户提供 | 评测唯一名称，如 `qwen2.5-7b-nv-flagos` |
+| `model` | context.yaml `model.name` | 大模型名称 |
+| `eval_url` | **询问用户提供本机 IP** | `http://<IP>:<port>/v1/chat/completions` |
+| `tokenizer` | 用户提供 | Tokenizer 路径 |
+| `domain` | 用户选择 | `NLP` 或 `MM` |
+| `mode` | 用户选择 | NLP: `FlagRelease`/`XLC_train`/`XLC_infer`/`Qnext`/`quickrun`；MM: `FlagRelease`/`XLC`/`EmbodiedVerse`/`RoboTrain`/`quickrun` |
+| `chip` | 自动检测 | 芯片名称，如 `Nvidia-H100` |
+| `api_key` | 默认 `EMPTY` | API 密钥 |
+| `batch_size` | 默认 `1` | |
+| `num_concurrent` | 默认 `1` | 并发数 |
+| `num_retry` | 默认 `10` | 重试次数 |
+| `gen_kwargs` | 可选 | 如 `temperature=0.6,top_k=20,max_gen_toks=16000` |
+| `region` | 默认 `bj` | `bj`（大兴）或 `sz`（上庄） |
+| `user_id` | 用户提供或默认 `0` | FlagEval 平台用户 ID（**整数类型**） |
+| `dry_run` | 默认 `false` | 是否仅做推理验证 |
+
+**eval_model 命名规范**：
+- V1 版本（baseline）：`<model>-<vendor>-origin`
+- V2 版本（FlagOS）：`<model>-<vendor>-flagos`
+
+## 步骤 B3：参数预检与确认
+
+1. **询问用户提供本机 IP**（禁止自动获取，必须用户确认）
+2. **验证服务可达性**：`curl -s --connect-timeout 5 http://<IP>:<port>/v1/models`
+3. **组装完整参数展示给用户确认**
+4. **参数类型检查**：`user_id` 为整数，`dry_run` 为布尔值
+
+## 步骤 B4：提交评测任务
+
+```bash
+curl -X POST http://110.43.160.159:5050/evaluation \
+-H "Content-Type: application/json" \
+-d '{
+    "eval_model": "<eval_model>",
+    "model": "<model>",
+    "eval_url": "http://<external_ip>:<port>/v1/chat/completions",
+    "tokenizer": "<tokenizer>",
+    "domain": "<NLP|MM>",
+    "mode": "<mode>",
+    "chip": "<chip>",
+    "api_key": "<api_key>",
+    "batch_size": <batch_size>,
+    "num_concurrent": <num_concurrent>,
+    "num_retry": <num_retry>,
+    "gen_kwargs": "<gen_kwargs>",
+    "region": "<region>",
+    "dry_run": <dry_run>,
+    "user_id": <user_id>
+}'
+```
+
+- `err_code == 0`：提交成功，**记录 `request_id`**
+- `err_code == 1`：提交失败
+- 网络不可达 → 降级到模块 A
+
+## 步骤 B5：监控评测进度
+
+```bash
+curl -X POST http://110.43.160.159:5050/evaluation_progress \
+-H "Content-Type: application/json" \
+-d '{"request_id": "<request_id>", "domain": "<NLP|MM>"}'
+```
+
+**轮询策略**：
+- 第 1-5 次：每 30 秒
+- 第 6-15 次：每 60 秒
+- 第 16-30 次：每 2 分钟
+- 进度 > 80%：切换到每 30 秒密集轮询
+- 最多 30 次（约 1 小时），超出后停止
+- `finished == true` → 获取结果
+- 连续 3 次网络不可达 → 停止轮询，输出 request_id
+
+## 步骤 B6：获取评测结果
+
+```bash
+curl -X GET http://110.43.160.159:5050/evaldiffs \
+-H "Content-Type: application/json" \
+-d '{"request_id": "<request_id>"}'
+```
+
+**结果状态**：
+
+| status | 含义 | 后续操作 |
+|--------|------|----------|
+| `S` | 成功 | 输出精度报告 → 完成 |
+| `F` | 失败 | 跳转模块 D（错误处理） |
+| `C` | 已取消 | 询问用户是否恢复 |
+| `OOR` | 超过重试次数 | 跳转模块 D |
+
+## 步骤 B7：查询已有任务（用户提供 request_id）
+
+```bash
+# 查询进度
+curl -X POST http://110.43.160.159:5050/evaluation_progress \
+-H "Content-Type: application/json" \
+-d '{"request_id": "<request_id>", "domain": "<NLP|MM>"}'
+
+# 获取结果
+curl -X GET http://110.43.160.159:5050/evaldiffs \
+-H "Content-Type: application/json" \
+-d '{"request_id": "<request_id>"}'
+
+# 停止任务
+curl -X POST http://110.43.160.159:5050/stop_evaluation \
+-H "Content-Type: application/json" \
+-d '{"request_id": "<request_id>"}'
+
+# 恢复任务
+curl -X POST http://110.43.160.159:5050/resume_evaluation \
+-H "Content-Type: application/json" \
+-d '{"request_id": "<request_id>"}'
+```
+
+## 步骤 B8：对比多个评测任务（V1 vs V2 远端对比）
+
+```bash
+curl -X GET http://110.43.160.159:5050/evaluation_diffs \
+-H "Content-Type: application/json" \
+-d '{"request_ids": ["<request_id_v1>", "<request_id_v2>"]}'
+```
+
+---
+
+# 模块 C：精度对比（V1 vs V2）
+
+## 触发时机
+
+步骤④（快速精度评测）中 V2 精度完成后，如果 V1 精度有结果，**自动执行对比**。
+
+## 对比逻辑
+
+1. 读取 `results/gpqa_native.json`（V1）和 `results/gpqa_flagos.json`（V2）
+2. 提取 `score` 字段
+3. 计算 `accuracy_diff = |V2_score - V1_score|`
+4. 判定：`accuracy_diff ≤ 5.0%` → 通过；`> 5.0%` → 不达标
+
+## 对比输出格式
+
+```
+精度对比 (V1 vs V2)
+========================================
+V1 (Native):        62.12%
+V2 (Full FlagGems):  59.09%
+偏差:                3.03%
+阈值:                5.0%
+结论:                通过 ✓
+当前启用算子:         38 个
+========================================
+```
+
+## 精度不达标时的处理
+
+偏差 > 5% 时：
+
+1. 输出偏差报告 + 当前启用算子列表（从 `flaggems_enable_oplist.txt` 读取）
+2. 触发 `diagnose_ops.py accuracy-groups` 分组定位：
+   ```bash
+   ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups \
+     --ops-file /flagos-workspace/results/ops_list.json \
+     --plugin-mode --json
+   ```
+3. 按组逐步启用测试，定位问题组
+4. 问题组内逐个算子排查
+5. 关闭问题算子 → 重启服务 → 重新评测
+6. **每轮输出算子状态**（见下方格式）
+
+## 每轮算子状态输出（强制）
+
+```
+算子状态更新
+========================================
+本轮关闭: softmax, layer_norm（原因: 精度偏差 >5%）
+累计关闭: 3 个 (softmax, layer_norm, rms_norm)
+当前启用: 35 个
+启用列表: [addmm, mm, bmm, ...]
+========================================
+```
+
+## 写入 context.yaml
+
+对比完成后更新：
+```yaml
+eval:
+  v1_score: 62.12
+  v2_score: 59.09
+  accuracy_diff: 3.03
+  accuracy_aligned: true
+  excluded_ops_accuracy: []  # 或 [softmax, layer_norm]
+```
+
+---
+
+# 模块 D：错误处理与算子排查
+
+## 错误分类
+
+```
+评测报错
+  │
+  ├── 服务端报错（算子问题）
+  │     特征: CUDA error, OOM, RuntimeError, operator not supported,
+  │           服务进程退出, status=F/OOR（远端结果中）
+  │     → D1: 算子替换 → 重启服务 → 重新评测
+  │
+  └── 评测端/网络问题
+        特征: timeout, connection refused, 平台 5xx, DNS 解析失败
+        → D2: 降级到模块 A 本地评测
+```
+
+## D1 — 服务端报错处理（算子替换闭环）
+
+**此流程可多轮迭代，直到评测通过或用户终止。**
+
+**第 1 步：分析报错原因**
+
+远端评测结果中发现失败：
+```bash
+# 检查远端返回的结果中 status 为 F 或 OOR 的数据集
+```
+
+本地评测日志中发现失败：
+```bash
+grep -iE "(CUDA|OOM|RuntimeError|operator.*not.*support|process.*exit)" \
+    /data/flagos-workspace/<model_name>/output/**/*.log
+```
+
+**第 2 步：整理报错报告**
+
+向用户输出：
+- 错误类型（CUDA error / OOM / 算子不支持等）
+- 涉及的算子名称（从日志中提取）
+- 建议关闭的算子列表
+
+**第 3 步：触发算子替换**
+
+调用 `flagos-operator-replacement` skill：
+- 根据错误信息确定需要排除的算子
+- 执行替换并记录
+
+**第 4 步：重启服务**
+
+```bash
+docker restart $CONTAINER
+sleep 5
+# 重新启动服务（参考 flagos-service-startup）
+```
+
+**第 5 步：重新评测**
+
+- 远端评测 → 回到步骤 B4 重新提交
+- 本地评测 → 回到模块 A 重新运行
+
+**第 6 步：输出算子状态（每轮强制）**
+
+```
+算子状态更新
+========================================
+本轮关闭: softmax（原因: CUDA error in eval）
+累计关闭: 1 个 (softmax)
+当前启用: 37 个
+启用列表: [addmm, mm, bmm, ...]
+========================================
+```
+
+**迭代控制**：
+- 每轮记录关闭了哪些算子
+- 最多迭代 3 轮，超出后建议用户介入
+- 每轮向用户报告当前状态
+
+## D2 — 评测端/网络问题处理
+
+1. 确认是网络/平台问题而非服务端问题
+2. 检查服务是否正常：`curl -s http://localhost:8000/v1/models`
+3. 降级到模块 A 进行本地评测
+
+---
+
+# 阶段性反馈格式
+
+每次评测完成后，必须向用户输出：
+
+```
+精度评测结果
+========================================
+版本:   V1 (Native) / V2 (Full FlagGems)
+方式:   本地 GPQA Diamond / 远端 flageval
+状态:   通过 / 有报错
+得分:   XX.XX%
+问题算子: softmax, layer_norm（仅有报错时显示）
+建议操作: 关闭问题算子 → 重启服务 → 重新评测
+已累计剔除: 2 个算子（softmax, layer_norm）
+当前启用: 36 个算子
+========================================
+```
+
+**反馈规则**：
+- 状态为"通过"时不显示"问题算子"和"建议操作"
+- 每次重新评测后更新"已累计剔除"计数
+- 如果连续 3 轮仍有新算子报错，提醒用户介入
+
+---
+
+# 故障排查
+
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| `evalscope not found` | 未安装 | `pip install evalscope` |
+| API 不可达 | 服务未启动或地址错误 | 检查 `--api-base`，确认 `curl <api_base>/models` 正常 |
+| 精度异常低 | max_tokens 不够 | 脚本自动计算+截断检测，检查日志中 `truncation_detected` 是否为 true |
+| 探测选并发偏保守 | thinking 模型延迟波动大 | 三阶段探测已内置 thinking 保守策略，验证阶段会实测选最优 |
+| model_id 含 `/` 报路径错误 | 模型名是路径格式 | 已内置 sanitize 逻辑，自动取最后一段 |
+| 远端提交失败 `err_code=1` | 参数错误 | 检查 eval_infos 参数格式 |
+| 连接远端平台超时 | 平台不可达 | 降级到模块 A 本地评测 |
+| V1 vs V2 精度偏差 >5% | FlagGems 算子精度问题 | 触发模块 C 精度排查流程 |
+
+---
+
+# 完成标准
+
+- [ ] 评测完成（本地或远端）
+- [ ] 评测结果已保存到 `results/` 目录
+- [ ] score 字段有值（非 null）
+- [ ] V1 vs V2 精度对比已执行（如两版结果都有）
+- [ ] 如有错误，已完成错误分析和算子替换处理
+- [ ] **每轮算子变更已输出状态报告**（关闭的算子 + 当前启用算子）
+- [ ] context.yaml 已更新评测结果和精度对比字段
+- [ ] 评测配置快照已保存到 `config/eval_config.yaml`
+- [ ] 对应 trace 文件已写入：
+  - V1 评测 → 记录在 `traces/04_quick_accuracy.json` 中
+  - V2 评测 → 记录在 `traces/04_quick_accuracy.json` 中
+- [ ] `timing.steps.quick_accuracy` 已更新为本步骤的 `duration_seconds`
