@@ -45,11 +45,11 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 ```
 
 - 找到本地权重 → 记录 `model.local_path`，docker run 直接挂载
-- 未找到 → 自动从 ModelScope 下载到 `/mnt/workspace/models/<model_name>`，下载后校验
+- 未找到 → 自动从 ModelScope 下载到 `/mnt/data/models/<model_name>`，下载后校验
 - 下载成功 → 记录下载路径为 `model.local_path`
 - 下载失败或纯模型名无 org → 要求用户提供 `org/model` 格式或手动指定路径
 - `--no-download` 可禁用自动下载（仅搜索本地）
-- `--download-dir` 可指定下载目录（默认 `/mnt/workspace/models`）
+- `--download-dir` 可指定下载目录（默认 `/mnt/data/models`）
 
 ## 入口 1 — 已有容器
 
