@@ -11,30 +11,6 @@ from .chip_detector import ChipDetector, ChipVendor, VENDOR_NAMES, sanitize_dock
 
 
 @dataclass
-class VerifyConfig:
-    """验证阶段配置"""
-    enabled: bool = True
-    # 是否下载权重
-    download_weights: bool = True
-    weights_source: str = ""  # 权重来源 URL 或路径
-    weights_local_path: str = ""  # 权重本地存储路径
-    # 容器相关
-    start_container: bool = True
-    enter_container: bool = True
-    container_name: str = "flagos"
-    image_path: str = ""  # 镜像路径
-    container_run_cmd: str = ""  # 启动容器命令
-    # 服务相关
-    start_service: bool = True
-    serve_start_cmd: str = ""  # 启动服务命令
-    # API 验证
-    verify_api: bool = True
-    api_endpoint: str = "http://localhost:8000/v1"
-    api_verify_cmd: str = ""  # 自定义 API 验证命令
-    api_timeout: int = 60  # API 验证超时时间（秒）
-
-
-@dataclass
 class ChipConfig:
     """芯片配置"""
     # 芯片厂商，默认自动检测
@@ -75,6 +51,8 @@ class PublishConfig:
     # 权重文件上传
     upload_weights: bool = True
     weights_dir: str = ""
+    # 自动读取评测结果目录（步骤④⑤产出），填入 README
+    results_dir: str = ""
     # 仓库可见性
     private: bool = True
     # 已有的 Harbor 镜像地址（跳过 commit/tag/push）
@@ -117,13 +95,12 @@ class PipelineConfig:
     image_path: str = ""
 
     # 各阶段配置
-    verify: VerifyConfig = field(default_factory=VerifyConfig)
     chip: ChipConfig = field(default_factory=ChipConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
     model_info: ModelInfo = field(default_factory=ModelInfo)
 
     # 执行哪些阶段
-    stages_to_run: List[str] = field(default_factory=lambda: ["verify", "publish"])
+    stages_to_run: List[str] = field(default_factory=lambda: ["publish"])
 
 
 def load_config(config_path: str) -> PipelineConfig:
@@ -137,28 +114,7 @@ def load_config(config_path: str) -> PipelineConfig:
     config.input_type = raw_config.get('input_type', 'image')
     config.container_name = raw_config.get('container_name', '')
     config.image_path = raw_config.get('image_path', '')
-    config.stages_to_run = raw_config.get('stages_to_run', ['verify', 'publish'])
-
-    # 验证阶段配置
-    if 'verify' in raw_config:
-        v = raw_config['verify']
-        config.verify = VerifyConfig(
-            enabled=v.get('enabled', True),
-            download_weights=v.get('download_weights', True),
-            weights_source=v.get('weights_source', ''),
-            weights_local_path=v.get('weights_local_path', ''),
-            start_container=v.get('start_container', True),
-            enter_container=v.get('enter_container', True),
-            container_name=v.get('container_name', 'flagos'),
-            image_path=v.get('image_path', ''),
-            container_run_cmd=v.get('container_run_cmd', ''),
-            start_service=v.get('start_service', True),
-            serve_start_cmd=v.get('serve_start_cmd', ''),
-            verify_api=v.get('verify_api', True),
-            api_endpoint=v.get('api_endpoint', 'http://localhost:8000/v1'),
-            api_verify_cmd=v.get('api_verify_cmd', ''),
-            api_timeout=v.get('api_timeout', 60)
-        )
+    config.stages_to_run = raw_config.get('stages_to_run', ['publish'])
 
     # 芯片配置
     if 'chip' in raw_config:
@@ -196,6 +152,7 @@ def load_config(config_path: str) -> PipelineConfig:
             huggingface_token=p.get('huggingface_token', os.environ.get('HF_TOKEN', '')),
             upload_weights=p.get('upload_weights', True),
             weights_dir=p.get('weights_dir', ''),
+            results_dir=p.get('results_dir', ''),
             private=p.get('private', True),
             existing_harbor_image=p.get('existing_harbor_image', ''),
             image_source=p.get('image_source', ''),
@@ -223,13 +180,6 @@ def load_config(config_path: str) -> PipelineConfig:
             serve_start_cmd=m.get('serve_start_cmd', ''),
             serve_infer_cmd=m.get('serve_infer_cmd', ''),
         )
-
-    # 根据 input_type 自动调整
-    if config.input_type == 'container':
-        config.verify.download_weights = False
-        config.verify.start_container = False
-        config.verify.enter_container = False
-        config.verify.start_service = False
 
     return config
 
@@ -286,7 +236,7 @@ def auto_fill_config(config: PipelineConfig, container_name: Optional[str] = Non
     if config.input_type == 'container':
         container = config.container_name
     else:
-        container = container_name or config.verify.container_name
+        container = container_name or config.container_name
 
     # 创建检测器
     detector = ChipDetector(container_name=container if container else None)
@@ -393,8 +343,6 @@ def auto_fill_config(config: PipelineConfig, container_name: Optional[str] = Non
     if not config.publish.image_source:
         if config.image_path:
             config.publish.image_source = config.image_path
-        elif config.verify.image_path:
-            config.publish.image_source = config.verify.image_path
 
     if not config.model_info.image_harbor_path and config.publish.image_target_tag:
         config.model_info.image_harbor_path = config.publish.image_target_tag
@@ -412,11 +360,8 @@ def auto_fill_config(config: PipelineConfig, container_name: Optional[str] = Non
             '{{IMAGE}}', config.publish.image_target_tag
         )
 
-    if not config.model_info.serve_start_cmd and config.verify.serve_start_cmd:
-        config.model_info.serve_start_cmd = config.verify.serve_start_cmd
-
     if not config.model_info.serve_infer_cmd:
-        api_endpoint = config.verify.api_endpoint or "http://localhost:8000/v1"
+        api_endpoint = "http://localhost:8000/v1"
         api_endpoint_masked = re.sub(r'http://[\d.]+:', 'http://<ip>:', api_endpoint)
         model_id = config.model_info.output_name.lower().replace('-', '_') if config.model_info.output_name else "model"
         config.model_info.serve_infer_cmd = f'''from openai import OpenAI
@@ -440,7 +385,6 @@ print(response.choices[0].message.content)'''
         config.publish.upload_files = [config.publish.readme_output_path]
 
     if config.publish.upload_weights and not config.publish.weights_dir:
-        if config.verify.weights_local_path:
-            config.publish.weights_dir = config.verify.weights_local_path
+        pass  # weights_dir 必须在配置中显式指定
 
     return config

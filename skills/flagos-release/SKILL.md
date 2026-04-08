@@ -38,7 +38,6 @@ tools/
 │   ├── utils.py                 # 工具函数
 │   └── stages/
 │       ├── base.py              # Stage 基类（命令执行、结果记录）
-│       ├── verify.py            # 验证阶段（下载权重→启动容器→启动服务→API 验证）
 │       └── publish.py           # 发布阶段（commit→tag→push→README→上传）
 ├── templates/
 │   └── README_TEMPLATE.md       # README 模板
@@ -98,10 +97,10 @@ release:
 从模板创建配置（二选一）：
 
 ```bash
-# 从镜像开始（完整流程）
+# 从镜像开始
 cp skills/flagos-release/tools/config/release_config.yaml my_release.yaml
 
-# 从已有容器开始（跳过下载权重和启动容器）
+# 从已有容器开始
 cp skills/flagos-release/tools/config/release_config_container.yaml my_release.yaml
 ```
 
@@ -121,20 +120,14 @@ cp skills/flagos-release/tools/config/release_config_container.yaml my_release.y
 ```bash
 cd skills/flagos-release/tools
 
-# 完整流水线（验证 + 发布）
+# 完整发布流水线
 python main.py --config my_release.yaml
-
-# 只运行验证阶段
-python main.py --config my_release.yaml --stages verify
-
-# 只运行发布阶段
-python main.py --config my_release.yaml --stages publish
 
 # 从容器开始
 python main.py --config my_release.yaml --input-type container --container-name mycontainer
 
 # 只生成 README
-python main.py --config my_release.yaml --stages publish --only-readme
+python main.py --config my_release.yaml --only-readme
 
 # 干运行（只验证配置，不实际执行）
 python main.py --config my_release.yaml --dry-run
@@ -142,16 +135,7 @@ python main.py --config my_release.yaml --dry-run
 
 ## 阶段详情
 
-### 阶段 A — 验证（Verify）
-
-| 步骤 | 操作 | 可跳过 |
-|------|------|--------|
-| A1 | 下载模型权重（HF/ModelScope/HTTP） | input_type=container 时跳过 |
-| A2 | 启动容器（docker run） | input_type=container 时跳过 |
-| A3 | 启动推理服务（后台 nohup） | input_type=container 时跳过 |
-| A4 | API 健康检查（/v1/models，5 次重试） | 可配置跳过 |
-
-### 阶段 B — 发布（Publish）
+### 发布（Publish）
 
 | 步骤 | 操作 | 可跳过 |
 |------|------|--------|
