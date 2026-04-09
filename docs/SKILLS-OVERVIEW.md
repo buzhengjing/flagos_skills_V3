@@ -65,7 +65,7 @@
         ↓
 ⑦ flagos-release (publish)    上传权重发布（ModelScope + HuggingFace）
         ↓
-⑧ [可选] eval + perf          正式评测（flageval 全量精度 + 全量性能，用户选择）
+→ 报告整理收尾
 ```
 
 **三版结果文件**：
@@ -73,9 +73,9 @@
 - `flagos_performance.json` — V2 (FlagGems)
 - `flagos_optimized.json` — V3 (Optimized FlagGems，仅 V2 不达标时产出)
 
-**自动化**：步骤①~⑤全自动执行，零交互。仅以下情况需用户介入：
+**自动化**：步骤①~⑦全自动执行，零交互。仅网络失败时需用户介入：
 - 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
-- ⑥⑦打包发布时需用户提供 Harbor 登录状态和平台 token
+- ⑥⑦打包发布凭证通过环境变量自动读取（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`）
 
 ---
 
@@ -235,7 +235,8 @@
 ### 需要人工介入的环节
 
 1. 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
-2. ⑥⑦打包发布时需用户提供 Harbor 登录状态和平台 token
+
+**注意**：⑥⑦打包发布所需凭证（Harbor 登录、ModelScope token、HuggingFace token）均通过环境变量自动读取，无需人工提供。
 
 ---
 

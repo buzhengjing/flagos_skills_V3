@@ -34,7 +34,7 @@ claude "
 ⑤ performance-testing         → 快速性能评测（V1 基线 → V2 性能 → 算子调优直到性能达标）
 ⑥ flagos-release (image)      → 打包镜像（commit → tag → push Harbor）
 ⑦ flagos-release (publish)    → 上传权重发布（ModelScope + HuggingFace）
-⑧ [可选] eval + perf          → 正式评测（flageval 全量精度 + 全量性能，用户选择）
+→ 报告整理收尾
 \`\`\`
 
 3. 通过 shared/context.yaml 在 Skills 间传递上下文
@@ -42,9 +42,9 @@ claude "
 ## 自动化原则
 
 - 步骤①~⑤全自动执行，零交互
-- 仅以下情况需用户介入：
+- 仅网络失败时需用户介入：
   - 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
-  - ⑥⑦打包发布时需用户提供 Harbor 登录状态和平台 token
+  - ⑥⑦打包发布凭证通过环境变量自动读取（Harbor 登录、MODELSCOPE_TOKEN、HF_TOKEN）
 - 每个 Skill 的详细步骤在 skills/<skill-name>/SKILL.md
 - 遇到问题时使用 flagos-log-analyzer 诊断
 

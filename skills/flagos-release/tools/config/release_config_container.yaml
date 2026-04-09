@@ -6,7 +6,7 @@
 # ========================================
 
 
-stages_to_run: ["verify", "publish"]
+stages_to_run: ["publish"]
 
 input_type: container
 container_name: tx_qwen3-next
@@ -50,9 +50,6 @@ model_info:
        origin: 53.17
        flagos: 60.85
 
-verify:
-  api_endpoint: "http://172.21.16.6:8888"
-
 # ========================================
 # 可选配置
 # ========================================
@@ -68,6 +65,7 @@ publish:
     #  existing_harbor_image: "harbor.baai.ac.cn/flagrelease-public/flagrelease-nvidia-release-model_qwen3-next-80b-a3b-tree_none-gems_4.2.1rc0-scale_none-cx_none-python_3.12.3-torch_cuda-2.9.0-pcp_cuda13.1-gpu_h20-3e-arc_amd64-driver_570.158.01_260330:202603301143"
   upload_weights: true
   weights_dir: "/data/qwen3-next"
+  # results_dir: "/flagos-workspace/results"  # 自动读取评测结果填入 README
   # 发布平台控制（默认都发布，设为 false 可跳过）
   publish_modelscope: false
   publish_huggingface: false

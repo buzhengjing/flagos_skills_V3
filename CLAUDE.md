@@ -44,9 +44,9 @@
 ③ 启动服务       → 验证初始环境可用（原样启动，确认服务健康）
 ④ 快速精度评测   → V1 精度基线 → V2 精度 → 算子调优直到精度达标
 ⑤ 快速性能评测   → V1 性能基线 → V2 性能 → 算子调优直到性能达标(≥80%) → 得到最终版本
-⑥ 打包镜像       → docker commit → tag → push Harbor（可能需用户补充信息）
-⑦ 上传权重发布   → ModelScope + HuggingFace（可能需用户补充 token）
-⑧ [可选] 正式评测 → flageval 全量精度 + 全量性能测试（用户选择是否执行）
+⑥ 打包镜像       → docker commit → tag → push Harbor（Harbor 信息从环境变量读取）
+⑦ 上传权重发布   → ModelScope + HuggingFace（token 从环境变量读取）
+→ 报告整理收尾
 ```
 
 ### V1/V2/V3 定义
@@ -147,10 +147,14 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 
 ## 用户交互规则
 
-**①-⑤ 全自动执行，零交互。** 全流程仅以下 2 类情况需要用户介入：
+**①-⑦ 全自动执行，零交互。** 全流程仅网络失败时需要用户介入：
 
 1. **网络失败**（详见"网络问题处理策略"）— pip 失败先自动加阿里云镜像重试，其他网络操作失败或 pip 镜像也失败时询问代理
-2. **⑥⑦ 打包发布** — 需用户提供 Harbor 登录状态、ModelScope token、HuggingFace token（如未在流程开始时提供）
+
+**⑥⑦ 打包发布**所需凭证均通过环境变量提供，脚本自动读取：
+- Harbor：宿主机已 `docker login`，或通过环境变量提供认证信息
+- ModelScope：`MODELSCOPE_TOKEN` 环境变量
+- HuggingFace：`HF_TOKEN` 环境变量
 
 ---
 
@@ -202,8 +206,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 │   ├── 04_quick_accuracy.json
 │   ├── 05_quick_performance.json
 │   ├── 06_image_package.json              # 可选
-│   ├── 07_publish.json                    # 可选
-│   └── 08_formal_evaluation.json          # 可选
+│   └── 07_publish.json                    # 可选
 │
 ├── logs/                                 # 运行日志
 │   ├── startup_default.log
@@ -229,7 +232,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 - 每个 Skill 开始时记录 `timestamp_start`（ISO 8601），结束时记录 `timestamp_end` 和 `duration_seconds`
 - 完成 trace 写入后，同步更新 `context.yaml` 的 `timing.steps.<step_name>` 字段
 - 步骤①开始时额外写入 `timing.workflow_start`
-- 步骤⑤完成时（或⑧完成时，如执行正式评测）写入 `timing.workflow_end` 和 `timing.total_duration_seconds`
+- 步骤⑦完成时写入 `timing.workflow_end` 和 `timing.total_duration_seconds`
 
 ### Trace JSON 统一格式
 
@@ -276,7 +279,6 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 | ⑤快速性能 | `05_quick_performance.json` | V1/V2 性能测试命令、性能对比、算子搜索记录 |
 | ⑥打包镜像 | `06_image_package.json` | commit 命令、tag 命令、push 命令 |
 | ⑦上传发布 | `07_publish.json` | README 生成、ModelScope/HuggingFace 上传 URL |
-| ⑧正式评测 | `08_formal_evaluation.json` | flageval 全量精度命令、全量性能命令、结果 |
 
 ### Trace 写入方式
 
@@ -336,7 +338,7 @@ TRACE_EOF"
 
 ## 最终报告格式
 
-步骤⑤完成后输出迁移报告，⑥⑦完成后补充发布信息：
+步骤⑦完成后输出最终迁移报告并收尾：
 
 **交付物清单**：
 - `results/` — 性能/精度结果文件
@@ -380,8 +382,10 @@ GPU: <gpu_count>x <gpu_type>
   ③启动服务:     XXm XXs
   ④快速精度:     XXm XXs
   ⑤快速性能:     XXm XXs
+  ⑥打包镜像:     XXm XXs
+  ⑦上传发布:     XXm XXs
 
-发布信息（⑥⑦完成后补充）:
+发布信息:
   Harbor 镜像: <full_harbor_tag>
   ModelScope: <modelscope_url>
   HuggingFace: <huggingface_url>

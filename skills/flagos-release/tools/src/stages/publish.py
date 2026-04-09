@@ -2,6 +2,7 @@
 发布阶段
 包含：镜像打 tag、推送 Harbor、生成 README、发布到 ModelScope/HuggingFace
 """
+import json
 import os
 import time
 import subprocess
@@ -127,7 +128,7 @@ class PublishStage(BaseStage):
 
     def _commit_container(self) -> bool:
         """将容器 commit 为镜像"""
-        container_name = self.config.container_name or self.config.verify.container_name
+        container_name = self.config.container_name
         if not container_name:
             print("  x 容器名称未配置")
             return False
@@ -218,7 +219,7 @@ class PublishStage(BaseStage):
 
             # 如果 auto_fill_config 没有生成 tag，则在此处生成
             if chip_config.vendor == "auto":
-                container_name = self.config.container_name or self.config.verify.container_name
+                container_name = self.config.container_name
                 detector = ChipDetector(container_name=container_name if container_name else None)
                 vendor = detector.detect_vendor()
                 if vendor is None:
@@ -412,7 +413,7 @@ class PublishStage(BaseStage):
         chip_config = self.config.chip
 
         if self.env_info is None:
-            container_name = self.config.container_name or self.config.verify.container_name
+            container_name = self.config.container_name
             try:
                 detector = ChipDetector(container_name=container_name if container_name else None)
                 vendor = None
@@ -518,7 +519,6 @@ class PublishStage(BaseStage):
         """准备模板变量"""
         model_info = self.config.model_info
         chip_config = self.config.chip
-        verify_config = self.config.verify
 
         vars = {}
 
@@ -566,7 +566,7 @@ class PublishStage(BaseStage):
             vars["vllm_row"] = ""
 
         vars["image_harbor_path"] = model_info.image_harbor_path or self.config.publish.harbor_path or "N/A"
-        vars["weights_local_path"] = verify_config.weights_local_path or "/data/models/" + (model_info.source_of_model_weights.split("/")[-1] if model_info.source_of_model_weights else "model")
+        vars["weights_local_path"] = self.config.publish.weights_dir or "/data/models/" + (model_info.source_of_model_weights.split("/")[-1] if model_info.source_of_model_weights else "model")
 
         vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else "# 请在配置文件的 model_info.container_run_cmd 中填写容器启动命令"
         vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else "# Serve start command"
@@ -577,8 +577,12 @@ class PublishStage(BaseStage):
         return vars
 
     def _generate_evaluation_table(self) -> str:
-        """从 evaluation_results 生成 Markdown 表格"""
+        """从 evaluation_results 或 results_dir 自动生成 Markdown 表格"""
+        # 优先使用配置中手动填写的 evaluation_results
         results = self.config.model_info.evaluation_results
+        if not results:
+            # 尝试从 results_dir 自动读取
+            results = self._load_results_from_dir()
         if not results:
             return "| Metrics | Origin | FlagOS |\n|---------|--------|--------|\n| N/A | N/A | N/A |"
 
@@ -590,6 +594,40 @@ class PublishStage(BaseStage):
             table += f"| {metric} | {origin} | {flagos} |\n"
 
         return table.strip()
+
+    def _load_results_from_dir(self) -> List[dict]:
+        """从 results_dir 自动读取精度评测结果，返回兼容 evaluation_results 的格式"""
+        results_dir = self.config.publish.results_dir
+        if not results_dir or not os.path.isdir(results_dir):
+            return []
+
+        results = []
+
+        # 读取 GPQA 精度结果
+        gpqa_native_path = os.path.join(results_dir, "gpqa_native.json")
+        gpqa_flagos_path = os.path.join(results_dir, "gpqa_flagos.json")
+
+        native_score = self._read_json_field(gpqa_native_path, "score")
+        flagos_score = self._read_json_field(gpqa_flagos_path, "score")
+
+        if native_score is not None or flagos_score is not None:
+            results.append({
+                "metric": "GPQA",
+                "origin": native_score if native_score is not None else "N/A",
+                "flagos": flagos_score if flagos_score is not None else "N/A",
+            })
+
+        return results
+
+    @staticmethod
+    def _read_json_field(filepath: str, field: str):
+        """安全读取 JSON 文件中的某个字段"""
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get(field)
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            return None
 
     def _generate_readme_builtin(self) -> Optional[str]:
         """使用内置简单模板生成 README"""

@@ -9,7 +9,7 @@ import argparse
 from typing import List, Dict, Any
 
 from src.config import load_config, validate_config, auto_fill_config, PipelineConfig
-from src.stages import VerifyStage, PublishStage
+from src.stages import PublishStage
 from src.utils import print_banner, print_config_summary, print_stage_summary
 
 
@@ -30,7 +30,6 @@ class Pipeline:
 
         # 依次执行各阶段
         stages_map = {
-            "verify": VerifyStage,
             "publish": PublishStage
         }
 
@@ -103,17 +102,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 使用配置文件运行完整流水线
+  # 使用配置文件运行发布流水线
   python main.py --config config/release_config.yaml
 
-  # 只运行验证阶段
-  python main.py --config config/release_config.yaml --stages verify
-
-  # 从容器开始（跳过下载权重、启动容器等步骤）
+  # 从容器开始
   python main.py --config config/release_config.yaml --input-type container --container-name mycontainer
 
   # 只生成 README
-  python main.py --config config/release_config.yaml --stages publish --only-readme
+  python main.py --config config/release_config.yaml --only-readme
 
   # 干运行（不实际执行）
   python main.py --config config/release_config.yaml --dry-run
@@ -127,7 +123,7 @@ def main():
     )
     parser.add_argument(
         "-s", "--stages",
-        help="要执行的阶段，逗号分隔 (verify,publish)"
+        help="要执行的阶段，逗号分隔 (publish)"
     )
     parser.add_argument(
         "--input-type",
@@ -176,19 +172,12 @@ def main():
 
     if args.input_type:
         config.input_type = args.input_type
-        if args.input_type == "container":
-            config.verify.download_weights = False
-            config.verify.start_container = False
-            config.verify.enter_container = False
-            config.verify.start_service = False
 
     if args.container_name:
         config.container_name = args.container_name
-        config.verify.container_name = args.container_name
 
     if args.image_path:
         config.image_path = args.image_path
-        config.verify.image_path = args.image_path
 
     if args.only_readme:
         config.stages_to_run = ["publish"]
