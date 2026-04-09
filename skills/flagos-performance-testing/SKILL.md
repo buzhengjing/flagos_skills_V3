@@ -361,6 +361,24 @@ Native 基线: 6500 tok/s（首次 native 测试时不显示此行）
 - FlagOS 模式测试时必须与 Native 基线对比并给出达标/不达标判断
 - 不达标时自动提示"建议触发算子优化"
 
+### 性能问题日志写入
+
+任一并发级别 V2/V1 < 80% 时，必须追加写入 `logs/issues_performance.log`：
+
+```bash
+docker exec $CONTAINER bash -c "cat >> /flagos-workspace/logs/issues_performance.log << 'ISSUE_EOF'
+[$(date '+%Y-%m-%d %H:%M:%S')] <版本> | <问题摘要>
+  详情: <不达标的用例+并发级别, V1 TPS, V2 TPS, ratio>
+  操作: <措施，如 operator_search.py 第 N 轮优化>
+  结果: <优化后 ratio，达标/不达标>
+ISSUE_EOF"
+```
+
+记录场景：
+- V2/V1 性能对比中任一并发级别 < 80%（记录所有不达标的并发级别）
+- 算子搜索优化每轮结果（禁用了哪些算子、优化后的 ratio）
+- 最终结论（V2 达标 / V3 达标 / 不达标）
+
 ---
 
 ## benchmark_runner.py 参数
@@ -417,6 +435,7 @@ Native 基线: 6500 tok/s（首次 native 测试时不显示此行）
 - flagos_performance.json 已生成
 - 对比结果已生成（performance_compare.csv）
 - 性能比率已判断（每个用例的每个并发级别均 ≥ 80%，或触发算子优化）
+- 性能不达标时，`logs/issues_performance.log` 已追加写入问题记录
 - 如触发优化：flagos_optimized.json 已生成
 - 最终三版对比已生成（performance_compare_final.csv）
 - context.yaml 已更新

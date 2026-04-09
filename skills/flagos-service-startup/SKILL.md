@@ -423,6 +423,26 @@ environment:
 2. 自动切回 Native 验证
 3. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
 
+### 问题日志写入
+
+服务启动失败时，必须将失败信息追加写入 `logs/issues_startup.log`：
+
+```bash
+docker exec $CONTAINER bash -c "cat >> /flagos-workspace/logs/issues_startup.log << 'ISSUE_EOF'
+[$(date '+%Y-%m-%d %H:%M:%S')] <启动模式> | <问题摘要>
+  详情: <错误信息，如 OOM/端口占用/进程崩溃/超时>
+  操作: <恢复措施，如 TP 翻倍/切回 Native/降低 max-model-len>
+  结果: <恢复结果>
+ISSUE_EOF"
+```
+
+记录场景：
+- 启动超时（wait_for_service.sh 超时）
+- 进程启动后立即退出（OOM、GPU 显存不足）
+- FlagGems 模式启动失败，切回 Native
+- TP 调整重试
+- 端口被占用
+
 ---
 
 # 完成条件
@@ -437,6 +457,7 @@ environment:
 - 对应 trace 文件已写入：
   - 步骤③初始启动 → `traces/03_service_startup.json`
   - 步骤④⑤中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/05_quick_performance.json` 的 actions 中
+- 启动失败时，`logs/issues_startup.log` 已追加写入问题记录
 - `timing.steps.service_startup` 已更新为本步骤的 `duration_seconds`
 
 ---

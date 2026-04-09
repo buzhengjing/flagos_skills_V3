@@ -610,6 +610,24 @@ sleep 5
 - 最多迭代 3 轮，超出后建议用户介入
 - 每轮向用户报告当前状态
 
+### 精度问题日志写入
+
+精度偏差 >5% 或评测过程中服务端报错时，必须追加写入 `logs/issues_accuracy.log`：
+
+```bash
+docker exec $CONTAINER bash -c "cat >> /flagos-workspace/logs/issues_accuracy.log << 'ISSUE_EOF'
+[$(date '+%Y-%m-%d %H:%M:%S')] <版本> | <问题摘要>
+  详情: <V1/V2 分数、偏差值，或错误信息>
+  操作: <排查措施，如 diagnose_ops.py 分组测试、禁用算子>
+  结果: <措施结果，如偏差降至 X%、服务恢复>
+ISSUE_EOF"
+```
+
+记录场景：
+- V1 vs V2 精度偏差 >5%（记录双方分数和偏差值）
+- 评测过程中服务端 CUDA error / OOM / 进程崩溃
+- 算子排查每轮结果（禁用了哪些算子、重测后的偏差）
+
 ## D2 — 评测端/网络问题处理
 
 1. 确认是网络/平台问题而非服务端问题
@@ -665,6 +683,7 @@ sleep 5
 - [ ] score 字段有值（非 null）
 - [ ] V1 vs V2 精度对比已执行（如两版结果都有）
 - [ ] 如有错误，已完成错误分析和算子替换处理
+- [ ] 精度异常或评测报错时，`logs/issues_accuracy.log` 已追加写入问题记录
 - [ ] **每轮算子变更已输出状态报告**（关闭的算子 + 当前启用算子）
 - [ ] context.yaml 已更新评测结果和精度对比字段
 - [ ] 评测配置快照已保存到 `config/eval_config.yaml`
