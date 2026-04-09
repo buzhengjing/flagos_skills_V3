@@ -29,6 +29,7 @@
 | 算子替换 / operator replacement / 算子优化 | flagos-operator-replacement | `skills/flagos-operator-replacement/SKILL.md` |
 | 精度评测 / eval correctness / accuracy test / 远端评测 / FlagRelease / flageval / 综合评测 / comprehensive eval / 本地评测 / quick 评测 / evalscope / GPQA | flagos-eval-comprehensive | `skills/flagos-eval-comprehensive/SKILL.md` |
 | 日志分析 / analyze logs | flagos-log-analyzer | `skills/flagos-log-analyzer/SKILL.md` |
+| 提交 issue / submit issue / report bug / 自动报告 | flagos-issue-reporter | `skills/flagos-issue-reporter/SKILL.md` |
 | 组件安装 / install component / 安装 FlagGems / 安装 FlagTree / 升级 FlagGems / flag upgrade | flagos-component-install | `skills/flagos-component-install/SKILL.md` |
 | 发布 / 镜像上传 / 镜像打包 / 模型发布 / release / publish / image upload / package image | flagos-release | `skills/flagos-release/SKILL.md` |
 
@@ -39,14 +40,11 @@
 **用户提供容器/镜像 + 模型名后，①-⑤ 全自动执行，零交互。**
 
 ```
-① 容器准备       → 镜像/容器就绪 + 本地权重检查（未找到自动从 ModelScope 下载）
-② 环境检测       → 判定 env_type + flaggems 控制方式 + 记录组件版本
-③ 启动服务       → 验证初始环境可用（原样启动，确认服务健康）
-④ 快速精度评测   → V1 精度基线 → V2 精度 → 算子调优直到精度达标
-⑤ 快速性能评测   → V1 性能基线 → V2 性能 → 算子调优直到性能达标(≥80%) → 得到最终版本
-⑥ 打包镜像       → docker commit → tag → push Harbor（Harbor 信息从环境变量读取）
-⑦ 上传权重发布   → ModelScope + HuggingFace（token 从环境变量读取）
-→ 报告整理收尾
+① 下载模型+容器准备 → 镜像/容器就绪 + 权重检查 + 环境检测 + 工具部署
+② 启服务           → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
+③ 精度评测         → V1/V2 GPQA Diamond 对比 → 异常自动 issue + ≤3 轮算子优化
+④ 性能评测         → V1/V2 4k1k benchmark 对比 → 异常自动 issue + ≤3 轮算子优化
+⑤ 自动发布         → 打包 + 上传 → qualified 公开 / 不合格私有
 ```
 
 ### V1/V2/V3 定义
@@ -55,7 +53,17 @@
 - **V2**：初始环境的 flaggems 状态（已开启部分或全部算子），经过精度验证达标后的版本。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
 - **V3**：在 V2 基础上经过性能算子调优后的版本。若 V2 性能已达标（≥80% of V1），则**不存在 V3**，报告中说明"V2 已达标，无需 V3"
 
-### 步骤④ 快速精度评测详情
+### 步骤② 启服务异常处理
+
+```
+FlagGems 模式启动失败：
+  → 保存日志 → 提交 operator-crash issue（含 flaggems.enable 代码）
+  → 排除操作失误：native 模式也失败 → 环境问题，需人工介入
+  → 确认是 FlagGems 问题 → workflow.service_ok = false
+  → 跳过③④ → 直接到⑤发布（私有）
+```
+
+### 步骤③ 精度评测详情
 
 精度全部完成后才进入性能测试，不交替进行。
 
@@ -63,29 +71,44 @@
 1. 关闭 flaggems → 启动服务 → GPQA Diamond V1 精度基线 → 停服务
 2. 开启 flaggems → 启动服务 → GPQA Diamond V2 精度
 3. V1 vs V2 精度对比（偏差阈值 5%）
-4. 出现问题时自动算子调优：
-   ├── 服务崩溃 → diagnose_ops.py crash-log 定位问题算子 → 禁用 → 重启重测
-   ├── 精度偏差 >5% → diagnose_ops.py accuracy-groups 分组测试 → 定位问题算子 → 禁用 → 重测
-   └── 循环直到精度达标，记录禁用算子及原因（崩溃/精度）
+4. 出现问题时自动处理：
+   ├── 服务崩溃 → 提交 operator-crash issue → diagnose_ops.py 定位 → 禁用 → 重启重测
+   ├── 精度偏差 >5% → 提交 accuracy-degraded issue → 算子优化
+   │   优化范围：仅在 gems.txt 记录的已替换算子中排查
+   │   控制方式：plugin 用 BLACKLIST 环境变量 / 非 plugin 用 toggle_flaggems.py
+   └── 最多 3 轮优化，超限标记 workflow.accuracy_ok=false，进入④
+5. 3 轮内达标 → workflow.accuracy_ok=true（即使提交了 issue 也算合格）
 ```
 
-### 步骤⑤ 快速性能评测详情
+### 步骤④ 性能评测详情
 
 ```
 1. 关闭 flaggems → 启动服务 → benchmark 4k_input_1k_output V1 性能基线 → 停服务
-2. 开启 flaggems（使用④精度达标后的算子列表）→ 启动服务 → benchmark V2 性能
+2. 开启 flaggems（使用③精度达标后的算子列表）→ 启动服务 → benchmark V2 性能
 3. V2/V1 性能对比，每个并发级别 ≥ 80%?
    ├── 全部达标 → 结束，当前即为最终版本（不存在 V3）
-   └── 不达标 → operator_search.py 算子搜索优化
-                → 自动继续（上限 5 轮，超限取当前最优）
-                → 得到 V3 版本
+   └── 不达标 → 提交 performance-degraded issue → 算子优化
+                优化范围：仅在 gems.txt 记录的已替换算子中排查
+                → 最多 3 轮优化，超限标记 workflow.performance_ok=false
+                → 3 轮内达标 → workflow.performance_ok=true
 4. 记录禁用算子及原因（性能不佳）
+```
+
+### 步骤⑤ 发布条件判定
+
+```
+qualified = service_ok AND accuracy_ok AND performance_ok
+
+if qualified:
+    publish.private = false   → 公开发布
+else:
+    publish.private = true    → 私有发布（记录不达标原因）
 ```
 
 ### native 场景工作流简化
 
 纯原生环境无 FlagGems，工作流简化为：
-①容器准备 → ②环境检测 → ③服务启动 → 精度评测 → 性能测试 → 报告
+①容器准备 → ②服务启动 → 精度评测 → 性能测试 → 发布
 跳过所有 FlagGems 相关步骤（toggle、V2 对比、算子优化）。只产出单版结果。
 
 ### NV 重点场景
@@ -96,7 +119,7 @@
 
 ## 环境场景定义
 
-环境检测（步骤②）自动分类为以下场景之一，核心判定依据是 flaggems 是否存在（FlagOS 的核心组件）：
+环境检测（步骤①）自动分类为以下场景之一，核心判定依据是 flaggems 是否存在（FlagOS 的核心组件）：
 
 | env_type | 判定条件 | FlagGems 控制 | 算子列表来源 | 算子优化 |
 |----------|---------|--------------|-------------|---------|
@@ -132,7 +155,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 |--------|--------|------|
 | docker run | 按 GPU 模板自动生成并执行 | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
-| 算子搜索未达标 | 自动继续（上限 5 轮，超限取当前最优） | 不询问是否继续 |
+| 算子搜索未达标 | 自动继续（上限 3 轮，超限标记不合格进入下一步） | 不询问是否继续 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | 每个用例的每个并发级别均 ≥ 80% of V1 | 不询问"目标是多少" |
 | pip install 模式 | `pip install .`（非 editable） | 避免 `-e .` 在容器中的问题 |
@@ -141,17 +164,21 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 | GPU 设备 | 使用全部可见 GPU | 不询问使用哪些卡 |
 | Harbor 仓库地址 | `harbor.baai.ac.cn/flagrelease-public` | 无需用户提供 |
 | 模型仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 自动生成 |
-| 仓库可见性 | 私有（private） | 默认私有 |
+| 仓库可见性 | 条件发布：qualified=true 公开 / 不合格私有 | 由 workflow 状态自动判定 |
 
 ---
 
 ## 用户交互规则
 
-**①-⑦ 全自动执行，零交互。** 全流程仅网络失败时需要用户介入：
+**①-⑤ 全自动执行，零交互。** 全流程仅网络失败时需要用户介入：
 
 1. **网络失败**（详见"网络问题处理策略"）— pip 失败先自动加阿里云镜像重试，其他网络操作失败或 pip 镜像也失败时询问代理
 
-**⑥⑦ 打包发布**所需凭证均通过环境变量提供，脚本自动读取：
+**⑤ 打包发布**所需凭证均通过环境变量提供，脚本自动读取：
+- Harbor：宿主机已 `docker login`，或通过环境变量提供认证信息
+- ModelScope：`MODELSCOPE_TOKEN` 环境变量
+- HuggingFace：`HF_TOKEN` 环境变量
+- GitHub Issue：`GITHUB_TOKEN` 环境变量（issue 自动提交，需 `public_repo` 权限）
 - Harbor：宿主机已 `docker login`，或通过环境变量提供认证信息
 - ModelScope：`MODELSCOPE_TOKEN` 环境变量
 - HuggingFace：`HF_TOKEN` 环境变量
@@ -179,6 +206,8 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 - `eval_monitor.py` — 评测监控
 - `install_component.py` — 组件统一安装/升级/卸载（FlagGems 三级降级、FlagTree 委托）
 - `install_flagtree.sh` — FlagTree 安装/卸载/验证（支持 11 个后端）
+- `issue_reporter.py` — 问题自动收集/格式化/提交（五种 issue 类型，三级降级提交）
+- `log_analyzer.py` — 日志分析与诊断（错误分类、服务状态推断、FlagGems 检测）
 
 ---
 
@@ -232,7 +261,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 - 每个 Skill 开始时记录 `timestamp_start`（ISO 8601），结束时记录 `timestamp_end` 和 `duration_seconds`
 - 完成 trace 写入后，同步更新 `context.yaml` 的 `timing.steps.<step_name>` 字段
 - 步骤①开始时额外写入 `timing.workflow_start`
-- 步骤⑦完成时写入 `timing.workflow_end` 和 `timing.total_duration_seconds`
+- 步骤⑤完成时写入 `timing.workflow_end` 和 `timing.total_duration_seconds`
 
 ### Trace JSON 统一格式
 
@@ -272,13 +301,11 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 
 | 步骤 | trace 文件 | 记录的 actions |
 |------|-----------|----------------|
-| ①容器准备 | `01_container_preparation.json` | docker run 命令（含完整参数）、权重下载、setup_workspace 部署结果 |
-| ②环境检测 | `02_environment_inspection.json` | inspect_env.py 命令、关键输出（包版本、FlagGems 控制方式、env_type） |
-| ③启动服务 | `03_service_startup.json` | 启动命令、env vars、健康检查结果、端口 |
-| ④快速精度 | `04_quick_accuracy.json` | V1/V2 精度评测命令、精度结果、算子调优记录（崩溃定位/精度分组） |
-| ⑤快速性能 | `05_quick_performance.json` | V1/V2 性能测试命令、性能对比、算子搜索记录 |
-| ⑥打包镜像 | `06_image_package.json` | commit 命令、tag 命令、push 命令 |
-| ⑦上传发布 | `07_publish.json` | README 生成、ModelScope/HuggingFace 上传 URL |
+| ①下载模型+容器准备 | `01_container_preparation.json` | docker run 命令（含完整参数）、权重下载、环境检测、setup_workspace 部署结果 |
+| ②启服务 | `02_service_startup.json` | 启动命令、env vars、健康检查结果、端口、issue 提交记录（如有） |
+| ③精度评测 | `03_accuracy_eval.json` | V1/V2 精度评测命令、精度结果、算子调优记录、issue 提交记录 |
+| ④性能评测 | `04_performance_eval.json` | V1/V2 性能测试命令、性能对比、算子搜索记录、issue 提交记录 |
+| ⑤自动发布 | `05_release.json` | qualified 判定、commit/tag/push 命令、ModelScope/HuggingFace 上传 URL |
 
 ### Trace 写入方式
 
@@ -338,7 +365,7 @@ TRACE_EOF"
 
 ## 最终报告格式
 
-步骤⑦完成后输出最终迁移报告并收尾：
+步骤⑤完成后输出最终迁移报告并收尾：
 
 **交付物清单**：
 - `results/` — 性能/精度结果文件
@@ -377,20 +404,20 @@ GPU: <gpu_count>x <gpu_type>
 （若存在 V3，增加 V3 列）
 
 流程耗时:
-  ①容器准备:     XXm XXs
-  ②环境检测:     XXm XXs
-  ③启动服务:     XXm XXs
-  ④快速精度:     XXm XXs
-  ⑤快速性能:     XXm XXs
-  ⑥打包镜像:     XXm XXs
-  ⑦上传发布:     XXm XXs
+  ①下载模型+容器准备:  XXm XXs
+  ②启服务:            XXm XXs
+  ③精度评测:          XXm XXs
+  ④性能评测:          XXm XXs
+  ⑤自动发布:          XXm XXs
 
 发布信息:
   Harbor 镜像: <full_harbor_tag>
   ModelScope: <modelscope_url>
   HuggingFace: <huggingface_url>
+  发布方式: 公开 / 私有
+  qualified: true / false
 
-结论: V2 达标 / V3 (Optimized) 达标(≥80%) / 不达标
+结论: qualified(公开发布) / 不合格(私有发布)
 ========================================
 ```
 

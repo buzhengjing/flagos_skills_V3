@@ -19,8 +19,10 @@
 
 | 层级 | 环境变量 | 控制对象 | 说明 |
 |------|---------|---------|------|
-| OOT 层 | `VLLM_FL_OOT_BLACKLIST` | 高层算子（fused_moe, rms_norm, rotary_embedding, silu_and_mul, attention_backend） | 独立于 flagos 层 |
+| OOT 层 | `VLLM_FL_OOT_BLACKLIST` | 高层算子（fused_moe, rms_norm, rotary_embedding, silu_and_mul, attention_backend） | 独立于 flagos 层，仅手动调试时使用 |
 | FlagOS 层 | `VLLM_FL_FLAGOS_WHITELIST` 或 `VLLM_FL_FLAGOS_BLACKLIST` | 底层 torch 算子（addmm, softmax, cos 等） | 白名单优先，黑名单兜底 |
+
+> **注意**：主工作流中算子优化仅在 FlagOS 层（gems.txt 范围）进行渐进排除搜索，不单独排查 OOT 层。
 
 基础开关：
 - `USE_FLAGGEMS=1` + `VLLM_FL_PREFER_ENABLED=true` → 启用 FlagGems
@@ -87,7 +89,7 @@ not_started → [init] → in_progress → [next/update 循环] → completed / 
 ```json
 {
   "status": "in_progress",
-  "search_phase": "oot | progressive | group | linear | oot_verify | done",
+  "search_phase": "progressive | group | linear | done",
   "search_mode": "progressive | group | linear",
   "search_direction": "forward | reverse",
   "plugin_mode": true,
@@ -96,7 +98,7 @@ not_started → [init] → in_progress → [next/update 循环] → completed / 
   "search_ops": ["运行时算子子集"],
   "enabled_ops": ["当前启用的算子"],
   "disabled_ops": ["当前禁用的算子"],
-  "oot_blacklist": ["OOT 层黑名单"],
+  "oot_blacklist": ["OOT 层黑名单（仅手动调试）"],
   "flagos_blacklist": ["FlagOS 层黑名单"],
   "flagos_whitelist": ["FlagOS 层白名单"],
   "native_throughput": 1000.0,
@@ -105,17 +107,13 @@ not_started → [init] → in_progress → [next/update 循环] → completed / 
 }
 ```
 
-### 4.2 搜索阶段（Plugin 场景）
+### 4.2 搜索阶段
 
 ```
-oot → oot_verify → progressive/group/linear → done
+progressive/group/linear → done
 ```
 
-1. **OOT 阶段**：逐个测试 5 个 OOT 算子，禁用后性能提升 > 2% 的加入 OOT blacklist
-2. **OOT 验证**：用累积的 OOT blacklist 做一次验证
-   - 达标 → 搜索完成（无需搜索 flagos 层）
-   - 不达标 → 进入 flagos 层搜索
-3. **FlagOS 层搜索**：三种策略可选
+直接进入 FlagOS 层搜索，三种策略可选（默认 progressive）。
 
 ---
 
@@ -218,7 +216,7 @@ restart_service()
 |------|------|---------|
 | `native` | 关闭 FlagGems | `USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false` |
 | `full` | 全量 FlagGems | `USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true` |
-| `custom` | 自定义 | 白名单优先，黑名单兜底 + OOT blacklist |
+| `custom` | 自定义 | 白名单优先，黑名单兜底 |
 
 `--from-state` 模式：从 `operator_config.json` 状态文件读取 whitelist/blacklist，自动生成配置。
 
@@ -231,7 +229,7 @@ restart_service()
 | 子命令 | 输入 | 输出 | 复杂度 |
 |--------|------|------|--------|
 | `crash-log` | 崩溃日志 | 问题算子 + 错误类型 | O(1) |
-| `accuracy-groups` | 算子列表 | 按组生成 blacklist 供精度测试 | ≤5 轮 |
+| `accuracy-groups` | 算子列表 | 按组生成 blacklist 供精度测试 | ≤3 轮 |
 | `profile` | 运行中的服务 | 耗时最多的算子排名 | 1 次推理 |
 
 ---
@@ -242,7 +240,6 @@ restart_service()
 
 | 完成路径 | 触发位置 | disabled_ops 来源 |
 |---------|---------|------------------|
-| OOT 达标 | `_update_oot_result()` oot_verify 分支 | `[]`（flagos 层无需排除） |
 | Progressive 达标 | `_update_progressive_result()` | `cumulative_excluded`（累积排除） |
 | Progressive 完成 | `get_next_action_progressive()` phase=done | `state["disabled_ops"]` |
 | Group 完成 | `get_next_action_group()` 所有组搜索完 | `state["disabled_ops"]` |
@@ -267,7 +264,6 @@ else:
 - **数据格式**：`{"test_case|concurrency": {"output": x, "total": y}, ...}`
 - **计算**：`min(output_ratio, total_ratio for all test_cases × all concurrencies)`
 - **native 基线**：初始化时通过 `--native-benchmark` 从 V1 benchmark JSON 提取同格式的双指标基线，存入 `state["native_throughputs"]`
-- **OOT 判定**：禁用后性能提升 > 2% → 加入 OOT blacklist（仍用粗略的 output 单指标判断）
 
 ---
 
@@ -285,20 +281,13 @@ else:
 └──────────────────────┬──────────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│ 2. OOT 搜索 (plugin_mode=true)                          │
-│    逐个测试 5 个 OOT 算子                                 │
-│    → OOT blacklist                                       │
-│    → 累积验证: 达标? → 完成 / 进入 flagos 搜索             │
-└──────────────────────┬──────────────────────────────────┘
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│ 3. FlagOS 搜索 (progressive/group/linear)                │
+│ 2. FlagOS 搜索 (progressive/group/linear)                │
 │    每轮: next → env_vars → 重启服务 → benchmark → update  │
 │    → 达标即停 / 全部测完                                   │
 └──────────────────────┬──────────────────────────────────┘
                        ▼
 ┌─────────────────────────────────────────────────────────┐
-│ 4. 完成                                                  │
+│ 3. 完成                                                  │
 │    _compute_final_lists()                                │
 │    → flagos_whitelist 或 flagos_blacklist                 │
 │    → operator_config.json (最终状态)                      │
@@ -311,7 +300,7 @@ else:
 ## 12. 关键设计决策
 
 1. **白名单优先**：白名单语义更简单安全，不需要计算 `all_ops - search_ops` 补集
-2. **OOT 与 FlagOS 解耦**：OOT 层独立控制，不受白名单/黑名单影响
-3. **搜索范围缩小**：只搜索 `search_ops`（运行时实际调用的算子），而非全量 `all_ops`
-4. **版本自动探测**：容器内直接 `import flag_gems` 获取版本，无需外部传参
-5. **环境变量内联注入**：`VAR=val cmd` 方式，不污染容器全局环境
+2. **搜索范围缩小**：只搜索 `search_ops`（运行时实际调用的算子，即 gems.txt 范围），而非全量 `all_ops`
+3. **版本自动探测**：容器内直接 `import flag_gems` 获取版本，无需外部传参
+4. **环境变量内联注入**：`VAR=val cmd` 方式，不污染容器全局环境
+5. **OOT 层保留但不自动搜索**：OOT 环境变量仅作为手动调试工具，主工作流中不单独排查 OOT 层

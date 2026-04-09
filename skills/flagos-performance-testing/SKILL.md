@@ -63,6 +63,8 @@ provides:
 - `benchmark_runner.py` — 性能测试（`--strategy quick/fast/comprehensive/fixed` + 可选 `--final-burst`）
 - `performance_compare.py` — 性能对比（`--format markdown` 标准三列表格输出）
 
+**对比规则（钉死）**：性能对比必须逐并发级别进行。每个 `(test_case, concurrency)` 组合独立计算 ratio，不选取"最优并发"做单点对比。达标条件：所有 test_case × 所有 concurrency 的 `min(output_ratio, total_ratio)` 均 ≥ 80%。
+
 ---
 
 ## 强制约束
@@ -270,7 +272,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 
 前置条件：`ops_list.json` 已存在（步骤 5 中已记录）。
 
-调用 `flagos-operator-replacement` 分组二分搜索。优化过程中使用已记录的算子列表作为搜索空间。自动继续（上限 5 轮，超限取当前最优）。
+调用 `flagos-operator-replacement` 算子搜索优化。优化过程中以 `gems.txt`（或 `flaggems_enable_oplist.txt`）中已替换的算子为唯一候选范围。自动继续（上限 3 轮，超限标记 `workflow.performance_ok: false` 进入下一步）。
 
 优化完成后重测：
 
@@ -407,7 +409,7 @@ ISSUE_EOF"
 
 以上条件仅对 `early_stop: true` 的用例生效。`prefill1_decode512` 和 `1k_input_1k_output` 两个用例设置 `early_stop: false`，所有并发全跑，用于跨平台对比基准。quick 模式自动追加 `--final-burst`（max 测试）。
 
-搜索结果中标注**最佳并发数**（吞吐峰值对应的并发级别），不区分是否提前停止。
+搜索结果记录所有已测试并发级别的吞吐量，不区分是否提前停止。对比时逐并发级别计算 ratio，不选取"最优并发"。
 
 ### per-test-case 超时
 

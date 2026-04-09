@@ -1,6 +1,6 @@
 ---
 name: flagos-operator-replacement
-description: 算子替换与优化工具，支持被动排除（评测报错）和主动两阶段搜索优化（OOT→渐进排除），适配 plugin 环境变量控制和非 plugin Layer 1-4 分层降级，算子列表自动发现，全自动搜索编排，反向二分搜索 + 框架验证 + 排序校验
+description: 算子替换与优化工具，支持被动排除（评测报错）和主动渐进排除搜索优化，适配 plugin 环境变量控制和非 plugin Layer 1-4 分层降级，算子列表自动发现，全自动搜索编排，反向二分搜索 + 框架验证 + 排序校验
 version: 6.0.0
 license: internal
 triggers:
@@ -31,10 +31,10 @@ provides:
 独立工具，可在任何阶段按需调用。支持两种模式：
 
 1. **被动排除模式**：根据评测报错信息排除问题算子（沿用 Layer 1-4 分层降级）
-2. **主动优化模式**：两阶段搜索（OOT → 渐进排除），使 FlagOS 性能 ≥ 目标比率
+2. **主动优化模式**：渐进排除搜索，使 FlagOS 性能 ≥ 目标比率
 
 **工具脚本**（已由 setup_workspace.sh 部署到容器）:
-- `operator_optimizer.py` — 算子优化器（OOT 搜索 + 渐进排除搜索、算子列表自动发现、映射表生成）
+- `operator_optimizer.py` — 算子优化器（渐进排除搜索、算子列表自动发现、映射表生成）
 - `operator_search.py` — 搜索编排（完整的 next→配置→重启→benchmark→update 自动循环，支持 plugin/非plugin）
 - `apply_op_config.py` — Plugin 场景：生成算子替换环境变量 JSON（内联前缀方式）
 
@@ -174,6 +174,8 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py \
 │   控制: VLLM_FL_FLAGOS_BLACKLIST        │
 └─────────────────────────────────────────┘
 ```
+
+> **注意**：主工作流中算子优化仅在 flag_gems 层（gems.txt 范围）进行渐进排除搜索，不单独排查 OOT 层。OOT 环境变量仅作为手动调试工具保留。
 
 ## 环境变量控制方式
 
@@ -341,7 +343,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
 - `crashed_ops` 为空但有 evidence → 人工查看日志
 - 无 evidence → 非算子问题，检查环境配置
 
-## 场景 2：精度不达标 → 按组启用测试（≤5 轮定位）
+## 场景 2：精度不达标 → 按组启用测试（≤3 轮定位）
 
 精度评测不通过时，**按功能组逐组启用测试**，快速缩小范围：
 
@@ -361,7 +363,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups 
 4. 问题组内逐个算子排查（最多 N 个算子，N 轮）
 ```
 
-**预期效率**：5 组 + 问题组内 ~8 个 = ~13 轮（vs 盲搜 38 个算子）
+**预期效率**：分组测试 + 问题组内逐个排查，主工作流中上限 3 轮优化（超限标记不合格进入下一步）
 
 ## 场景 3：性能不达标 → Profiling 预扫描（缩小搜索范围）
 
@@ -543,7 +545,7 @@ USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_OOT_BLACKLIST=fused_moe VLLM_
 
 ---
 
-# 模式二：主动两阶段搜索
+# 模式二：主动渐进排除搜索
 
 ## 触发条件
 
@@ -551,47 +553,30 @@ USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_OOT_BLACKLIST=fused_moe VLLM_
 
 ## 搜索策略
 
-**两阶段搜索**（由外到内、由粗到细）：
+**渐进排除**（默认策略 progressive，最多 3 轮）：
 
 ```
-阶段 1: OOT 层逐个排查（≤5 轮，仅 plugin 场景）
-  for each oot_op in [silu_and_mul, rms_norm, rotary_embedding, fused_moe, attention_backend]:
-    1. 设置 VLLM_FL_OOT_BLACKLIST=oot_op（内联环境变量）
-    2. 重启服务 + quick benchmark
-    3. 读取运行时 txt 文件验证算子变化
-    4. if 禁用后性能显著提升 → 加入 oot_blacklist
+基于算子功能的先验知识，将算子按性能影响力分为 high/medium/low 三级。
+逐轮排除，达标即停：
 
-  累积 OOT blacklist 后 benchmark：
-    if 每个用例每个并发级别 ratio >= 80% → 搜索完成
-    else → 进入阶段 2
+Round 1: 排除 high 风险算子（matmul/linear/softmax/rms_norm 等 ~8 个）
+         → benchmark → 达标？→ 结束
+         → 不达标？→ Round 2
 
-阶段 2: 先验预筛 + 渐进排除（默认策略 progressive，最多 3 轮）
-  基于算子功能的先验知识，将算子按性能影响力分为 high/medium/low 三级。
-  逐轮排除，达标即停：
+Round 2: 追加排除 medium 风险算子（embedding/gelu/silu 等 ~10 个）
+         → benchmark → 达标？→ 结束
+         → 不达标？→ Round 3
 
-  Round 1: 排除 high 风险算子（matmul/linear/softmax/rms_norm 等 ~8 个）
-           → benchmark → 达标？→ 结束
-           → 不达标？→ Round 2
+Round 3: 追加排除 low 风险算子（copy_/add/mul 等基础运算）
+         → benchmark → 达标？→ 结束
+         → 不达标？→ 问题不在算子层面，标记失败
 
-  Round 2: 追加排除 medium 风险算子（embedding/gelu/silu 等 ~10 个）
-           → benchmark → 达标？→ 结束
-           → 不达标？→ Round 3
+Plugin 场景：通过 VLLM_FL_FLAGOS_BLACKLIST 环境变量控制
+非 plugin 场景：通过 Layer 1-4 策略控制
+每轮重启后读取 txt 文件验证算子变化
 
-  Round 3: 追加排除 low 风险算子（copy_/add/mul 等基础运算）
-           → benchmark → 达标？→ 结束
-           → 不达标？→ 问题不在算子层面，标记失败
-
-  Plugin 场景：通过 VLLM_FL_FLAGOS_BLACKLIST 环境变量控制
-  非 plugin 场景：通过 Layer 1-4 策略控制
-  每轮重启后读取 txt 文件验证算子变化
-
-  备选策略：--search-strategy group（分组二分搜索）或 linear（线性逐个搜索）
+备选策略：--search-strategy group（分组二分搜索）或 linear（线性逐个搜索）
 ```
-
-**为什么先搜 OOT 层？**
-- OOT 算子只有 5 个，但每个都是高层融合算子，单个对性能影响巨大
-- 阶段 1 最多 5 轮即可完成
-- 如果性能问题在 OOT 层，无需搜索几十个底层算子
 
 **为什么用渐进排除而非分组二分？**
 - 算子列表通常只有 20-30 个，分组二分轮次过多（最坏 ~22 轮）
@@ -652,7 +637,15 @@ with open('/flagos-workspace/results/runtime_ops.json', 'w') as f:
 
 ### 步骤 O3 — 初始化优化器
 
-**Plugin 场景（含 OOT 搜索 + 渐进排除）**：
+```bash
+${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
+  --ops-file /flagos-workspace/results/ops_list.json \
+  --native-throughput <native_perf.output_throughput> \
+  --native-benchmark /flagos-workspace/results/v1_benchmark.json \
+  --target-ratio 0.8
+```
+
+Plugin 场景加 `--plugin-mode`：
 ```bash
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
   --ops-file /flagos-workspace/results/ops_list.json \
@@ -660,15 +653,6 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
   --native-benchmark /flagos-workspace/results/v1_benchmark.json \
   --target-ratio 0.8 \
   --plugin-mode
-```
-
-**非 Plugin 场景（渐进排除）**：
-```bash
-${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
-  --ops-file /flagos-workspace/results/ops_list.json \
-  --native-throughput <native_perf.output_throughput> \
-  --native-benchmark /flagos-workspace/results/v1_benchmark.json \
-  --target-ratio 0.8
 ```
 
 **备选：使用分组二分搜索**：
@@ -692,7 +676,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --perf-config /flagos-workspace/perf/config/perf_config.yaml \
   --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
   --plugin-mode \
-  --max-rounds 25
+  --max-rounds 3
 ```
 
 **非 Plugin 场景**：
@@ -703,7 +687,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
   --capabilities "yaml_config,only_enable" \
   --gems-txt-path ${GEMS_TXT_PATH} \
-  --max-rounds 20
+  --max-rounds 3
 ```
 
 搜索阶段每轮 benchmark **始终使用 quick**（只跑 prefill1_decode512），无需配置。quick 足以判断单算子对性能的影响。
@@ -823,10 +807,9 @@ MetaX C500 + Qwen3-8B：309 个注册算子仅 26 个运行时执行，全量 Fl
 
 ## 搜索限制
 
-- Plugin 两阶段搜索：OOT ≤5 轮 + group ≤15 轮 ≈ 20 轮
-- 非 plugin 渐进排除搜索：预计 3 轮左右完成
+- 渐进排除搜索：最多 3 轮（high → medium → low）
 - 线性搜索：遍历搜索范围内所有算子一轮
-- 贪心搜索 3 轮仍未达标时，询问用户是否继续
+- **主工作流中上限 3 轮**：步骤③精度/步骤④性能的算子优化均限 3 轮，超限标记不合格进入下一步
 - 每轮保存进度，支持断点续搜
 
 ---
@@ -850,16 +833,16 @@ optimization:
   target_ratio: 0.8
   current_ratio: 0.85
   search_mode: "group"
-  search_phase: "done"           # oot | group | done
+  search_phase: "done"           # group | done
   plugin_mode: true
   enabled_ops: [<最终启用列表>]
   disabled_ops: [<最终禁用列表>]
-  oot_blacklist: ["fused_moe"]   # OOT 层禁用列表
+  oot_blacklist: []              # OOT 层禁用列表（仅手动调试时使用）
   flagos_blacklist: []            # torch 底层禁用列表
   operator_config_path: "/flagos-workspace/results/operator_config.json"
   search_log:
-    - op: "fused_moe"
-      decision: "oot_blacklisted"
+    - op: "softmax"
+      decision: "blacklisted"
       throughput: 950.0
       ratio: 0.95
     - op: "memory"

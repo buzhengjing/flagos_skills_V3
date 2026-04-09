@@ -1,8 +1,7 @@
 ---
 name: flagos-log-analyzer
 description: 分析推理服务日志以诊断启动失败、运行时错误、GPU 问题或 FlagGems 集成问题，提供失败恢复指引
-version: 2.0.0
-license: internal
+version: 3.0.0
 triggers:
   - log analysis
   - analyze logs
@@ -16,207 +15,98 @@ provides:
 
 # 日志分析 Skill
 
-此 Skill 分析推理服务生成的日志，以识别部署或运行时问题，并提供恢复指引。
+分析推理服务日志，识别部署或运行时问题，提供恢复指引。
 
-支持 `${CMD_PREFIX}` 双执行模式（宿主机或容器内）。
-
-典型日志包括：
-
-- vLLM 启动日志
-- SGLang 服务器日志
-- CUDA 运行时日志
-- FlagGems 相关日志
-
-目标是自动识别常见的部署问题并提供诊断反馈。
+**工具脚本**（已由 setup_workspace.sh 部署到容器）：
+- `log_analyzer.py` — 日志分析与诊断（analyze / scan）
 
 ---
 
-# 统一工作目录
+# 上下文集成
 
-**重要**：由于使用了统一工作目录挂载，日志文件可直接在宿主机访问，**无需 docker exec**。
+## 从 shared/context.yaml 读取
 
-```
-宿主机日志路径: /data/flagos-workspace/<model_name>/
-                    │
-                    ├── output/           # 服务启动日志
-                    │   └── <服务名>/
-                    │       └── serve/
-                    │           └── *.log
-                    │
-                    └── eval/             # 评测日志
-                        └── eval_*.log
+```yaml
+container:
+  name: <来自 container-preparation>
+model:
+  name: <来自 container-preparation>
 ```
 
-**宿主机直接访问日志**：
-```bash
-# 查找所有日志文件
-find /data/flagos-workspace/<model_name> -name "*.log"
+## 写入 shared/context.yaml
 
-# 实时查看服务日志
-tail -f /data/flagos-workspace/<model_name>/output/**/*.log
+```yaml
+diagnosis:
+  status: "<ok | warning | error>"
+  service_status: "<running | crashed | oom_killed | ...>"
+  errors: [<错误分类列表>]
+  suggestions: [<建议列表>]
 ```
+
+---
+
+# 错误分类
+
+| category | 严重性 | 典型关键词 | 建议 |
+|----------|--------|-----------|------|
+| `cuda_error` | critical | `CUDA error`, `CUDAError` | 检查算子/驱动兼容性 |
+| `oom` | critical | `out of memory`, `OOM` | 减小 TP / max-model-len |
+| `triton_compile` | critical | `triton compile fail` | FlagTree/Triton 版本问题 |
+| `operator_error` | high | `flag_gems error`, `operator not supported` | 禁用问题算子 |
+| `model_load` | high | `model not found`, `tokenizer error` | 检查模型路径 |
+| `port_conflict` | medium | `address already in use` | 更换端口或杀占用进程 |
+| `dependency` | medium | `ModuleNotFoundError` | pip install 缺失包 |
+| `timeout` | low | `timeout`, `connection refused` | 等待或检查网络 |
+| `warning` | info | `WARNING`, `DeprecationWarning` | 记录但不阻塞 |
 
 ---
 
 # 工作流程
 
-按顺序执行步骤。**所有日志分析操作均在宿主机执行，无需进入容器。**
-
----
-
-## 步骤 1 — 定位日志文件（宿主机直接访问）
-
-在宿主机查找日志文件：
+## 步骤 1 — 分析单个日志文件
 
 ```bash
-# 查找工作目录下所有日志
-find /data/flagos-workspace/<model_name> -name "*.log" -type f
-
-# 查看日志文件详情
-ls -la /data/flagos-workspace/<model_name>/output/
+docker exec $CONTAINER python3 /flagos-workspace/scripts/log_analyzer.py analyze \
+    --log-path /flagos-workspace/logs/startup_flagos.log \
+    --json
 ```
 
-常见日志位置：
+输出包含：错误分类列表、服务状态推断、FlagGems 检测、启动序列完成度、诊断建议。
 
-| 类型 | 宿主机路径 |
-|------|-----------|
-| 服务日志 | `/data/flagos-workspace/<model>/output/<服务名>/serve/*.log` |
-| 评测日志 | `/data/flagos-workspace/<model>/eval/eval_*.log` |
-
-结果反馈必须包括：
-
-- 检测到的日志文件路径
-- 日志大小
-- 最后修改时间
-
----
-
-## 步骤 2 — 检查最近的日志输出
-
-在宿主机显示最新的日志行：
+## 步骤 2 — 扫描整个日志目录
 
 ```bash
-# 宿主机直接查看（无需 docker exec）
-tail -n 100 /data/flagos-workspace/<model_name>/output/**/*.log
+docker exec $CONTAINER python3 /flagos-workspace/scripts/log_analyzer.py scan \
+    --log-dir /flagos-workspace/logs/ \
+    --json
 ```
 
-关注：
+扫描所有 `*.log` 文件，按时间排序，汇总错误和建议。
 
-- 启动序列
-- 模型加载
-- GPU 初始化
-- 服务器端口绑定
+## 宿主机直接访问（可选）
 
-结果反馈：
-
-- 服务启动状态
-- 最后的日志消息
-
----
-
-## 步骤 3 — 检测常见启动错误
-
-在宿主机搜索常见的失败关键词：
+由于日志目录已挂载到宿主机，也可直接在宿主机执行：
 
 ```bash
-# 宿主机直接搜索（无需 docker exec）
-LOG_DIR="/data/flagos-workspace/<model_name>/output"
+python3 skills/flagos-log-analyzer/tools/log_analyzer.py analyze \
+    --log-path /data/flagos-workspace/<model>/logs/startup_flagos.log \
+    --json
 
-grep -ri "error" $LOG_DIR
-grep -ri "cuda" $LOG_DIR
-grep -ri "oom" $LOG_DIR
-grep -ri "traceback" $LOG_DIR
+python3 skills/flagos-log-analyzer/tools/log_analyzer.py scan \
+    --log-dir /data/flagos-workspace/<model>/logs/ \
+    --json
 ```
-
-典型失败类型：
-
-- GPU 内存问题
-- CUDA 驱动不匹配
-- 缺少模型文件
-- Tokenizer 错误
-- 依赖冲突
-
-结果反馈：
-
-- 检测到的错误类别
-- 相关日志行
-
----
-
-## 步骤 4 — 检测 FlagGems 执行
-
-在宿主机搜索 FlagGems 执行消息：
-
-```bash
-# 宿主机直接搜索（无需 docker exec）
-grep -ri "gems\|flag_gems" /data/flagos-workspace/<model_name>/output/
-```
-
-典型模式：
-
-```
-flag_gems.ops loaded
-GEMS MUL
-GEMS RECIPROCAL
-```
-
-这些日志表明 FlagGems 加速算子正在执行。
-
-结果反馈：
-
-- 是否检测到 FlagGems
-- 相关日志条目
-
----
-
-## 步骤 5 — 检测 GPU 或内存错误
-
-在宿主机搜索 GPU 相关问题：
-
-```bash
-# 宿主机直接搜索（无需 docker exec）
-grep -riE "CUDA out of memory|device not found|driver mismatch|OOM" /data/flagos-workspace/<model_name>/output/
-```
-
-结果反馈：
-
-- GPU 错误状态
-- 可能的原因
-
----
-
-## 步骤 6 — 提供诊断
-
-总结发现。
-
-可能的结果：
-
-服务启动成功
-服务运行但 API 无法访问
-模型加载失败
-GPU 内存不足
-FlagGems 未启用
-
-根据检测到的问题提供建议。
-
-示例：
-
-减少张量并行大小
-检查模型路径
-验证 CUDA 兼容性
-使用正确的参数重启服务
 
 ---
 
 # 完成条件
 
-日志分析完成的标志：
-
-- 日志文件已检查
-- 错误已分类
-- 诊断已生成
-- 可能的解决方案已建议
-- 如在流程中调用，`timing.steps` 中对应步骤的耗时已更新
+- 日志文件已扫描分析
+- 错误已分类（category + severity）
+- 服务状态已推断（running / crashed / oom_killed / ...）
+- FlagGems 加载情况已检测
+- 启动序列完成度已识别
+- 诊断摘要和建议已生成
 
 ---
 

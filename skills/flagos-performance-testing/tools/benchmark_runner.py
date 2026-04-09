@@ -299,9 +299,9 @@ def run_concurrency_search(base_cmd: List[str], levels: List[int],
                            dry_run: bool = False,
                            early_stop: bool = True) -> Dict[str, Any]:
     """
-    自动搜索最优并发级别。
+    按并发级别逐级测试，记录每级结果。
 
-    增强停止条件（early_stop=True 时生效）：
+    early_stop=True 时的停止条件：
     1. 连续 2 级增长 < 3% → 已饱和，停止搜索
     2. 吞吐下降 > 5% → 过拐点，停止搜索
     3. 请求失败数 > 0 → 过载，停止搜索
@@ -356,7 +356,7 @@ def run_concurrency_search(base_cmd: List[str], levels: List[int],
                 # 条件 2：吞吐下降超过 5%
                 if current_throughput < prev_throughput * (1 - DECLINE_THRESHOLD):
                     print(f"    Growth: {growth*100:.1f}% — throughput declined >{DECLINE_THRESHOLD*100}%")
-                    print(f"    Best concurrency: {best_concurrency}, stopping search")
+                    print(f"    Peak at concurrency={best_concurrency}, stopping search")
                     stopped = True
                     break
 
@@ -365,7 +365,7 @@ def run_concurrency_search(base_cmd: List[str], levels: List[int],
                     consecutive_low_growth += 1
                     print(f"    Growth: {growth*100:.1f}% — low growth {consecutive_low_growth}/{CONSECUTIVE_LOW}")
                     if consecutive_low_growth >= CONSECUTIVE_LOW:
-                        print(f"    Best concurrency: {best_concurrency}, stopping search")
+                        print(f"    Peak at concurrency={best_concurrency}, stopping search")
                         stopped = True
                         break
                 else:
@@ -515,7 +515,7 @@ def save_results(results: Dict[str, Any], config: Dict[str, Any],
 # =============================================================================
 
 def print_summary(results: Dict[str, Any], mode: str = "default"):
-    """打印测试结果摘要"""
+    """打印测试结果摘要（逐并发级别）"""
     print(f"\n{'='*60}")
     print(f"性能测试摘要 (mode: {mode})")
     print(f"{'='*60}")
@@ -526,35 +526,26 @@ def print_summary(results: Dict[str, Any], mode: str = "default"):
         if not isinstance(tc_results, dict):
             continue
 
-        # 找到最优并发级别的结果
-        best_throughput = 0
-        best_key = ""
+        # 逐并发级别打印结果
+        conc_keys = sorted(
+            [k for k in tc_results if not k.startswith("_") and isinstance(tc_results[k], dict) and "error" not in tc_results[k]],
+            key=lambda x: int(x) if x.isdigit() else 0
+        )
 
-        for key, metrics in tc_results.items():
-            if key.startswith("_"):
-                continue
-            if not isinstance(metrics, dict) or "error" in metrics:
-                continue
-            throughput = metrics.get('Output token throughput (tok/s)', 0) or 0
-            if throughput > best_throughput:
-                best_throughput = throughput
-                best_key = key
-
-        if best_key:
-            metrics = tc_results[best_key]
-            print(f"  Best: concurrency={best_key}")
-            print(f"  Output throughput: {metrics.get('Output token throughput (tok/s)', 'N/A')} tok/s")
-            print(f"  Total throughput:  {metrics.get('Total token throughput (tok/s)', 'N/A')} tok/s")
-            print(f"  Mean TTFT:         {metrics.get('Mean TTFT (ms)', 'N/A')} ms")
-            print(f"  Mean TPOT:         {metrics.get('Mean TPOT (ms)', 'N/A')} ms")
+        for key in conc_keys:
+            metrics = tc_results[key]
+            output_tp = metrics.get('Output token throughput (tok/s)', 'N/A')
+            total_tp = metrics.get('Total token throughput (tok/s)', 'N/A')
+            ttft = metrics.get('Mean TTFT (ms)', 'N/A')
+            tpot = metrics.get('Mean TPOT (ms)', 'N/A')
+            print(f"  concurrency={key}: output={output_tp} tok/s, total={total_tp} tok/s, TTFT={ttft}ms, TPOT={tpot}ms")
 
         # 显示搜索元信息
         meta = tc_results.get("_search_meta")
         if meta:
-            print(f"  Best concurrency:  {meta.get('best_concurrency', 'N/A')}")
             tested = meta.get('tested_levels', [])
             if not meta.get('all_levels_tested', True):
-                print(f"  Tested levels:     {tested}")
+                print(f"  Tested levels:     {tested} (early-stopped)")
 
 
 

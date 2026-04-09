@@ -52,31 +52,6 @@ def get_results_data(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
-def extract_best_throughput(tc_results: Dict[str, Any]) -> Tuple[float, float, str]:
-    """
-    从测试用例结果中提取最优吞吐量（保留供摘要使用）。
-
-    Returns:
-        (output_throughput, total_throughput, best_concurrency_key)
-    """
-    best_output = 0.0
-    best_total = 0.0
-    best_key = ""
-
-    for key, metrics in tc_results.items():
-        if key.startswith("_"):
-            continue
-        if not isinstance(metrics, dict) or "error" in metrics:
-            continue
-
-        output_tp = metrics.get('Output token throughput (tok/s)', 0) or 0
-        if output_tp > best_output:
-            best_output = output_tp
-            best_total = metrics.get('Total token throughput (tok/s)', 0) or 0
-            best_key = key
-
-    return best_output, best_total, best_key
-
 
 def extract_all_concurrency_throughputs(tc_results: Dict[str, Any]) -> Dict[str, Tuple[float, float]]:
     """
@@ -135,22 +110,12 @@ def compare_results(benchmarks: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any
         # 按并发数排序
         sorted_conc_keys = sorted(all_conc_keys, key=concurrency_sort_key)
 
-        # 找 native 最佳并发级别
-        native_conc = bm_conc_data.get("native", {})
-        native_best_key = ""
-        native_best_output = 0.0
-        for ck, (out_tp, _) in native_conc.items():
-            if out_tp > native_best_output:
-                native_best_output = out_tp
-                native_best_key = ck
-
         # 生成每个并发级别的行
         for conc_key in sorted_conc_keys:
             row = {
                 "test_case": tc,
                 "concurrency": conc_key,
                 "concurrency_num": concurrency_sort_key(conc_key),
-                "is_best": conc_key == native_best_key,
             }
 
             native_output_tp = 0.0
@@ -261,7 +226,6 @@ def print_markdown_table(rows: List[Dict[str, Any]], benchmark_names: List[str])
     for row in rows:
         tc = shorten_test_case(row["test_case"])
         conc_num = row["concurrency_num"]
-        is_best = row.get("is_best", False)
 
         # 同一用例连续行只在第一行显示名称
         if tc == prev_tc:
@@ -286,10 +250,7 @@ def print_markdown_table(rows: List[Dict[str, Any]], benchmark_names: List[str])
                 else:
                     cells.append("")
 
-        # best 标记
         line = "| " + " | ".join(cells) + " |"
-        if is_best:
-            line += "  \u2190 best"
         print(line)
 
     # 打印汇总
@@ -332,7 +293,6 @@ def print_comparison(rows: List[Dict[str, Any]], benchmark_names: List[str]):
     for row in rows:
         tc = row['test_case']
         conc_num = row['concurrency_num']
-        is_best = row.get("is_best", False)
 
         if tc == prev_tc:
             tc_display = ""
@@ -355,8 +315,6 @@ def print_comparison(rows: List[Dict[str, Any]], benchmark_names: List[str]):
                 else:
                     line += f" {'':>15}"
 
-        if is_best:
-            line += "  <- best"
         print(line)
 
     # 总体判断
@@ -384,7 +342,7 @@ def save_csv(rows: List[Dict[str, Any]], output_path: str, benchmark_names: List
         return
 
     # 构建列头
-    headers = ["test_case", "concurrency", "concurrency_num", "is_best"]
+    headers = ["test_case", "concurrency", "concurrency_num"]
     for name in benchmark_names:
         headers.append(f"{name}_output_throughput")
         headers.append(f"{name}_total_throughput")

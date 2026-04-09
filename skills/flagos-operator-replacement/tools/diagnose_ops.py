@@ -6,7 +6,7 @@ diagnose_ops.py — 算子问题快速定位（三场景诊断）
 
 子命令:
     crash-log        从崩溃日志提取问题算子（O(1) 定位）
-    accuracy-groups  按功能组生成 blacklist，供逐组精度测试（≤5 轮定位）
+    accuracy-groups  按功能组生成 blacklist，供逐组精度测试（≤3 轮定位）
     profile          性能热点预扫描，定位耗时最多的算子
 
 Usage:
