@@ -246,10 +246,12 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/benchmark
   --mode flagos"
 ```
 
-## 步骤 7：性能对比
+## 步骤 7：性能对比（强制执行）
+
+**强制规则**：V1 和 V2 性能测试完成后，必须调用 `performance_compare.py` 生成全量并发级别对比。禁止跳过此步骤或手动计算单一并发级别的比值。
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/performance_compare.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/performance_compare.py \
   --native results/native_performance.json \
   --flagos-full results/flagos_performance.json \
   --output results/performance_compare.csv \
@@ -257,8 +259,12 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/performan
   --format markdown"
 ```
 
+**输出解读**：
+- 工具会输出包含所有并发级别的 markdown 表格，必须完整保留到报告中
 - 返回码 `0`：每个用例的每个并发级别均 ≥ 80%，V2 已达标，不存在 V3，跳到步骤 9
 - 返回码 `1`：有不达标的用例或并发级别，触发步骤 8
+
+**禁止行为**：不得自行从 JSON 中只提取某一个并发级别的数据作为性能对比结果，必须使用 `performance_compare.py` 的全量输出。
 
 ## 步骤 8：[自动] 触发算子优化
 
@@ -292,6 +298,44 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/performan
 当 V2 已达标（不存在 V3）时，只传 `--flagos-full`，不传 `--flagos-optimized`。
 
 ## 步骤 10：写入 context.yaml
+
+**强制规则**：必须将全量并发级别的对比数据写入 context.yaml，不得只取单一并发级别。
+
+写入字段：
+
+```yaml
+perf:
+  strategy: quick          # 使用的测试策略
+  test_case: 4k_input_1k_output
+  per_concurrency:         # 全量并发级别对比（必须包含所有级别）
+    - concurrency: "1"
+      v1_total_tps: 1911.2
+      v2_total_tps: 1270.2
+      ratio_pct: 66.5
+      pass: false
+    - concurrency: "2"
+      v1_total_tps: 3735.6
+      v2_total_tps: 2370.7
+      ratio_pct: 63.5
+      pass: false
+    # ... 所有并发级别
+  summary:
+    total_levels: 10       # 总并发级别数
+    pass_levels: 0         # 达标级别数
+    fail_levels: 10        # 未达标级别数
+    best_ratio_pct: 78.5   # 最佳比值
+    worst_ratio_pct: 25.0  # 最差比值
+    avg_ratio_pct: 56.8    # 平均比值
+    overall_pass: false     # 是否全部达标
+  # 保留最佳并发的摘要（向后兼容）
+  v1_output_tps: 6598.2
+  v1_total_tps: 32991.0
+  v2_output_tps: 5178.5
+  v2_total_tps: 25892.5
+  ratio_pct: 78.5          # 最佳并发的比值
+```
+
+**禁止行为**：不得只写入单一并发级别的数据到 context.yaml，必须包含 `per_concurrency` 全量列表和 `summary` 统计。
 
 ---
 
