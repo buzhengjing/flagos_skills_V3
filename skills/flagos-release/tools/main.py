@@ -8,7 +8,7 @@ import time
 import argparse
 from typing import List, Dict, Any
 
-from src.config import load_config, validate_config, auto_fill_config, PipelineConfig
+from src.config import load_config_from_context, validate_config, auto_fill_config, PipelineConfig
 from src.stages import PublishStage
 from src.utils import print_banner, print_config_summary, print_stage_summary
 
@@ -102,41 +102,32 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 使用配置文件运行发布流水线
-  python main.py --config config/release_config.yaml
+  # 从 context.yaml 自动生成配置并执行发布
+  python main.py --from-context /flagos-workspace/shared/context.yaml
 
-  # 从容器开始
-  python main.py --config config/release_config.yaml --input-type container --container-name mycontainer
+  # 覆盖容器名
+  python main.py --from-context /flagos-workspace/shared/context.yaml --container-name mycontainer
 
   # 只生成 README
-  python main.py --config config/release_config.yaml --only-readme
+  python main.py --from-context /flagos-workspace/shared/context.yaml --only-readme
 
   # 干运行（不实际执行）
-  python main.py --config config/release_config.yaml --dry-run
+  python main.py --from-context /flagos-workspace/shared/context.yaml --dry-run
 """
     )
 
     parser.add_argument(
-        "-c", "--config",
+        "--from-context",
         required=True,
-        help="配置文件路径 (YAML 格式)"
+        help="FlagOS context.yaml 路径，从中自动生成发布配置"
     )
     parser.add_argument(
         "-s", "--stages",
         help="要执行的阶段，逗号分隔 (publish)"
     )
     parser.add_argument(
-        "--input-type",
-        choices=["image", "container"],
-        help="输入类型: image (从镜像开始) 或 container (从已有容器开始)"
-    )
-    parser.add_argument(
         "--container-name",
-        help="容器名称 (当 input-type 为 container 时使用)"
-    )
-    parser.add_argument(
-        "--image-path",
-        help="镜像路径 (当 input-type 为 image 时使用)"
+        help="覆盖 context.yaml 中的容器名称"
     )
     parser.add_argument(
         "--only-readme",
@@ -158,26 +149,20 @@ def main():
 
     # 加载配置
     try:
-        config = load_config(args.config)
+        config = load_config_from_context(args.from_context)
     except FileNotFoundError:
-        print(f"错误: 配置文件不存在: {args.config}")
+        print(f"错误: 文件不存在: {args.from_context}")
         sys.exit(1)
     except Exception as e:
-        print(f"错误: 加载配置文件失败: {e}")
+        print(f"错误: 加载配置失败: {e}")
         sys.exit(1)
 
     # 命令行参数覆盖配置
     if args.stages:
         config.stages_to_run = [s.strip() for s in args.stages.split(",")]
 
-    if args.input_type:
-        config.input_type = args.input_type
-
     if args.container_name:
         config.container_name = args.container_name
-
-    if args.image_path:
-        config.image_path = args.image_path
 
     if args.only_readme:
         config.stages_to_run = ["publish"]

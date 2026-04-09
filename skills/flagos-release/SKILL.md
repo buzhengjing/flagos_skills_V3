@@ -33,17 +33,14 @@ tools/
 ├── main.py                      # 流水线主入口
 ├── requirements.txt             # Python 依赖
 ├── src/
-│   ├── config.py                # 配置管理（YAML 加载 + 自动填充）
+│   ├── config.py                # 配置管理（从 context.yaml 加载 + 自动填充）
 │   ├── chip_detector.py         # 芯片检测（9 厂商 SMI 解析 + 镜像 tag 生成）
 │   ├── utils.py                 # 工具函数
 │   └── stages/
 │       ├── base.py              # Stage 基类（命令执行、结果记录）
 │       └── publish.py           # 发布阶段（commit→tag→push→README→上传）
-├── templates/
-│   └── README_TEMPLATE.md       # README 模板
-└── config/
-    ├── release_config.yaml              # 配置模板（从镜像开始）
-    └── release_config_container.yaml    # 配置模板（从容器开始）
+└── templates/
+    └── README_TEMPLATE.md       # README 模板
 ```
 
 **支持芯片厂商**（自动检测）：
@@ -98,46 +95,31 @@ release:
 
 # 工作流程
 
-## 准备配置文件
-
-从模板创建配置（二选一）：
-
-```bash
-# 从镜像开始
-cp skills/flagos-release/tools/config/release_config.yaml my_release.yaml
-
-# 从已有容器开始
-cp skills/flagos-release/tools/config/release_config_container.yaml my_release.yaml
-```
-
-**用户必填字段**：
-- `model_info.source_of_model_weights` — 模型来源（如 `Qwen/Qwen3-8B`）
-- `container_name` 或 `image_path` — 容器名 / 镜像路径
-
-**自动推断字段**（无需手动填写）：
-- `output_name` — `{Model}-{vendor}`（nvidia 不加后缀）
-- `flagrelease_name` — `{output_name}-FlagOS`
-- `image_target_tag` — 完整镜像 tag（自动检测环境生成）
-- `modelscope_model_id` / `huggingface_repo_id` — `FlagRelease/{flagrelease_name}`
-- 芯片信息、驱动版本、SDK 版本、Python/PyTorch 版本等
-
 ## 执行流水线
+
+从工作流共享状态 `context.yaml` 读取所有信息，无需手写配置文件：
 
 ```bash
 cd skills/flagos-release/tools
 
-# 完整发布流水线
-python main.py --config my_release.yaml
-
-# 从容器开始
-python main.py --config my_release.yaml --input-type container --container-name mycontainer
-
-# 只生成 README
-python main.py --config my_release.yaml --only-readme
+# 执行发布
+python main.py --from-context /flagos-workspace/shared/context.yaml
 
 # 干运行（只验证配置，不实际执行）
-python main.py --config my_release.yaml --dry-run
+python main.py --from-context /flagos-workspace/shared/context.yaml --dry-run
+
+# 只生成 README
+python main.py --from-context /flagos-workspace/shared/context.yaml --only-readme
 ```
+
+`--from-context` 自动映射的字段：
+- `container.name` → 容器名
+- `model.name` → 模型来源
+- `model.container_path` → 权重目录 + 服务启动命令
+- `service.port/max_model_len` + `runtime.tp_size` → 服务启动命令
+- `gpu.vendor` → 芯片厂商（自动检测填充）
+- `eval.v1_score/v2_score` → 评测结果（填入 README）
+- `image.tag` → 已有镜像地址（有则跳过 commit/tag/push）
 
 ## 阶段详情
 

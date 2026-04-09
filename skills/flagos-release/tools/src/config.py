@@ -1,10 +1,10 @@
 """
 配置管理模块
-支持从 YAML 文件加载配置，并提供配置验证
+从 context.yaml 加载配置，并提供配置验证和自动填充
 """
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 import yaml
 
 from .chip_detector import ChipDetector, ChipVendor, VENDOR_NAMES, sanitize_docker_tag
@@ -90,9 +90,8 @@ class ModelInfo:
 @dataclass
 class PipelineConfig:
     """完整的流水线配置"""
-    input_type: str = "image"  # "image" 或 "container"
+    input_type: str = "container"
     container_name: str = ""
-    image_path: str = ""
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -103,83 +102,83 @@ class PipelineConfig:
     stages_to_run: List[str] = field(default_factory=lambda: ["publish"])
 
 
-def load_config(config_path: str) -> PipelineConfig:
-    """从 YAML 文件加载配置"""
-    with open(config_path, 'r', encoding='utf-8') as f:
-        raw_config = yaml.safe_load(f)
+def load_config_from_context(context_path: str) -> PipelineConfig:
+    """从 FlagOS context.yaml 自动构建发布配置，无需手写 YAML 配置文件。
+
+    context.yaml 是 FlagOS 工作流各步骤的共享状态，包含容器名、模型信息、
+    评测结果、GPU 信息等。本函数将这些字段映射为 PipelineConfig。
+    """
+    with open(context_path, 'r', encoding='utf-8') as f:
+        ctx = yaml.safe_load(f)
 
     config = PipelineConfig()
+    config.input_type = 'container'
+    config.container_name = ctx.get('container', {}).get('name', '')
+    config.stages_to_run = ['publish']
 
-    # 基本配置
-    config.input_type = raw_config.get('input_type', 'image')
-    config.container_name = raw_config.get('container_name', '')
-    config.image_path = raw_config.get('image_path', '')
-    config.stages_to_run = raw_config.get('stages_to_run', ['publish'])
+    # ---- model_info ----
+    model = ctx.get('model', {})
+    config.model_info.source_of_model_weights = model.get('name', '')
 
-    # 芯片配置
-    if 'chip' in raw_config:
-        c = raw_config['chip']
-        config.chip = ChipConfig(
-            vendor=c.get('vendor', 'auto'),
-            auto_generate_tag=c.get('auto_generate_tag', True),
-            harbor_registry=c.get('harbor_registry', 'harbor.baai.ac.cn/flagrelease-public'),
-            tree=c.get('tree', 'none'),
-            gems_version=c.get('gems_version', ''),
-            scale_version=c.get('scale_version', ''),
-            cx=c.get('cx', 'none'),
-            date_tag=c.get('date_tag', ''),
-            driver_version=c.get('driver_version', ''),
-            sdk_version=c.get('sdk_version', ''),
-            torch_version=c.get('torch_version', ''),
-            python_version=c.get('python_version', ''),
-            gpu_model=c.get('gpu_model', '')
-        )
+    # evaluation_results
+    ev = ctx.get('eval', {})
+    if ev.get('v1_score') is not None and ev.get('v2_score') is not None:
+        method = ev.get('eval_method', 'GPQA_Diamond')
+        config.model_info.evaluation_results = [
+            {'metric': method, 'origin': ev['v1_score'], 'flagos': ev['v2_score']}
+        ]
 
-    # 发布阶段配置
-    if 'publish' in raw_config:
-        p = raw_config['publish']
-        config.publish = PublishConfig(
-            enabled=p.get('enabled', True),
-            tag_image=p.get('tag_image', True),
-            push_harbor=p.get('push_harbor', True),
-            generate_readme=p.get('generate_readme', True),
-            readme_output_path=p.get('readme_output_path', './README.md'),
-            publish_modelscope=p.get('publish_modelscope', True),
-            modelscope_model_id=p.get('modelscope_model_id', ''),
-            modelscope_token=p.get('modelscope_token', os.environ.get('MODELSCOPE_TOKEN', '')),
-            publish_huggingface=p.get('publish_huggingface', True),
-            huggingface_repo_id=p.get('huggingface_repo_id', ''),
-            huggingface_token=p.get('huggingface_token', os.environ.get('HF_TOKEN', '')),
-            upload_weights=p.get('upload_weights', True),
-            weights_dir=p.get('weights_dir', ''),
-            results_dir=p.get('results_dir', ''),
-            private=p.get('private', True),
-            existing_harbor_image=p.get('existing_harbor_image', ''),
-            image_source=p.get('image_source', ''),
-            image_target_tag=p.get('image_target_tag', ''),
-            harbor_path=p.get('harbor_path', ''),
-            readme_script_path=p.get('readme_script_path', ''),
-            upload_files=p.get('upload_files', [])
-        )
+    # serve_start_cmd
+    svc = ctx.get('service', {})
+    runtime = ctx.get('runtime', {})
+    port = svc.get('port', 8000)
+    tp = runtime.get('tp_size', 1)
+    model_path = model.get('container_path', '')
+    max_model_len = svc.get('max_model_len', '')
+    cmd_parts = [f"vllm serve {model_path}",
+                 f"--host 0.0.0.0 --port {port}",
+                 f"--tensor-parallel-size {tp}"]
+    if max_model_len:
+        cmd_parts.append(f"--max-model-len {max_model_len}")
+    config.model_info.serve_start_cmd = " \\\n".join(cmd_parts)
 
-    # 模型信息配置
-    if 'model_info' in raw_config:
-        m = raw_config['model_info']
-        config.model_info = ModelInfo(
-            source_of_model_weights=m.get('source_of_model_weights', ''),
-            new_model_introduction=m.get('new_model_introduction', ''),
-            evaluation_results=m.get('evaluation_results', []),
-            output_name=m.get('output_name', ''),
-            vendor=m.get('vendor', ''),
-            docker_version=m.get('docker_version', ''),
-            ubuntu_version=m.get('ubuntu_version', ''),
-            flagrelease_name=m.get('flagrelease_name', ''),
-            flagrelease_name_pre=m.get('flagrelease_name_pre', ''),
-            image_harbor_path=m.get('image_harbor_path', ''),
-            container_run_cmd=m.get('container_run_cmd', ''),
-            serve_start_cmd=m.get('serve_start_cmd', ''),
-            serve_infer_cmd=m.get('serve_infer_cmd', ''),
-        )
+    # container_run_cmd (通用模板，IMAGE 占位符由 auto_fill_config 替换)
+    config.model_info.container_run_cmd = (
+        "docker run --init --detach --net=host --uts=host --ipc=host "
+        "--security-opt=seccomp=unconfined --privileged=true "
+        "--ulimit stack=67108864 --ulimit memlock=-1 "
+        "--ulimit nofile=1048576:1048576 --shm-size=32G "
+        "-v /data:/data --gpus all --name flagos {{IMAGE}} sleep infinity\n"
+        "docker exec -it flagos /bin/bash"
+    )
+
+    # ---- chip ----
+    gpu = ctx.get('gpu', {})
+    config.chip.vendor = gpu.get('vendor', 'auto')
+
+    # ---- publish ----
+    config.publish.tag_image = True
+    config.publish.push_harbor = True
+    config.publish.private = True
+    config.publish.upload_weights = True
+    config.publish.weights_dir = model.get('container_path', '')
+    config.publish.publish_modelscope = False
+    config.publish.publish_huggingface = False
+
+    # 如果 context 中已有 image.tag，作为 existing_harbor_image（跳过 commit/tag/push）
+    image = ctx.get('image', {})
+    existing_tag = image.get('tag', '')
+    if existing_tag:
+        config.publish.existing_harbor_image = existing_tag
+
+    # token 从环境变量读取
+    config.publish.modelscope_token = os.environ.get('MODELSCOPE_TOKEN', '')
+    config.publish.huggingface_token = os.environ.get('HF_TOKEN', '')
+
+    # results_dir 用于 README 自动读取评测结果
+    workspace = ctx.get('workspace', {})
+    container_workspace = workspace.get('container_path', '/flagos-workspace')
+    config.publish.results_dir = f"{container_workspace}/results"
 
     return config
 
@@ -188,14 +187,8 @@ def validate_config(config: PipelineConfig) -> List[str]:
     """验证配置是否完整"""
     errors = []
 
-    if config.input_type not in ['image', 'container']:
-        errors.append(f"Invalid input_type: {config.input_type}. Must be 'image' or 'container'")
-
-    if config.input_type == 'image' and not config.image_path:
-        errors.append("image_path is required when input_type is 'image'")
-
-    if config.input_type == 'container' and not config.container_name:
-        errors.append("container_name is required when input_type is 'container'")
+    if not config.container_name:
+        errors.append("container_name is required (from context.yaml container.name)")
 
     if 'publish' in config.stages_to_run and config.publish.enabled:
         if not config.model_info.source_of_model_weights:
@@ -227,16 +220,13 @@ def _clean_model_name_for_tag(name: str) -> str:
     return clean
 
 
-def auto_fill_config(config: PipelineConfig, container_name: Optional[str] = None) -> PipelineConfig:
+def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
     """根据环境检测自动填充配置中的空字段"""
     import datetime
     import re
 
     # 确定容器名称
-    if config.input_type == 'container':
-        container = config.container_name
-    else:
-        container = container_name or config.container_name
+    container = config.container_name
 
     # 创建检测器
     detector = ChipDetector(container_name=container if container else None)
@@ -339,10 +329,6 @@ def auto_fill_config(config: PipelineConfig, container_name: Optional[str] = Non
 
     if not config.publish.harbor_path and config.publish.image_target_tag:
         config.publish.harbor_path = config.publish.image_target_tag
-
-    if not config.publish.image_source:
-        if config.image_path:
-            config.publish.image_source = config.image_path
 
     if not config.model_info.image_harbor_path and config.publish.image_target_tag:
         config.model_info.image_harbor_path = config.publish.image_target_tag

@@ -28,13 +28,7 @@ def print_banner():
 def print_config_summary(config) -> None:
     """打印配置摘要"""
     print("\n配置摘要:")
-    print(f"  输入类型: {config.input_type}")
-
-    if config.input_type == 'image':
-        print(f"  镜像路径: {config.image_path}")
-    else:
-        print(f"  容器名称: {config.container_name}")
-
+    print(f"  容器名称: {config.container_name}")
     print(f"  模型名称: {config.model_info.output_name}")
     print(f"  供应商: {config.model_info.vendor}")
     print(f"  执行阶段: {', '.join(config.stages_to_run)}")

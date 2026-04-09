@@ -147,7 +147,6 @@ class PublishStage(BaseStage):
 
         if success:
             self.config.publish.image_source = commit_image_name
-            self.config.image_path = commit_image_name
             print(f"  + 容器已 commit 为镜像: {commit_image_name}")
 
         return success
@@ -157,7 +156,7 @@ class PublishStage(BaseStage):
         publish_config = self.config.publish
         chip_config = self.config.chip
 
-        source_image = publish_config.image_source or self.config.image_path
+        source_image = publish_config.image_source
         if not source_image:
             print("  x 源镜像未配置")
             return False
