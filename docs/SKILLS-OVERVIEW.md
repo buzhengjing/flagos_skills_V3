@@ -51,19 +51,15 @@
 ### 新模型迁移发布
 
 ```
-① container-preparation       容器准备（镜像/容器 + 本地权重检查 + 自动下载）
+① 下载模型+容器准备   镜像/容器就绪 + 权重检查 + 环境检测 + 工具部署
         ↓
-② pre-service-inspection      环境检测（判定 env_type + flaggems 控制方式）
+② 启服务             V1(native) + V2(flagos) 启动验证 → 异常自动 issue
         ↓
-③ service-startup             启动服务（验证初始环境可用）
+③ 精度评测           V1/V2 GPQA Diamond 对比 → 异常自动 issue + ≤3 轮算子优化
         ↓
-④ eval-comprehensive          快速精度评测（V1 基线 → V2 精度 → 算子调优直到精度达标）
+④ 性能评测           V1/V2 4k1k benchmark 对比 → 异常自动 issue + ≤3 轮算子优化
         ↓
-⑤ performance-testing         快速性能评测（V1 基线 → V2 性能 → 算子调优直到性能达标）
-        ↓
-⑥ flagos-release (image)      打包镜像（commit → tag → push Harbor）
-        ↓
-⑦ flagos-release (publish)    上传权重发布（ModelScope + HuggingFace）
+⑤ 自动发布           打包 + 上传 → qualified 公开 / 不合格私有
         ↓
 → 报告整理收尾
 ```
@@ -73,9 +69,13 @@
 - `flagos_performance.json` — V2 (FlagGems)
 - `flagos_optimized.json` — V3 (Optimized FlagGems，仅 V2 不达标时产出)
 
-**自动化**：步骤①~⑦全自动执行，零交互。仅网络失败时需用户介入：
+**自动化**：步骤①~⑤全自动执行，零交互。仅网络失败时需用户介入：
 - 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
-- ⑥⑦打包发布凭证通过环境变量自动读取（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`）
+- ⑤发布凭证通过环境变量自动读取（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）
+
+**发布条件判定**：`qualified = service_ok AND accuracy_ok AND performance_ok`
+- qualified → 公开发布；不合格 → 私有发布
+- 提交了 issue 但优化成功 → 仍算合格
 
 ---
 
@@ -86,19 +86,20 @@
 │                     主流程 (顺序执行)                                 │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  ① container-preparation    多入口容器准备（已有容器/镜像/README）     │
+│  ① 下载模型+容器准备         镜像/容器就绪 + 环境检测 + 工具部署       │
+│     (container-preparation + pre-service-inspection)                │
 │         ↓                                                           │
-│  ② pre-service-inspection   环境检测 + FlagGems 深度探测 + 报告       │
+│  ② 启服务                    V1/V2 启动验证 → 异常自动 issue          │
+│     (service-startup)                                               │
 │         ↓                                                           │
-│  ③ service-startup          启动服务（支持 native/flagos 模式切换）    │
+│  ③ 精度评测                  V1/V2 GPQA 对比 → issue + ≤3 轮优化     │
+│     (eval-comprehensive)                                            │
 │         ↓                                                           │
-│  ④ eval-comprehensive       精度评测（GPQA + V1/V2 对比 + 算子排查）  │
+│  ④ 性能评测                  V1/V2 benchmark 对比 → issue + ≤3 轮优化│
+│     (performance-testing)                                           │
 │         ↓                                                           │
-│  ⑤ performance-testing      性能测试（并发搜索+早停+自动对比）         │
-│         ↓                                                           │
-│  ⑥ flagos-release (image)   打包镜像（commit → tag → push Harbor）   │
-│         ↓                                                           │
-│  ⑦ flagos-release (publish) 上传权重发布（ModelScope + HuggingFace）  │
+│  ⑤ 自动发布                  条件判定 → 打包 + 上传（公开/私有）       │
+│     (flagos-release)                                                │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │                     独立工具 (按需调用)                               │
@@ -106,6 +107,7 @@
 │  operator-replacement       算子替换 + 分组二分搜索优化               │
 │  component-install          组件安装/升级（FlagGems、FlagTree）       │
 │  log-analyzer               日志分析 + 失败恢复指引                   │
+│  issue-reporter             问题自动归因 + GitHub issue 提交          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -113,11 +115,11 @@
 
 ## Skills 详细说明
 
-### ① flagos-container-preparation (多入口容器准备)
+### ① flagos-container-preparation + flagos-pre-service-inspection (下载模型+容器准备)
 
 | 属性 | 说明 |
 |------|------|
-| **功能** | 自动识别入口类型（容器名/镜像/URL），检测 GPU，创建或接入容器 |
+| **功能** | 自动识别入口类型（容器名/镜像/URL），检测 GPU，创建或接入容器；环境检测（env_type + FlagGems 控制方式 + 组件版本）；工具脚本部署 |
 | **依赖** | 无 (流程起点) |
 | **触发词** | `container preparation`, `prepare container`, `容器准备`, `环境准备` |
 
@@ -131,51 +133,40 @@
 
 ---
 
-### ② flagos-pre-service-inspection (环境检测 + 深度探测)
+### ② flagos-service-startup (启服务)
 
 | 属性 | 说明 |
 |------|------|
-| **功能** | 执行模式检测 + 核心组件检查 + FlagGems 多维度深度探测 + 报告生成 |
-| **依赖** | `flagos-container-preparation` |
-| **触发词** | `pre-service inspection`, `inspect environment`, `服务前检查`, `环境检查` |
-
----
-
-### ③ flagos-service-startup (服务启动 — 支持模式切换)
-
-| 属性 | 说明 |
-|------|------|
-| **功能** | 生成启动命令、支持 native/flagos 模式切换、验证健康状态、失败自动恢复 |
-| **依赖** | `flagos-pre-service-inspection` |
+| **功能** | V1(native) + V2(flagos) 启动验证、健康检查、异常自动提交 issue |
+| **依赖** | 步骤① |
 | **触发词** | `service startup`, `start service`, `启动服务`, `health check` |
 
-**启动模式**：default（原始配置，验证初始环境）/ native（关闭 FlagGems）/ flagos（启用 FlagGems）
+**启动模式**：default / native（关闭 FlagGems）/ flagos（启用 FlagGems）
+**异常处理**：FlagGems 模式启动失败 → 提交 `operator-crash` issue → 标记 `workflow.service_ok: false` → 跳过③④直接到⑤
 
 ---
 
-### ④ flagos-eval-comprehensive (统一精度评测)
+### ③ flagos-eval-comprehensive (精度评测)
 
 | 属性 | 说明 |
 |------|------|
-| **功能** | 统一精度评测入口：本地快速评测（GPQA Diamond）+ 远端 flageval 正式评测 + V1 vs V2 精度对比（5% 阈值）+ 算子排查闭环 |
-| **依赖** | `flagos-service-startup` |
+| **功能** | V1/V2 GPQA Diamond 精度对比（5% 阈值）+ 异常自动 issue + ≤3 轮算子优化 |
+| **依赖** | 步骤② |
 | **触发词** | `精度评测`, `GPQA`, `fast gpqa`, `comprehensive eval`, `远端评测`, `FlagRelease`, `flageval` |
 
-四个模块：
-- **模块 A**：本地快速评测（fast_gpqa.py，GPQA Diamond 198 题）
-- **模块 B**：远端 flageval 正式评测（6 个数据集，原 eval-correctness 功能）
-- **模块 C**：V1 vs V2 精度对比（5% 阈值判定）
-- **模块 D**：错误处理与算子排查（报错 → 算子替换 → 重启 → 重评）
+**异常处理**：精度偏差 >5% → 提交 `accuracy-degraded` issue → 算子优化（≤3 轮）→ 超限标记 `workflow.accuracy_ok: false`
 
 ---
 
-### ⑤ flagos-performance-testing (性能测试 — 三版对比+优化触发)
+### ④ flagos-performance-testing (性能评测)
 
 | 属性 | 说明 |
 |------|------|
-| **功能** | 三版性能测试（V1 Native / V2 Full FlagGems / V3 Optimized），并发自动搜索+早停、自动优化触发 |
-| **依赖** | `flagos-service-startup` |
+| **功能** | V1/V2 4k1k benchmark 对比 + 异常自动 issue + ≤3 轮算子优化 |
+| **依赖** | 步骤③ |
 | **触发词** | `性能测试`, `benchmark`, `vllm bench`, `吞吐量测试` |
+
+**异常处理**：V2/V1 任一并发级别 <80% → 提交 `performance-degraded` issue → 算子优化（≤3 轮）→ 超限标记 `workflow.performance_ok: false`
 
 **脚本**：
 - `benchmark_runner.py`：测试入口，支持 `--strategy quick/fast/comprehensive/fixed` + 可选 `--final-burst`
@@ -183,13 +174,15 @@
 
 ---
 
-### ⑥⑦ flagos-release (镜像打包 + 模型发布)
+### ⑤ flagos-release (自动发布)
 
 | 属性 | 说明 |
 |------|------|
-| **功能** | Docker 镜像 commit/tag/push Harbor + README 生成 + ModelScope/HuggingFace 上传 |
-| **依赖** | `flagos-performance-testing` |
+| **功能** | 发布条件判定（qualified → 公开 / 不合格 → 私有）+ Docker 镜像 commit/tag/push Harbor + README 生成 + ModelScope/HuggingFace 上传 |
+| **依赖** | 步骤④ |
 | **触发词** | `发布`, `镜像上传`, `镜像打包`, `模型发布`, `release`, `publish` |
+
+**条件判定**：`qualified = service_ok AND accuracy_ok AND performance_ok` → 公开发布；否则私有发布
 
 ---
 
@@ -211,9 +204,27 @@
 
 | 属性 | 说明 |
 |------|------|
-| **功能** | 分析日志，诊断问题，提供失败恢复指引 |
+| **功能** | 分析日志，分类错误，推断服务状态，提供失败恢复指引 |
 | **依赖** | 无 (可随时调用) |
 | **触发词** | `log analysis`, `analyze logs`, `日志分析` |
+
+**脚本**：
+- `log_analyzer.py`：日志分析与诊断（analyze 单文件 / scan 目录扫描）
+
+---
+
+### flagos-issue-reporter (问题自动提交) — 独立工具
+
+| 属性 | 说明 |
+|------|------|
+| **功能** | 收集算子/框架问题数据，格式化 Bug Report，提交 GitHub issue（gh CLI / API / 手动降级） |
+| **依赖** | 无 (可随时调用) |
+| **触发词** | `提交 issue`, `submit issue`, `report bug`, `自动报告` |
+
+**五种 issue 类型**：`operator-crash`、`accuracy-zero`、`accuracy-degraded`、`performance-degraded`、`flagtree-error`
+
+**脚本**：
+- `issue_reporter.py`：问题收集/格式化/提交（collect / format / submit / full）
 
 ---
 
@@ -229,14 +240,15 @@
 | FlagGems 启停方法 | 从探测结果推导 |
 | 性能对比判断 | 自动计算比例 |
 | 是否需要算子优化 | 自动判断 < 80% 触发 |
-| 算子优化搜索 | 全自动分组二分搜索 |
+| 算子优化搜索 | 全自动搜索（≤3 轮），超限自动标记不合格 |
 | 报告生成 | 自动生成 |
+| 发布条件判定 | qualified → 公开 / 不合格 → 私有 |
 
 ### 需要人工介入的环节
 
 1. 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
 
-**注意**：⑥⑦打包发布所需凭证（Harbor 登录、ModelScope token、HuggingFace token）均通过环境变量自动读取，无需人工提供。
+**注意**：⑤发布所需凭证（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）均通过环境变量自动读取，无需人工提供。
 
 ---
 
@@ -245,7 +257,8 @@
 ```
 ┌──────────────────────────────┐
 │ container-preparation (①)    │──写入──┐
-│ (多入口: 容器/镜像/README)    │        │
+│ + pre-service-inspection     │        │
+│ (容器准备 + 环境检测)         │        │
 └──────────────────────────────┘        ↓
                                 ┌─────────────────┐
                                 │ context.yaml    │
@@ -253,40 +266,38 @@
                                 └─────────────────┘
                                         ↑
 ┌──────────────────────────────┐        │
-│ pre-service-inspection (②)  │──追加──┤
-│ + env_report.md              │        │
-│ + flag_gems_detection.md     │        │
-└──────────────────────────────┘        │
-                                        ↑
-┌──────────────────────────────┐        │
-│ service-startup (③ default)  │──追加──┤
-│ → 初始环境验证               │        │
+│ service-startup (②)         │──追加──┤
+│ → V1/V2 启动验证             │        │
+│ → 异常 → issue-reporter      │        │
 └──────────────────────────────┘        │
          │                              ↑
          ↓                              │
 ┌──────────────────────────────┐        │
-│ performance-testing (⑤)      │──追加──┘
-│ + benchmark_runner.py        │
-│ + performance_compare.py     │
-│ → native_performance.json    │
-│ → flagos_performance.json    │
-│ → flagos_optimized.json      │
+│ eval-comprehensive (③)       │──追加──┤
+│ → V1/V2 精度对比             │        │
+│ → 异常 → issue + ≤3 轮优化   │        │
+└──────────────────────────────┘        │
+         │                              ↑
+         ↓                              │
+┌──────────────────────────────┐        │
+│ performance-testing (④)      │──追加──┘
+│ → V1/V2 性能对比             │
+│ → 异常 → issue + ≤3 轮优化   │
 │ → performance_compare.csv    │
 └──────────────────────────────┘
          │
-         ↓ (< 80% 自动触发)
+         ↓
 ┌──────────────────────────────┐
-│ operator-replacement         │
-│ + operator_optimizer.py      │
-│ + operator_search.py         │
-│ → operator_config.json       │
+│ flagos-release (⑤)           │
+│ → 条件判定 qualified?        │
+│ → 打包 + 上传（公开/私有）    │
 └──────────────────────────────┘
 
 独立工具:
-┌──────────────────┐
-│ log-analyzer     │
-│ + 失败恢复指引    │
-└──────────────────┘
+┌──────────────────┐  ┌──────────────────┐
+│ log-analyzer     │  │ issue-reporter   │
+│ + 失败恢复指引    │  │ + 自动 issue 提交 │
+└──────────────────┘  └──────────────────┘
 ```
 
 ---

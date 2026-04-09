@@ -67,6 +67,10 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
+    # 问题自动提交
+    "skills/flagos-issue-reporter/tools/issue_reporter.py:scripts/issue_reporter.py"
+    # 日志分析
+    "skills/flagos-log-analyzer/tools/log_analyzer.py:scripts/log_analyzer.py"
     # 共享模块
     "skills/shared/env_utils.py:scripts/env_utils.py"
     "skills/shared/ops_constants.py:scripts/ops_constants.py"

@@ -253,7 +253,7 @@ flagos_optimized_perf:
 optimization:
   target_ratio: 0.8           # 性能目标: 每个用例每个并发级别 FlagOS / V1 >= 80%
   current_ratio: 0            # 当前性能比
-  search_phase: ""            # oot | group | done
+  search_phase: ""            # group | done
   plugin_mode: false          # 是否使用 plugin 环境变量控制
   enabled_ops: []             # 当前启用的算子列表
   disabled_ops: []            # 当前禁用的算子列表
@@ -294,6 +294,28 @@ timing:
     operator_replacement: 0
     perf_v3: 0
     final_report: 0
+
+# ============================================================================
+# 工作流状态 (由编排层维护，发布步骤读取)
+# ============================================================================
+workflow:
+  service_ok: false           # 步骤②：服务是否启动成功
+  accuracy_ok: false          # 步骤③：精度是否达标（含 3 轮内优化达标）
+  accuracy_rounds: 0          # 精度优化执行轮次
+  performance_ok: false       # 步骤④：性能是否达标（含 3 轮内优化达标）
+  performance_rounds: 0       # 性能优化执行轮次
+  qualified: false            # service_ok AND accuracy_ok AND performance_ok → 可公开发布
+  skip_reason: ""             # 跳过步骤的原因（如 "service_startup_failed"）
+
+# ============================================================================
+# Issue 提交记录 (由 flagos-issue-reporter 写入)
+# ============================================================================
+issues:
+  submitted: []             # 已提交的 issue 列表
+  # - type: operator-crash
+  #   url: https://github.com/flagos-ai/FlagGems/issues/123
+  #   ops: [mm, softmax]
+  #   timestamp: "2026-04-08T15:30:00"
 
 # ============================================================================
 # 元数据
