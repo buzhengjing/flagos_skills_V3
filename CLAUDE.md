@@ -175,13 +175,10 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 1. **网络失败**（详见"网络问题处理策略"）— pip 失败先自动加阿里云镜像重试，其他网络操作失败或 pip 镜像也失败时询问代理
 
 **⑤ 打包发布**所需凭证均通过环境变量提供，脚本自动读取：
-- Harbor：宿主机已 `docker login`，或通过环境变量提供认证信息
+- Harbor：`HARBOR_USER` / `HARBOR_PASSWORD` 环境变量（脚本自动登录，未设置则需手动 `docker login`）
 - ModelScope：`MODELSCOPE_TOKEN` 环境变量
 - HuggingFace：`HF_TOKEN` 环境变量
 - GitHub Issue：`GITHUB_TOKEN` 环境变量（issue 自动提交，需 `public_repo` 权限）
-- Harbor：宿主机已 `docker login`，或通过环境变量提供认证信息
-- ModelScope：`MODELSCOPE_TOKEN` 环境变量
-- HuggingFace：`HF_TOKEN` 环境变量
 
 ---
 

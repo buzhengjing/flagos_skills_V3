@@ -22,9 +22,17 @@ from pathlib import Path
 
 # 共享模块导入（兼容本地开发和容器内扁平部署）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "shared"))
 
-from env_utils import env_to_inline
+
+def env_to_inline(env_dict):
+    """将 env dict 转为内联前缀字符串: VAR1=val1 VAR2=val2"""
+    parts = []
+    for k, v in env_dict.items():
+        if " " in v or "'" in v:
+            parts.append(f"{k}='{v}'")
+        else:
+            parts.append(f"{k}={v}")
+    return " ".join(parts)
 
 
 # FlagGems 相关的代码模式

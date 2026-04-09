@@ -365,6 +365,50 @@ class PublishStage(BaseStage):
             print(f"  x 自动生成 tag 失败: {e}")
             return None
 
+    def _ensure_harbor_login(self, harbor_path: str) -> bool:
+        """确保已登录 Harbor，未登录则通过环境变量自动登录"""
+        # 从 harbor_path 提取 registry 地址（如 harbor.baai.ac.cn）
+        registry = harbor_path.split("/")[0]
+
+        # 检查是否已登录
+        import json as _json
+        docker_config_path = os.path.expanduser("~/.docker/config.json")
+        if os.path.exists(docker_config_path):
+            try:
+                with open(docker_config_path) as f:
+                    docker_config = _json.load(f)
+                auths = docker_config.get("auths", {})
+                if registry in auths or f"https://{registry}" in auths or f"https://{registry}/" in auths:
+                    print(f"  Harbor 已登录: {registry}")
+                    return True
+            except Exception:
+                pass
+
+        # 未登录，从环境变量获取凭证
+        user = os.environ.get("HARBOR_USER", "")
+        password = os.environ.get("HARBOR_PASSWORD", "")
+        if not user or not password:
+            print(f"  x Harbor 未登录且环境变量 HARBOR_USER / HARBOR_PASSWORD 未设置")
+            print(f"    请设置环境变量或手动执行: docker login https://{registry}/")
+            self.steps.append(StepResult(
+                step_name="Harbor 登录",
+                status=StepStatus.FAILED,
+                error="HARBOR_USER / HARBOR_PASSWORD 未设置",
+            ))
+            return False
+
+        # 使用 stdin 方式登录
+        print(f"  正在登录 Harbor: {registry} ...")
+        cmd = f'echo "{password}" | docker login --username={user} --password-stdin https://{registry}/'
+        success, stdout, stderr = self.run_command(
+            cmd=cmd,
+            step_name="Harbor 登录",
+            timeout=30,
+        )
+        if not success:
+            print(f"  x Harbor 登录失败，请检查 HARBOR_USER / HARBOR_PASSWORD")
+        return success
+
     def _push_to_harbor(self) -> bool:
         """推送镜像到 Harbor"""
         publish_config = self.config.publish
@@ -372,6 +416,10 @@ class PublishStage(BaseStage):
 
         if not harbor_path:
             print("  x Harbor 路径未配置")
+            return False
+
+        # 确保已登录 Harbor
+        if not self._ensure_harbor_login(harbor_path):
             return False
 
         cmd = f"docker push {harbor_path}"

@@ -238,7 +238,7 @@ output/
 | 问题 | 解决方案 |
 |------|----------|
 | 芯片检测失败 | 在配置中手动指定 `chip.vendor` |
-| Harbor 推送失败 | 检查 `docker login harbor.baai.ac.cn` |
+| Harbor 推送失败 | 脚本自动通过 `HARBOR_USER` / `HARBOR_PASSWORD` 环境变量登录；若未设置则需手动 `docker login` |
 | ModelScope 上传失败 | 检查 `MODELSCOPE_TOKEN` 环境变量 |
 | HuggingFace 上传失败 | 检查 `HF_TOKEN` 环境变量 |
 | 镜像 tag 生成异常 | 使用 `--dry-run` 检查自动生成的配置 |
