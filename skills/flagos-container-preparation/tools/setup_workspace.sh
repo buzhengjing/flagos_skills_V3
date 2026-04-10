@@ -11,7 +11,7 @@
 set -euo pipefail
 
 CONTAINER="${1:?用法: $0 <container_name> [model_path]}"
-MODEL_PATH="${2:-}"
+MODEL_NAME="${2:-}"
 
 # 项目根目录（此脚本所在位置的上三级）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,7 @@ echo "FlagOS 工作区初始化"
 echo "=========================================="
 echo "  容器: ${CONTAINER}"
 echo "  项目: ${PROJECT_ROOT}"
-[ -n "${MODEL_PATH}" ] && echo "  模型: ${MODEL_PATH}"
+[ -n "${MODEL_NAME}" ] && echo "  模型: ${MODEL_NAME}"
 echo ""
 
 # 0. 检测 /flagos-workspace 挂载状态
@@ -111,16 +111,33 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         fi
     "
     echo "  容器内归档完成: /flagos-workspace/archive/${ARCHIVE_TS}/"
+
+    # 归档后重置：清理残留状态，避免历史数据污染新一轮运行
+    echo "  清理残留状态..."
+    docker exec "${CONTAINER}" bash -c "
+        # 清理残留的算子列表文件
+        rm -f /tmp/flaggems_enable_oplist.txt
+        rm -f /root/gems.txt
+
+        # 停止可能残留的 vllm/sglang 服务进程
+        pkill -f 'vllm.entrypoints' 2>/dev/null || true
+        pkill -f 'sglang' 2>/dev/null || true
+    "
+    # 重置 context.yaml：从项目模板复制，确保与模板字段同步
+    docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
+    echo "  ✓ context.yaml 已重置（从模板复制）"
+    echo "  ✓ 残留算子列表已清理"
+    echo "  ✓ 残留服务进程已清理"
 else
     echo "  无历史数据，跳过归档"
 fi
 
 # 1.5. 创建宿主机工作目录
-if [ -n "${MODEL_PATH}" ]; then
+if [ -n "${MODEL_NAME}" ]; then
     echo "[1.5/6] 创建宿主机工作目录..."
 
     # 归档宿主机历史数据
-    HOST_BASE="/data/flagos-workspace/${MODEL_PATH}"
+    HOST_BASE="/data/flagos-workspace/${MODEL_NAME}"
     if [ -d "${HOST_BASE}" ]; then
         HOST_HAS_HISTORY=0
         for d in results traces logs; do
@@ -141,6 +158,10 @@ if [ -n "${MODEL_PATH}" ]; then
             # logs 目录不归档：run_pipeline.sh 在启动时已完成宿主机 logs 归档，
             # 此时 logs/ 中只有当前会话的活跃文件（tee 正在写入），不能移动
             echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
+            # 归档后清理宿主机残留的 context 快照，避免旧数据被误读
+            if [ -f "${HOST_BASE}/config/context_snapshot.yaml" ]; then
+                mv "${HOST_BASE}/config/context_snapshot.yaml" "${HOST_ARCHIVE}/context_snapshot.yaml"
+            fi
         fi
     fi
 
@@ -203,6 +224,10 @@ SCRIPT_MAP=(
     "skills/shared/ops_constants.py:scripts/ops_constants.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
+    # 错误/检查点持久化
+    "shared/error_writer.py:scripts/error_writer.py"
+    # 故障诊断工具
+    "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do
@@ -237,6 +262,8 @@ fi
 echo "  共复制 ${SCRIPTS_COPIED} 个脚本"
 
 # 3.5. 确保 context.yaml 存在
+# 注意：如果归档流程已重置了 context.yaml（干净模板），这里不会覆盖它
+# 只有当文件完全不存在时（首次运行）才从项目根目录复制或创建空文件
 if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>/dev/null; then
     if [ -f "${PROJECT_ROOT}/shared/context.yaml" ]; then
         docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
@@ -245,6 +272,8 @@ if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>
         docker exec "${CONTAINER}" bash -c "echo '# FlagOS context' > /flagos-workspace/shared/context.yaml"
         echo "  ✓ shared/context.yaml (空文件)"
     fi
+else
+    echo "  ✓ shared/context.yaml (已存在，保持当前状态)"
 fi
 
 # 4. 安装脚本依赖（如需要）

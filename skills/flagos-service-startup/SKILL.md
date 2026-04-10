@@ -182,6 +182,55 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 **算子列表获取**（启动后）：
 - 检查 `/tmp/flaggems_enable_oplist.txt`（plugin 架构下的权威算子列表）
 
+## 步骤 2.4 — GPU 空闲检测（强制）
+
+服务启动前检测各 GPU 的显存占用情况，**只使用空闲 GPU，不清理其他进程。**
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import subprocess, json
+result = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,memory.total,memory.free', '--format=csv,noheader,nounits'], capture_output=True, text=True)
+gpus = []
+for line in result.stdout.strip().split('\n'):
+    idx, used, total, free = [x.strip() for x in line.split(',')]
+    usage_pct = float(used) / float(total) * 100
+    gpus.append({'index': int(idx), 'used_mb': float(used), 'total_mb': float(total), 'free_mb': float(free), 'usage_pct': round(usage_pct, 1)})
+free_gpus = [g for g in gpus if g['usage_pct'] < 5]
+busy_gpus = [g for g in gpus if g['usage_pct'] >= 5]
+print(json.dumps({'free_gpus': [g['index'] for g in free_gpus], 'busy_gpus': [g['index'] for g in busy_gpus], 'total': len(gpus), 'details': gpus}))
+\""
+```
+
+**处理逻辑**：
+
+| 情况 | 操作 |
+|------|------|
+| 全部 GPU 空闲 | 正常使用全部 GPU，不设 `CUDA_VISIBLE_DEVICES` |
+| 部分 GPU 空闲 | 设置 `CUDA_VISIBLE_DEVICES=<空闲GPU列表>`，TP 按空闲 GPU 数重新推算 |
+| 无空闲 GPU | 记录警告，仍尝试启动（小模型可能共享显存），OOM 后报错 |
+
+**部分 GPU 空闲时**：
+1. 将空闲 GPU 索引写入 `runtime.cuda_visible_devices`（如 `"2,3,4,5,6,7"`）
+2. 更新 `runtime.gpu_count` 为空闲 GPU 数量
+3. 步骤 2.5 的 TP 推算基于空闲 GPU 数量
+4. 服务启动命令加入 `CUDA_VISIBLE_DEVICES` 环境变量
+5. 输出提示并记录到 trace
+
+```
+⚠ GPU 资源检测: 8 张 GPU 中 6 张空闲
+  占用中: GPU 0,1（显存占用 45.2%, 38.7%）
+  本次使用: GPU 2,3,4,5,6,7（CUDA_VISIBLE_DEVICES=2,3,4,5,6,7）
+```
+
+**写入 context.yaml**：
+```yaml
+runtime:
+  gpu_count: 6                          # 实际使用的 GPU 数量
+  cuda_visible_devices: "2,3,4,5,6,7"   # 实际使用的 GPU 索引（空则使用全部）
+  total_gpus: 8                          # 机器总 GPU 数
+  gpu_selection_reason: "GPU 0,1 被其他进程占用，使用剩余 6 张空闲 GPU"
+```
+
 ## 步骤 2.5 — TP 自动推算
 
 在启动服务前，自动推算最小可用 `--tensor-parallel-size`：
@@ -230,16 +279,61 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 4. **验证**：启动后 `wait_for_service.sh` 输出实际 `max_model_len`，确认与预期一致
 
+## 步骤 2.7 — 端口可用性检测（强制）
+
+服务启动前检测目标端口是否被占用。**如果被占用，自动换端口，不停止占用方。**
+
+由于容器使用 `--net=host` 模式，容器与宿主机共享网络栈，直接在宿主机检测即可：
+
+```bash
+ss -tlnp 2>/dev/null | grep ":${PORT} " && echo 'PORT_IN_USE' || echo 'PORT_FREE'
+```
+
+**端口被占用时的处理**：
+1. 不停止占用进程/容器
+2. 从 PORT+1 开始递增探测，找到第一个可用端口（上限 PORT+10）
+3. 更新 context.yaml 的 `service.port` 为新端口
+4. 后续所有操作（评测、性能测试）使用新端口
+5. 记录端口变更到 trace：`"port_changed": {"from": 8000, "to": 8001, "reason": "原端口被其他任务占用"}`
+
+```bash
+# 端口探测逻辑
+ORIGINAL_PORT=${PORT}
+while ss -tlnp 2>/dev/null | grep -q ":${PORT} "; do
+    echo "⚠ 端口 ${PORT} 被占用，尝试 $((PORT+1))..."
+    PORT=$((PORT+1))
+    if [ $((PORT - ORIGINAL_PORT)) -gt 10 ]; then
+        echo "✗ 连续 10 个端口均被占用，需人工介入"
+        exit 1
+    fi
+done
+echo "✓ 使用端口 ${PORT}"
+```
+
+如果端口发生变更，输出提示并写入 context.yaml：
+```
+⚠ 端口变更: 8000 → 8001（原端口被其他任务占用）
+```
+
+```yaml
+service:
+  port: 8001                    # 实际使用的端口
+  original_port: 8000           # 原始默认端口（仅端口变更时记录）
+  port_change_reason: "原端口被其他任务占用"
+```
+
 ## 步骤 3 — 启动服务
+
+**GPU 选择适配**：如果步骤 2.4 检测到部分 GPU 被占用（`runtime.cuda_visible_devices` 非空），启动命令需注入 `CUDA_VISIBLE_DEVICES` 环境变量。
 
 **非 plugin 场景**：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-} <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
 ```
 
 **Plugin 场景**（内联环境变量前缀）：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH <env_inline> <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-} PATH=/opt/conda/bin:\$PATH <env_inline> <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
 ```
 
 其中 `<mode>` 为 `default`、`native` 或 `flagos`，`<env_inline>` 来自 `toggle_flaggems.py --json` 输出的 `env_inline` 字段。

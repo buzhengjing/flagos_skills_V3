@@ -39,12 +39,19 @@ import json
 import os
 import subprocess
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # 共享模块导入（容器内所有脚本在同一 scripts/ 目录）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from error_writer import write_last_error, write_checkpoint
+except ImportError:
+    def write_last_error(*a, **kw): pass
+    def write_checkpoint(*a, **kw): pass
 
 # =============================================================================
 # 配置
@@ -777,4 +784,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        write_checkpoint("05_perf_eval", "算子优化", "running_operator_search",
+                         action_detail=" ".join(sys.argv))
+        main()
+    except Exception as e:
+        write_last_error(
+            tool="operator_search.py",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            traceback_str=traceback.format_exc(),
+        )
+        print(f"[FATAL] operator_search.py 异常退出: {e}")
+        traceback.print_exc()
+        sys.exit(1)

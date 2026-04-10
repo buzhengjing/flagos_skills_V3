@@ -531,6 +531,32 @@ eval:
   excluded_ops_accuracy: []  # 或 [softmax, layer_norm]
 ```
 
+## 模块 C 完成后的强制闭环（不可跳过）
+
+精度对比完成后，编排层**必须**按以下逻辑执行：
+
+```
+完成 V1 + V2 评测后:
+
+IF deviation > threshold (5%):
+    # 1. 写 issue log（强制）
+    追加写入 logs/issues_accuracy.log:
+      "[时间] V2 | 精度偏差超阈值"
+      "  详情: V1=XX%, V2=XX%, 偏差=XX% (阈值 5%)"
+
+    # 2. 设置状态
+    workflow.accuracy_ok = false
+
+    # 3. 继续到性能评测（不终止流程）
+
+ELSE:
+    workflow.accuracy_ok = true
+
+→ 继续性能评测
+```
+
+**禁止行为**：偏差 > 5% 时终止流程。必须写入 issue log、标记 `accuracy_ok=false`，然后继续后续步骤，最终走到发布（私有发布）。
+
 ---
 
 # 模块 D：错误处理与算子排查

@@ -274,6 +274,30 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 
 调用 `flagos-operator-replacement` 算子搜索优化。优化过程中以 `gems.txt`（或 `flaggems_enable_oplist.txt`）中已替换的算子为唯一候选范围。自动继续（上限 3 轮，超限标记 `workflow.performance_ok: false` 进入下一步）。
 
+### 性能不达标时的强制闭环（不可跳过）
+
+min_ratio < 80% 时，编排层**必须**按以下逻辑执行：
+
+```
+IF min_ratio < 80%:
+    # 1. 写 issue log（强制）
+    追加写入 logs/issues_performance.log:
+      "[时间] V2 | 性能不达标"
+      "  详情: V2/V1 min_ratio=XX% (<80%), 不达标用例: ..."
+
+    # 2. 设置状态
+    workflow.performance_ok = false
+
+    # 3. 继续到步骤⑤发布（不终止流程）
+
+ELSE:
+    workflow.performance_ok = true
+
+→ 继续步骤⑤ 发布
+```
+
+**禁止行为**：min_ratio < 80% 时终止流程。必须写入 issue log、标记 `performance_ok=false`，然后继续到发布步骤（`qualified=false` → 私有发布）。
+
 优化完成后重测：
 
 ```bash

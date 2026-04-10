@@ -34,11 +34,20 @@ else:
 import argparse
 import json
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+# error_writer 集成
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from error_writer import write_last_error, write_checkpoint
+except ImportError:
+    def write_last_error(*a, **kw): pass
+    def write_checkpoint(*a, **kw): pass
 
 # =============================================================================
 # 配置
@@ -347,6 +356,8 @@ def main():
             with open(args.output, 'w', encoding='utf-8') as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
             print(f"\n结果已保存: {args.output}")
+        else:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.command == "stop":
         result = stop_evaluation(args.request_id, args.platform)
@@ -361,4 +372,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        write_checkpoint("04_accuracy_eval", "远端评测", "running_eval_monitor",
+                         action_detail=" ".join(sys.argv))
+        main()
+    except Exception as e:
+        write_last_error(
+            tool="eval_monitor.py",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            traceback_str=traceback.format_exc(),
+        )
+        print(f"[FATAL] eval_monitor.py 异常退出: {e}")
+        traceback.print_exc()
+        sys.exit(1)

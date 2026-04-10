@@ -129,17 +129,35 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 **禁止行为**：镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器。
 
-#### 模板 A：NVIDIA
+#### 模板 A：NVIDIA（自适应降级）
+
+**Level 1 — 最小命令（优先尝试）**：
 
 ```bash
-docker run -d --name ${CONTAINER_NAME} \
-    --net=host --ipc=host --privileged \
-    --gpus all --shm-size=${SHM_SIZE:-64g} \
+docker run -itd --name=${CONTAINER_NAME} \
+    --gpus=all --network=host \
+    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
+    ${IMAGE}
+```
+
+**Level 2 — 完整参数（Level 1 失败且错误非 authZ 拒绝时尝试）**：
+
+```bash
+docker run -itd --name=${CONTAINER_NAME} \
+    --network=host --ipc=host --privileged \
+    --gpus=all --shm-size=${SHM_SIZE:-64g} \
     --ulimit memlock=-1 --security-opt=seccomp=unconfined \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
     -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
-    ${IMAGE} sleep infinity
+    ${IMAGE}
 ```
+
+**降级规则**：
+- Level 1 成功 → 直接使用，记录 `container.docker_run_level: 1`
+- Level 1 失败且错误包含 `authorization denied` / `authZ` → 不重试 Level 2（更多参数只会更严格），记录错误并终止
+- Level 1 失败且错误为其他原因（如缺少 GPU runtime）→ 尝试 Level 2
+- Level 2 也失败 → 记录错误并终止
 
 #### 模板 B：Ascend（华为昇腾）
 
