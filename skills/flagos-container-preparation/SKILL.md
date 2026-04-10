@@ -30,8 +30,10 @@ provides:
 | 入口 | 用户提供 | 系统做什么 |
 |------|---------|-----------|
 | **已有容器** | 容器名称 + 模型名 | 跳过创建，搜索模型权重（容器内+宿主机），未找到则容器内下载 |
-| **已有镜像** | 镜像地址 + 模型名 + 宿主机模型路径 | docker run 创建容器 |
+| **已有镜像** | 镜像地址 + 模型名 | 自动搜索宿主机模型路径 → docker run 创建容器（找到则挂载，未找到则容器内下载） |
 | **ModelScope URL** | URL | API 解析 → docker pull → docker run |
+
+> **自动识别**：`run_pipeline.sh` 优先检查第一参数是否含 `:` 或 `/`（镜像地址特征），是则走镜像模式；否则通过 `docker inspect --type=container` 判断是否为已有容器。用户无需指定 `--image`。
 
 ---
 
@@ -39,20 +41,19 @@ provides:
 
 ## 步骤 1 — 模型权重搜索与自动下载
 
-### 已有镜像/URL 入口 — 宿主机搜索（默认模式）
+### 已有镜像/URL 入口 — 自动搜索宿主机模型路径
+
+`run_pipeline.sh` 在启动 Claude 之前自动执行 pre-flight 搜索：
 
 ```bash
 python3 skills/flagos-container-preparation/tools/check_model_local.py \
-    --model "<用户输入的模型名或URL>" --output-json
+    --model "<模型名>" --no-download --output-json
 ```
 
 - 在宿主机搜索路径（/data, /nfs, /share, /models, /home）中查找匹配目录
 - 三级匹配：精确匹配 > 包含匹配 > config.json 匹配
-- 找到本地权重 → 记录 `model.local_path`，docker run 直接挂载
-- 未找到 → 自动从 ModelScope 下载到 `/mnt/data/models/<model_name>`，下载后校验
-- 下载成功 → 记录下载路径为 `model.local_path`
-- 下载失败或纯模型名无 org → 要求用户提供 `org/model` 格式或手动指定路径
-- `--no-download` 可禁用自动下载（仅搜索本地）
+- **找到** → 记录 `model.local_path`，docker run 直接挂载到容器
+- **未找到** → docker run 不挂载模型路径，容器创建后通过 `--mode container` 在容器内搜索+下载
 - `--download-dir` 可指定下载目录（默认 `/mnt/data/models`）
 
 ### 已有容器入口 — 容器内搜索
@@ -107,14 +108,26 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ### docker run 命令模板
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `${CONTAINER_NAME}` | 容器名称 | `<model_name>_flagos` |
-| `${MODEL_PATH}` | 宿主机模型路径 | 用户提供 |
-| `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 用户提供 |
+| 变量 | 说明 | 来源 |
+|------|------|------|
+| `${CONTAINER_NAME}` | 容器名称 | 自动生成，含冲突检测（见下方命名规则） |
+| `${MODEL_PATH}` | 宿主机模型路径 | `check_model_local.py` 自动搜索（未找到则不挂载） |
+| `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 与宿主机路径同名，或 `/data/models/<model_name>` |
 | `${WORKSPACE_PATH}` | 宿主机工作目录 | `/data/flagos-workspace` |
 | `${SHM_SIZE}` | 共享内存 | `64g` |
 | `${IMAGE}` | 镜像地址 | 用户提供 |
+
+> **模型路径未找到时**：docker run 命令中省略 `-v ${MODEL_PATH}:${CONTAINER_MODEL_PATH}` 挂载行。容器创建后通过 `check_model_local.py --mode container` 在容器内搜索+自动下载。
+
+### 容器命名与冲突处理（镜像模式专用）
+
+容器名生成规则：
+1. 基础名称：`<model_short_name>_flagos`（如 `Qwen3-8B_flagos`）
+2. 创建前检测：`docker inspect --type=container <基础名称>`
+3. 如不存在 → 直接使用基础名称
+4. 如已存在 → 追加时间戳：`<model_short_name>_flagos_<MMDD_HHMM>`（如 `Qwen3-8B_flagos_0410_1500`）
+
+**禁止行为**：镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器。
 
 #### 模板 A：NVIDIA
 
