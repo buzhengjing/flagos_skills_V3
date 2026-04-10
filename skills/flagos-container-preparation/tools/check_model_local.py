@@ -282,6 +282,41 @@ def validate_model_dir(dir_path: str) -> dict:
 DEFAULT_DOWNLOAD_DIR = "/mnt/data/models"
 
 
+def check_network() -> bool:
+    """检测网络连通性"""
+    for url in ["https://modelscope.cn", "https://pypi.org"]:
+        try:
+            result = subprocess.run(
+                ["curl", "--connect-timeout", "5", "-s", "-o", "/dev/null", "-w", "%{http_code}", url],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip().strip("'\"") in ("200", "301", "302"):
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            continue
+    return False
+
+
+def ensure_modelscope_cli() -> bool:
+    """确保 modelscope CLI 可用，未安装则自动安装"""
+    try:
+        subprocess.run(["modelscope", "--help"], capture_output=True, timeout=10)
+        return True
+    except FileNotFoundError:
+        print("  modelscope CLI 未安装，正在自动安装...")
+        result = subprocess.run(
+            ["pip", "install", "modelscope"], capture_output=True, text=True, timeout=300
+        )
+        if result.returncode == 0:
+            print("  modelscope 安装成功")
+            return True
+        else:
+            print(f"  modelscope 安装失败: {result.stderr}", file=sys.stderr)
+            return False
+    except subprocess.TimeoutExpired:
+        return True
+
+
 def download_from_modelscope(model_id: str, download_path: str) -> dict:
     """从 ModelScope 下载模型权重。
 
@@ -293,6 +328,18 @@ def download_from_modelscope(model_id: str, download_path: str) -> dict:
         {"success": bool, "path": str, "error": str}
     """
     result = {"success": False, "path": download_path, "error": ""}
+
+    # 检查网络
+    if not check_network():
+        result["error"] = "网络不通，无法下载模型。请检查网络连接或手动下载模型到宿主机"
+        print(f"\n✗ {result['error']}", file=sys.stderr)
+        return result
+
+    # 确保 modelscope CLI 可用
+    if not ensure_modelscope_cli():
+        result["error"] = "modelscope CLI 安装失败，请手动执行: pip install modelscope"
+        print(f"\n✗ {result['error']}", file=sys.stderr)
+        return result
 
     os.makedirs(download_path, exist_ok=True)
 
@@ -309,9 +356,6 @@ def download_from_modelscope(model_id: str, download_path: str) -> dict:
         else:
             result["error"] = f"modelscope download 退出码 {proc.returncode}"
             print(f"\n✗ 下载失败: 退出码 {proc.returncode}", file=sys.stderr)
-    except FileNotFoundError:
-        result["error"] = "modelscope CLI 未安装，请先执行: pip install modelscope"
-        print(f"\n✗ {result['error']}", file=sys.stderr)
     except subprocess.TimeoutExpired:
         result["error"] = "下载超时（2小时）"
         print(f"\n✗ {result['error']}", file=sys.stderr)
