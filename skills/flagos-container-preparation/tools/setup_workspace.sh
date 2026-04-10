@@ -132,11 +132,14 @@ if [ -n "${MODEL_PATH}" ]; then
             HOST_ARCHIVE_TS=${ARCHIVE_TS:-$(date +%Y%m%d_%H%M%S)}
             HOST_ARCHIVE="${HOST_BASE}/archive/${HOST_ARCHIVE_TS}"
             mkdir -p "${HOST_ARCHIVE}"
-            for d in results traces logs; do
+            # results 和 traces 直接整目录归档
+            for d in results traces; do
                 if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                     mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
                 fi
             done
+            # logs 目录不归档：run_pipeline.sh 在启动时已完成宿主机 logs 归档，
+            # 此时 logs/ 中只有当前会话的活跃文件（tee 正在写入），不能移动
             echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
         fi
     fi

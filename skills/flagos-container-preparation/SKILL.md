@@ -29,7 +29,7 @@ provides:
 
 | 入口 | 用户提供 | 系统做什么 |
 |------|---------|-----------|
-| **已有容器** | 容器名称 | 跳过创建，直接验证 |
+| **已有容器** | 容器名称 + 模型名 | 跳过创建，搜索模型权重（容器内+宿主机），未找到则容器内下载 |
 | **已有镜像** | 镜像地址 + 模型名 + 宿主机模型路径 | docker run 创建容器 |
 | **ModelScope URL** | URL | API 解析 → docker pull → docker run |
 
@@ -37,19 +37,45 @@ provides:
 
 # 工作流程
 
-## 步骤 1 — 本地权重检查与自动下载
+## 步骤 1 — 模型权重搜索与自动下载
+
+### 已有镜像/URL 入口 — 宿主机搜索（默认模式）
 
 ```bash
 python3 skills/flagos-container-preparation/tools/check_model_local.py \
     --model "<用户输入的模型名或URL>" --output-json
 ```
 
+- 在宿主机搜索路径（/data, /nfs, /share, /models, /home）中查找匹配目录
+- 三级匹配：精确匹配 > 包含匹配 > config.json 匹配
 - 找到本地权重 → 记录 `model.local_path`，docker run 直接挂载
 - 未找到 → 自动从 ModelScope 下载到 `/mnt/data/models/<model_name>`，下载后校验
 - 下载成功 → 记录下载路径为 `model.local_path`
 - 下载失败或纯模型名无 org → 要求用户提供 `org/model` 格式或手动指定路径
 - `--no-download` 可禁用自动下载（仅搜索本地）
 - `--download-dir` 可指定下载目录（默认 `/mnt/data/models`）
+
+### 已有容器入口 — 容器内搜索
+
+```bash
+python3 skills/flagos-container-preparation/tools/check_model_local.py \
+    --model "<用户输入的模型名或URL>" --mode container --container <container_name> --output-json
+```
+
+搜索策略：
+1. 先在容器内搜索（/data, /models, /root, /home, /workspace, /mnt, /opt）
+2. 再在宿主机搜索，通过 `docker inspect` 检查挂载关系
+   - 宿主机找到且已挂载 → 计算容器内路径，直接使用
+   - 宿主机找到但未挂载 → 警告，进入容器内下载
+3. 如容器内未找到 → 在容器内自动从 ModelScope 下载
+   - 优先下载到已挂载的宿主机卷路径（/data > /mnt > /nfs > /share），避免写入 overlay 文件系统
+   - 无可用挂载卷时 fallback 到 `/data/models/<model_name>`
+   - 下载前自动检查 modelscope CLI 是否可用，不可用则先安装
+   - 下载成功后重新校验权重完整性
+
+输出字段：
+- `final_container_path`：容器内模型路径 → 写入 `model.container_path`
+- `final_host_path`：宿主机对应路径（如可推算）→ 写入 `model.local_path`
 
 ## 入口 1 — 已有容器
 
@@ -58,7 +84,14 @@ docker inspect <container_name> --format '{{.State.Status}}'
 docker start <container_name>  # 如果停止
 ```
 
-自动检测 GPU、模型路径。`setup_workspace.sh` 会自动检测 `/flagos-workspace` 挂载状态：
+**模型权重搜索**（步骤 1 的容器模式）：
+
+```bash
+python3 skills/flagos-container-preparation/tools/check_model_local.py \
+    --model "<model>" --mode container --container <container_name> --output-json
+```
+
+自动检测 GPU、记录模型路径（container_path + local_path）。`setup_workspace.sh` 会自动检测 `/flagos-workspace` 挂载状态：
 
 | 情况 | 处理方式 |
 |------|---------|

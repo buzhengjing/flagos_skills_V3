@@ -109,27 +109,42 @@ class PublishStage(BaseStage):
             self.skip_step("生成 README", "配置跳过")
 
         # 4. 发布到 ModelScope
+        ms_failed = False
         if publish_config.publish_modelscope:
             success = self._publish_to_modelscope(readme_path)
             if not success:
-                return self.make_result(False, "发布到 ModelScope 失败")
+                ms_failed = True
+                print("  ⚠ ModelScope 发布失败，继续执行 HuggingFace 上传")
         else:
             self.skip_step("发布到 ModelScope", "配置跳过")
 
         # 5. 发布到 HuggingFace
+        hf_failed = False
         if publish_config.publish_huggingface:
             success = self._publish_to_huggingface(readme_path)
             if not success:
-                return self.make_result(False, "发布到 HuggingFace 失败")
+                hf_failed = True
+                print("  ⚠ HuggingFace 发布失败")
         else:
             self.skip_step("发布到 HuggingFace", "配置跳过")
 
         # 6. 数据回传到宿主机
         self._sync_to_host()
 
+        upload_failed = ms_failed or hf_failed
         duration = time.time() - start_time
-        print(f"\n+ {self.name} 完成 (总耗时 {duration:.2f}s)")
-        return self.make_result(not harbor_failed)
+        if harbor_failed or upload_failed:
+            failures = []
+            if harbor_failed:
+                failures.append("Harbor")
+            if ms_failed:
+                failures.append("ModelScope")
+            if hf_failed:
+                failures.append("HuggingFace")
+            print(f"\n⚠ {self.name} 完成，但部分平台失败: {', '.join(failures)} (总耗时 {duration:.2f}s)")
+        else:
+            print(f"\n+ {self.name} 完成 (总耗时 {duration:.2f}s)")
+        return self.make_result(not harbor_failed and not upload_failed)
 
     def _sync_to_host(self):
         """将容器内 /flagos-workspace 的产出同步到宿主机工作目录。
@@ -139,13 +154,14 @@ class PublishStage(BaseStage):
         """
         container_name = self.config.container_name
         host_base = self.config.host_workspace_base
-        model_source = self.config.model_info.source_of_model_weights
 
-        if not container_name or not model_source or not host_base:
-            self.skip_step("数据回传", "缺少容器名/模型名/宿主机路径")
+        if not container_name or not host_base:
+            self.skip_step("数据回传", "缺少容器名/宿主机路径")
             return
 
-        host_target = os.path.join(host_base, model_source)
+        # host_workspace_base 已包含完整路径（如 /data/flagos-workspace/Qwen/Qwen2.5-0.5B-Instruct）
+        # 直接使用，不再拼接 model_source
+        host_target = host_base
         print(f"\n[数据回传] 同步到宿主机: {host_target}")
 
         sync_dirs = ["results", "traces", "logs", "config"]
@@ -634,6 +650,7 @@ class PublishStage(BaseStage):
         if publish_config.upload_weights and publish_config.weights_dir:
             weights_dir = publish_config.weights_dir
             if os.path.exists(weights_dir):
+                # 宿主机上权重目录存在，直接链接
                 print(f"  准备权重文件从: {weights_dir}")
                 weight_files = get_files_in_directory(weights_dir)
                 for wf in weight_files:
@@ -655,6 +672,49 @@ class PublishStage(BaseStage):
                                 shutil.copy2(wf, dest_path)
 
                 print(f"    已准备 {len(weight_files)} 个权重文件")
+            elif self.config.container_name:
+                # 宿主机上不存在，尝试从容器 docker cp 权重到 output 目录
+                # weights_dir 可能是 local_path（宿主机路径），容器内未必相同
+                # 依次尝试 weights_dir 和 container_path
+                container = self.config.container_name
+                container_path = self.config.model_info.source_of_model_weights
+                # 从 config 中获取容器内路径（通过 serve_start_cmd 中的模型路径推断）
+                # 更直接：尝试 weights_dir，失败则用常见容器路径
+                candidate_paths = [weights_dir]
+                # 如果有 serve_start_cmd，从中提取容器内模型路径
+                serve_cmd = self.config.model_info.serve_start_cmd or ""
+                if "vllm serve " in serve_cmd:
+                    parts = serve_cmd.split("vllm serve ", 1)[1].split()
+                    if parts:
+                        cmd_model_path = parts[0].strip().rstrip("\\")
+                        if cmd_model_path != weights_dir:
+                            candidate_paths.append(cmd_model_path)
+
+                try:
+                    print(f"  宿主机无权重目录 {weights_dir}，从容器 {container} 复制...")
+                    copied = False
+                    for cpath in candidate_paths:
+                        try:
+                            result = subprocess.run(
+                                ["docker", "exec", container, "test", "-d", cpath],
+                                capture_output=True, timeout=5
+                            )
+                            if result.returncode == 0:
+                                cp_result = subprocess.run(
+                                    ["docker", "cp", f"{container}:{cpath}/.", output_dir],
+                                    capture_output=True, text=True, timeout=600
+                                )
+                                if cp_result.returncode == 0:
+                                    n = len([f for f in os.listdir(output_dir) if f != "README.md"])
+                                    print(f"    已从容器 {cpath} 复制 {n} 个权重文件")
+                                    copied = True
+                                    break
+                        except Exception:
+                            continue
+                    if not copied:
+                        print(f"    ⚠ 容器内未找到权重目录: {candidate_paths}")
+                except Exception as e:
+                    print(f"    ⚠ 从容器复制权重异常: {e}")
 
         return output_dir
 

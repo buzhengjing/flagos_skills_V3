@@ -160,15 +160,28 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
-    config.publish.private = True
+    # 从 workflow.qualified 判定发布可见性：qualified=true → 公开，否则私有
+    workflow = ctx.get('workflow', {})
+    config.publish.private = not workflow.get('qualified', False)
     config.publish.upload_weights = True
-    config.publish.weights_dir = model.get('container_path', '')
+    # 优先用 local_path（宿主机路径），其次 container_path（容器内路径）
+    # 镜像模式下 local_path 是用户提供的宿主机路径，一定能访问
+    # 容器模式下两者可能相同（容器内路径），宿主机未必能访问，publish.py 有 docker cp 兜底
+    config.publish.weights_dir = model.get('local_path', '') or model.get('container_path', '')
     config.publish.publish_modelscope = False
     config.publish.publish_huggingface = False
 
-    # 如果 context 中已有 image.tag，作为 existing_harbor_image（跳过 commit/tag/push）
-    image = ctx.get('image', {})
-    existing_tag = image.get('tag', '')
+    # 如果 context 中已有完整的 Harbor 镜像地址，跳过 commit/tag/push
+    # 优先使用 release.image_tag（完整 URL），其次 image.tag（仅当它是完整 URL 时）
+    release = ctx.get('release', {})
+    existing_tag = release.get('image_tag', '')
+    if not existing_tag or '/' not in existing_tag:
+        image = ctx.get('image', {})
+        candidate = image.get('tag', '')
+        if candidate and '/' in candidate:
+            existing_tag = candidate
+        else:
+            existing_tag = ''
     if existing_tag:
         config.publish.existing_harbor_image = existing_tag
 
@@ -176,6 +189,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     config.publish.modelscope_token = os.environ.get('MODELSCOPE_TOKEN', '')
     config.publish.huggingface_token = os.environ.get('HF_TOKEN', '')
 
+    # 有 token 则启用对应平台上传
+    config.publish.publish_modelscope = bool(config.publish.modelscope_token)
+    config.publish.publish_huggingface = bool(config.publish.huggingface_token)
     # results_dir 用于 README 自动读取评测结果
     workspace = ctx.get('workspace', {})
     container_workspace = workspace.get('container_path', '/flagos-workspace')

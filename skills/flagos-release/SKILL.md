@@ -231,6 +231,11 @@ output/
 - `results/release_info.json` 已保存（qualified 状态、Harbor URL、ModelScope URL、HuggingFace URL）
 - `timing.steps.release` 已更新为本步骤的 `duration_seconds`
 
+**容器产出同步到宿主机**（必须在输出最终报告前完成）：
+- 容器内 `/flagos-workspace/{results,traces,logs}/` 已通过 `docker cp` 同步到宿主机 `/data/flagos-workspace/<model>/` 对应目录
+- `context.yaml` 已同步到宿主机 `config/context_snapshot.yaml`
+- 宿主机文件数量与容器内一致
+
 ---
 
 # 故障排查
