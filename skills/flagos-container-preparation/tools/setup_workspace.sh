@@ -197,7 +197,7 @@ SCRIPT_MAP=(
     # 日志分析
     "skills/flagos-log-analyzer/tools/log_analyzer.py:scripts/log_analyzer.py"
     # 共享模块
-    "skills/shared/ops_constants.py:scripts/ops_constants.py"
+    "skills/flagos-operator-replacement/tools/ops_constants.py:scripts/ops_constants.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
 )
