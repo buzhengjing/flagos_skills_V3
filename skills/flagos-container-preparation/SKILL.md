@@ -58,7 +58,13 @@ docker inspect <container_name> --format '{{.State.Status}}'
 docker start <container_name>  # 如果停止
 ```
 
-自动检测 GPU、模型路径、创建/验证 `/flagos-workspace` 目录。
+自动检测 GPU、模型路径。`setup_workspace.sh` 会自动检测 `/flagos-workspace` 挂载状态：
+
+| 情况 | 处理方式 |
+|------|---------|
+| 已挂载 `/flagos-workspace` | 直接使用，行为不变 |
+| 有其他 bind mount（如 `/data`） | 在挂载点下创建 `flagos-workspace/`，软链接 `/flagos-workspace` 指向它，宿主机可直接访问 |
+| 无任何挂载 | 容器内创建非持久化目录，给出警告 |
 
 ## 入口 2 — 已有镜像
 
@@ -198,8 +204,9 @@ gpu:
   type: "<GPU 型号>"
   count: <数量>
 workspace:
-  host_path: "/data/flagos-workspace"
+  host_path: "<宿主机路径，如 /data/flagos-workspace>"
   container_path: "/flagos-workspace"
+  mount_mode: "<mounted|symlink|internal>"
 ```
 
 ---

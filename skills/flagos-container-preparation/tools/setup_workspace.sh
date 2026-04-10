@@ -6,7 +6,7 @@
 #
 # Usage:
 #   bash skills/flagos-container-preparation/tools/setup_workspace.sh <container_name>
-#   bash skills/flagos-container-preparation/tools/setup_workspace.sh RoboBrain2.0-7B_flagos
+#   bash skills/flagos-container-preparation/tools/setup_workspace.sh RoboBrain2.0-7B_flagos Qwen3-8B
 
 set -euo pipefail
 
@@ -25,8 +25,66 @@ echo "  项目: ${PROJECT_ROOT}"
 [ -n "${MODEL_PATH}" ] && echo "  模型: ${MODEL_PATH}"
 echo ""
 
-# 0. 归档上一轮数据（容器内）
-echo "[0/5] 检查并归档历史数据..."
+# 0. 检测 /flagos-workspace 挂载状态
+WORKSPACE="/flagos-workspace"
+HOST_WORKSPACE=""
+MOUNT_MODE="unknown"
+MOUNT_INFO=$(docker inspect --format '{{json .Mounts}}' "${CONTAINER}" 2>/dev/null || echo "[]")
+
+echo "[0/6] 检测工作目录挂载状态..."
+
+# 检查是否已有 /flagos-workspace 挂载
+HAS_WORKSPACE_MOUNT=$(echo "${MOUNT_INFO}" | python3 -c "
+import json, sys
+mounts = json.load(sys.stdin)
+for m in mounts:
+    if m.get('Destination','').rstrip('/') == '/flagos-workspace':
+        print(m['Source']); break
+" 2>/dev/null || true)
+
+if [ -n "${HAS_WORKSPACE_MOUNT}" ]; then
+    echo "  已检测到 /flagos-workspace 挂载: ${HAS_WORKSPACE_MOUNT}"
+    HOST_WORKSPACE="${HAS_WORKSPACE_MOUNT}"
+    MOUNT_MODE="mounted"
+else
+    # 从已有挂载中选择：优先 /data，其次第一个 rw bind mount
+    SELECTED_MOUNT=$(echo "${MOUNT_INFO}" | python3 -c "
+import json, sys
+mounts = json.load(sys.stdin)
+binds = [m for m in mounts if m.get('Type') == 'bind' and m.get('RW', True)]
+for m in binds:
+    if m['Destination'].rstrip('/') == '/data':
+        print(m['Destination']); sys.exit()
+if binds:
+    print(binds[0]['Destination'])
+" 2>/dev/null || true)
+
+    if [ -z "${SELECTED_MOUNT}" ]; then
+        echo "  警告: 未检测到可用挂载点，将在容器内创建非持久化工作目录"
+        docker exec "${CONTAINER}" mkdir -p "${WORKSPACE}"
+        MOUNT_MODE="internal"
+    else
+        # 获取宿主机对应路径
+        HOST_WORKSPACE=$(echo "${MOUNT_INFO}" | python3 -c "
+import json, sys
+target = '${SELECTED_MOUNT}'.rstrip('/')
+mounts = json.load(sys.stdin)
+for m in mounts:
+    if m.get('Destination','').rstrip('/') == target:
+        print(m['Source'] + '/flagos-workspace'); break
+" 2>/dev/null || true)
+
+        echo "  在已有挂载点 ${SELECTED_MOUNT} 下创建工作目录..."
+        docker exec "${CONTAINER}" mkdir -p "${SELECTED_MOUNT}/flagos-workspace"
+        docker exec "${CONTAINER}" ln -sfn "${SELECTED_MOUNT}/flagos-workspace" "${WORKSPACE}"
+        echo "  软链接: ${WORKSPACE} → ${SELECTED_MOUNT}/flagos-workspace"
+        echo "  宿主机路径: ${HOST_WORKSPACE}"
+        MOUNT_MODE="symlink"
+    fi
+fi
+
+# 1. 归档上一轮数据（容器内）
+echo "[1/6] 检查并归档历史数据..."
 HAS_HISTORY=$(docker exec "${CONTAINER}" bash -c "
     found=0
     for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs; do
@@ -57,9 +115,9 @@ else
     echo "  无历史数据，跳过归档"
 fi
 
-# 0.5. 创建宿主机工作目录（避免花括号展开被 sandbox 拦截）
+# 1.5. 创建宿主机工作目录
 if [ -n "${MODEL_PATH}" ]; then
-    echo "[0.5/5] 创建宿主机工作目录..."
+    echo "[1.5/6] 创建宿主机工作目录..."
 
     # 归档宿主机历史数据
     HOST_BASE="/data/flagos-workspace/${MODEL_PATH}"
@@ -90,15 +148,15 @@ if [ -n "${MODEL_PATH}" ]; then
     echo "  宿主机目录创建完成: ${HOST_BASE}"
 fi
 
-# 1. 创建容器内目录结构
-echo "[1/5] 创建目录结构..."
+# 2. 创建容器内目录结构
+echo "[2/6] 创建目录结构..."
 docker exec "${CONTAINER}" bash -c "
     mkdir -p /flagos-workspace/{scripts,logs,results,reports,eval,perf/config,shared,output,traces,config}
 "
 echo "  目录创建完成"
 
-# 2. 复制所有脚本到容器
-echo "[2/5] 复制脚本到容器..."
+# 3. 复制所有脚本到容器
+echo "[3/6] 复制脚本到容器..."
 
 SCRIPTS_COPIED=0
 
@@ -139,7 +197,6 @@ SCRIPT_MAP=(
     # 日志分析
     "skills/flagos-log-analyzer/tools/log_analyzer.py:scripts/log_analyzer.py"
     # 共享模块
-    "skills/shared/env_utils.py:scripts/env_utils.py"
     "skills/shared/ops_constants.py:scripts/ops_constants.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
@@ -176,7 +233,7 @@ fi
 
 echo "  共复制 ${SCRIPTS_COPIED} 个脚本"
 
-# 2.5. 确保 context.yaml 存在
+# 3.5. 确保 context.yaml 存在
 if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>/dev/null; then
     if [ -f "${PROJECT_ROOT}/shared/context.yaml" ]; then
         docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
@@ -187,24 +244,39 @@ if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>
     fi
 fi
 
-# 3. 安装脚本依赖（如需要）
-echo "[3/5] 检查脚本依赖..."
+# 4. 安装脚本依赖（如需要）
+echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
-# 4. 验证
-echo "[4/5] 验证部署..."
+# 5. 验证
+echo "[5/6] 验证部署..."
 SCRIPT_COUNT=$(docker exec "${CONTAINER}" bash -c "ls /flagos-workspace/scripts/*.py /flagos-workspace/scripts/*.sh 2>/dev/null | wc -l")
 echo "  容器内脚本数: ${SCRIPT_COUNT}"
 docker exec "${CONTAINER}" ls -la /flagos-workspace/scripts/ 2>/dev/null || true
+
+# 6. 记录挂载信息
+echo ""
+echo "[6/6] 记录挂载信息..."
+echo "  挂载模式: ${MOUNT_MODE}"
+if [ -n "${HOST_WORKSPACE}" ]; then
+    echo "  宿主机工作目录: ${HOST_WORKSPACE}"
+fi
+# 写入标记文件供后续脚本读取
+docker exec "${CONTAINER}" bash -c "echo '${MOUNT_MODE}' > /flagos-workspace/.mount_mode"
 
 echo ""
 echo "=========================================="
 echo "工作区初始化完成"
 echo "=========================================="
 echo "  容器: ${CONTAINER}"
+echo "  挂载模式: ${MOUNT_MODE}"
+echo "  容器内路径: /flagos-workspace"
+if [ -n "${HOST_WORKSPACE}" ]; then
+echo "  宿主机路径: ${HOST_WORKSPACE}"
+fi
 echo "  脚本目录: /flagos-workspace/scripts/"
 echo "  结果目录: /flagos-workspace/results/"
 echo "  报告目录: /flagos-workspace/reports/"
