@@ -2,21 +2,15 @@
 """
 install_component.py — FlagOS 生态组件统一安装/升级/卸载
 
-支持组件：flaggems, flagscale, flagcx, flagtree
+支持组件：flaggems, flagtree
 FlagTree 操作委托给 install_flagtree.sh。
 
-FlagGems 安装策略（三级降级）：
-  1. pip install flag-gems（优先）
-  2. git clone + pip install .（pip 失败时）
-  3. 输出宿主机操作指令（容器无网络时）
-
 Usage:
-    # FlagGems 安装（三级降级）
+    # FlagGems 安装（最新版）
     python install_component.py --component flaggems --action install --json
-    python install_component.py --component flaggems --action install --version 4.2.1rc0 --json
 
-    # FlagGems 升级（同样三级降级）
-    python install_component.py --component flaggems --action upgrade --branch main --json
+    # FlagGems 指定版本
+    python install_component.py --component flaggems --action install --version 4.2.1rc0 --json
 
     # FlagTree 安装
     python install_component.py --component flagtree --action install --vendor nvidia --json
@@ -26,9 +20,6 @@ Usage:
 
     # FlagTree 验证
     python install_component.py --component flagtree --action verify --json
-
-    # 带代理
-    python install_component.py --component flaggems --action install --proxy http://proxy:port --json
 """
 
 import argparse
@@ -40,22 +31,10 @@ from datetime import datetime
 from pathlib import Path
 
 
-# 默认仓库地址
-DEFAULT_REPOS = {
-    "flaggems": "https://github.com/FlagOpen/FlagGems.git",
-    "flagscale": "https://github.com/FlagOpen/FlagScale.git",
-    "flagcx": "https://github.com/FlagOpen/FlagCX.git",
-}
-
 # pip 包名映射
 PACKAGE_NAMES = {
     "flaggems": "flag-gems",
-    "flagscale": "flag-scale",
-    "flagcx": "flagcx",
 }
-
-# 可能需要的构建依赖
-BUILD_DEPS = ["setuptools>=64.0", "scikit-build-core", "wheel"]
 
 # install_flagtree.sh 路径（容器内）
 FLAGTREE_SCRIPT = str(Path(__file__).resolve().parent / "install_flagtree.sh")
@@ -81,24 +60,6 @@ def run_cmd(cmd, timeout=300, env=None):
         return -1, "", str(e)
 
 
-def check_network(proxy=None):
-    """检测网络连通性"""
-    env = {}
-    if proxy:
-        env["http_proxy"] = proxy
-        env["https_proxy"] = proxy
-
-    # 尝试多个目标
-    for url in ["https://pypi.org", "https://github.com"]:
-        code, out, err = run_cmd(
-            f"curl --connect-timeout 5 -s -o /dev/null -w '%{{http_code}}' {url}",
-            timeout=10, env=env
-        )
-        if code == 0 and out.strip("'\"") in ["200", "301", "302"]:
-            return True
-    return False
-
-
 def get_current_version(component):
     """获取当前安装版本"""
     pkg_name = PACKAGE_NAMES.get(component, component)
@@ -110,35 +71,11 @@ def get_current_version(component):
     return None
 
 
-def check_build_deps(proxy=None):
-    """检查并安装构建依赖"""
-    env = {}
-    if proxy:
-        env["http_proxy"] = proxy
-        env["https_proxy"] = proxy
+def install_flaggems(version=None, proxy=None):
+    """FlagGems 安装（pip install 最新版或指定版本）"""
+    pkg_name = PACKAGE_NAMES["flaggems"]
+    old_version = get_current_version("flaggems")
 
-    missing = []
-    for dep in BUILD_DEPS:
-        pkg = dep.split(">=")[0].split("==")[0].replace("-", "_")
-        code, _, _ = run_cmd(f"python3 -c 'import {pkg}' 2>/dev/null")
-        if code != 0:
-            missing.append(dep)
-
-    if missing:
-        deps_str = " ".join(f'"{d}"' for d in missing)
-        code, out, err = run_cmd(f"pip install {deps_str}", env=env)
-        if code != 0:
-            return False, missing, err
-    return True, [], ""
-
-
-# =============================================================================
-# FlagGems/FlagScale/FlagCX 安装（三级降级）
-# =============================================================================
-
-def pip_install(component, version=None, proxy=None):
-    """第一级：pip install"""
-    pkg_name = PACKAGE_NAMES.get(component, component)
     env = {}
     if proxy:
         env["http_proxy"] = proxy
@@ -150,125 +87,50 @@ def pip_install(component, version=None, proxy=None):
         cmd = f"pip install {pkg_name}"
 
     code, out, err = run_cmd(cmd, timeout=300, env=env)
-    if code == 0:
-        return True, f"pip install 成功: {cmd}"
-    return False, f"pip install 失败: {err}"
+
+    result = {
+        "component": "flaggems",
+        "action": "install",
+        "previous_version": old_version,
+        "current_version": get_current_version("flaggems") if code == 0 else None,
+        "install_method": "pip",
+        "success": code == 0,
+        "message": f"pip install 成功: {cmd}" if code == 0 else f"pip install 失败: {err}",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    if result["success"]:
+        result["api"] = check_flaggems_api()
+
+    return result
 
 
-def source_install(component, repo_url, branch="main", proxy=None, work_dir="/tmp"):
-    """第二级：git clone + pip install ."""
+def upgrade_flaggems(proxy=None):
+    """FlagGems 升级到最新版"""
+    pkg_name = PACKAGE_NAMES["flaggems"]
+    old_version = get_current_version("flaggems")
+
     env = {}
     if proxy:
         env["http_proxy"] = proxy
         env["https_proxy"] = proxy
 
-    repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
-    clone_path = os.path.join(work_dir, repo_name)
-
-    # 清理旧目录
-    if os.path.exists(clone_path):
-        run_cmd(f"rm -rf {clone_path}")
-
-    # 检查构建依赖
-    check_build_deps(proxy)
-
-    # 克隆
-    code, out, err = run_cmd(
-        f"git clone --depth 1 --branch {branch} {repo_url} {clone_path}",
-        timeout=120, env=env
-    )
-    if code != 0:
-        # branch 可能不存在，尝试不指定 branch
-        if "not found" in err or "Could not find" in err:
-            code, out, err = run_cmd(
-                f"git clone --depth 1 {repo_url} {clone_path}",
-                timeout=120, env=env
-            )
-        if code != 0:
-            return False, f"git clone 失败: {err}"
-
-    # 安装
-    code, out, err = run_cmd(
-        f"cd {clone_path} && pip install .",
-        timeout=600, env=env
-    )
-    if code != 0:
-        # 尝试 --no-build-isolation
-        code, out, err = run_cmd(
-            f"cd {clone_path} && pip install --no-build-isolation .",
-            timeout=600, env=env
-        )
-        if code != 0:
-            return False, f"源码安装失败: {err}"
-
-    return True, f"源码安装成功: {clone_path}"
-
-
-def generate_host_instructions(component, repo_url, branch, container_name="$CONTAINER"):
-    """第三级：生成宿主机执行指令"""
-    repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
-    return {
-        "type": "host_fallback",
-        "message": "容器内无网络，请在宿主机执行以下命令",
-        "commands": [
-            f"cd /tmp && git clone --depth 1 --branch {branch} {repo_url}",
-            f"docker cp /tmp/{repo_name} {container_name}:/tmp/{repo_name}",
-            f"docker exec {container_name} bash -c 'cd /tmp/{repo_name} && pip install .'",
-        ],
-        "component": component,
-        "repo_url": repo_url,
-        "branch": branch,
-    }
-
-
-def install_or_upgrade_component(component, action, version=None, branch="main",
-                                  repo_url=None, proxy=None, container_name="$CONTAINER"):
-    """FlagGems/FlagScale/FlagCX 安装/升级（三级降级）"""
-    repo_url = repo_url or DEFAULT_REPOS.get(component, "")
-    old_version = get_current_version(component)
+    cmd = f"pip install --upgrade {pkg_name}"
+    code, out, err = run_cmd(cmd, timeout=300, env=env)
 
     result = {
-        "component": component,
-        "action": action,
+        "component": "flaggems",
+        "action": "upgrade",
         "previous_version": old_version,
-        "current_version": None,
-        "install_method": None,
-        "success": False,
-        "message": "",
+        "current_version": get_current_version("flaggems") if code == 0 else None,
+        "install_method": "pip",
+        "success": code == 0,
+        "message": f"升级成功: {cmd}" if code == 0 else f"升级失败: {err}",
         "timestamp": datetime.now().isoformat(),
     }
 
-    # 第一级：pip install
-    success, msg = pip_install(component, version=version, proxy=proxy)
-    if success:
-        result["success"] = True
-        result["install_method"] = "pip"
-        result["message"] = msg
-        result["current_version"] = get_current_version(component)
-        return result
-
-    pip_error = msg
-
-    # 第二级：源码安装
-    has_network = check_network(proxy)
-    if has_network:
-        success, msg = source_install(component, repo_url, branch=branch, proxy=proxy)
-        if success:
-            result["success"] = True
-            result["install_method"] = "source"
-            result["message"] = msg
-            result["current_version"] = get_current_version(component)
-            return result
-        source_error = msg
-    else:
-        source_error = "容器无网络，跳过源码安装"
-
-    # 第三级：宿主机降级
-    instructions = generate_host_instructions(component, repo_url, branch, container_name)
-    result["success"] = False
-    result["install_method"] = "host_fallback"
-    result["message"] = f"pip 失败: {pip_error}; 源码失败: {source_error}"
-    result["fallback"] = instructions
+    if result["success"]:
+        result["api"] = check_flaggems_api()
 
     return result
 
@@ -316,7 +178,6 @@ def handle_flagtree(action, vendor=None, version=None, source=False, branch=None
     # verify 输出包含 JSON，尝试解析
     if action == "verify" and out:
         try:
-            # 找到 JSON 部分
             start = out.index("{")
             end = out.rindex("}") + 1
             verify_data = json.loads(out[start:end])
@@ -362,18 +223,16 @@ print(json.dumps(result, indent=2))
 def main():
     parser = argparse.ArgumentParser(description="FlagOS 组件统一安装工具")
     parser.add_argument("--component", required=True,
-                        choices=["flaggems", "flagscale", "flagcx", "flagtree"],
+                        choices=["flaggems", "flagtree"],
                         help="要操作的组件")
     parser.add_argument("--action", required=True,
                         choices=["install", "upgrade", "uninstall", "verify"],
                         help="操作类型")
     parser.add_argument("--version", help="指定版本（如 4.2.1rc0）")
-    parser.add_argument("--branch", default="main", help="Git 分支（默认 main）")
-    parser.add_argument("--repo", help="仓库地址（不指定则使用默认）")
     parser.add_argument("--proxy", help="代理地址")
     parser.add_argument("--vendor", help="FlagTree 后端（如 nvidia, ascend）")
     parser.add_argument("--source", action="store_true", help="FlagTree 源码编译")
-    parser.add_argument("--container-name", default="$CONTAINER", help="容器名（宿主机降级用）")
+    parser.add_argument("--branch", help="FlagTree Git 分支")
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式")
     args = parser.parse_args()
 
@@ -388,7 +247,6 @@ def main():
             json_output=args.json,
         )
     elif args.action == "verify":
-        # 非 FlagTree 的 verify
         version = get_current_version(args.component)
         result = {
             "component": args.component,
@@ -409,20 +267,19 @@ def main():
             "message": out if code == 0 else err,
             "timestamp": datetime.now().isoformat(),
         }
+    elif args.component == "flaggems":
+        if args.action == "upgrade":
+            result = upgrade_flaggems(proxy=args.proxy)
+        else:
+            result = install_flaggems(version=args.version, proxy=args.proxy)
     else:
-        # install / upgrade
-        result = install_or_upgrade_component(
-            component=args.component,
-            action=args.action,
-            version=args.version,
-            branch=args.branch,
-            repo_url=args.repo,
-            proxy=args.proxy,
-            container_name=args.container_name,
-        )
-        # FlagGems 安装/升级后检查 API 兼容性
-        if result.get("success") and args.component == "flaggems":
-            result["api"] = check_flaggems_api()
+        result = {
+            "component": args.component,
+            "action": args.action,
+            "success": False,
+            "message": f"不支持的组件: {args.component}",
+            "timestamp": datetime.now().isoformat(),
+        }
 
     # 输出
     if args.json:
@@ -455,10 +312,6 @@ def main():
                 print(f"  版本: {result['current_version']}")
             if result.get("message"):
                 print(f"  信息: {result['message'][:200]}")
-            if result.get("fallback"):
-                print(f"\n  宿主机降级指令:")
-                for cmd in result["fallback"].get("commands", []):
-                    print(f"    {cmd}")
 
     sys.exit(0 if result.get("success", False) else 1)
 

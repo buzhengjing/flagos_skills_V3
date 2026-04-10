@@ -1,7 +1,7 @@
 ---
 name: flagos-component-install
-description: FlagOS 生态组件统一安装/升级/卸载，支持 FlagGems（三级降级）、FlagTree、FlagScale、FlagCX
-version: 1.0.0
+description: FlagOS 生态组件统一安装/升级/卸载，支持 FlagGems、FlagTree
+version: 2.0.0
 triggers:
   - 组件安装
   - install component
@@ -34,10 +34,8 @@ provides:
 
 | 组件 | 安装方式 | 说明 |
 |------|---------|------|
-| `flaggems` | pip → 源码 → 宿主机（三级降级） | FlagGems 算子库 |
+| `flaggems` | pip install（默认最新版） | FlagGems 算子库 |
 | `flagtree` | pip wheel / 源码编译（委托 install_flagtree.sh） | 统一 Triton 编译器 |
-| `flagscale` | pip → 源码 → 宿主机 | FlagScale 分布式框架 |
-| `flagcx` | pip → 源码 → 宿主机 | FlagCX 通信库 |
 
 ---
 
@@ -60,11 +58,11 @@ gpu:
 
 ```yaml
 component_install:
-  component: "<flaggems|flagtree|flagscale|flagcx>"
+  component: "<flaggems|flagtree>"
   action: "<install|uninstall|upgrade>"
   previous_version: "<old>"
   current_version: "<new>"
-  install_method: "<pip|source|host_fallback|flagtree_pip|flagtree_source>"
+  install_method: "<pip|flagtree_pip|flagtree_source>"
   success: true|false
   timestamp: "<ISO>"
 
@@ -86,10 +84,10 @@ environment:
 ## 步骤 1 — 查看当前版本
 
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip show flag-gems flagscale flagcx 2>/dev/null"
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip show flag-gems 2>/dev/null"
 ```
 
-FlagTree 状态从 `inspect_env.py` 的 `flagtree` 字段获取（或直接 verify）：
+FlagTree 状态：
 ```bash
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py --component flagtree --action verify --json"
 ```
@@ -102,17 +100,12 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; 
 
 ## 步骤 3 — 执行安装/升级
 
-### FlagGems 安装（三级降级）
+### FlagGems 安装
 
 ```bash
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
     --component flaggems --action install --json"
 ```
-
-降级策略：
-1. `pip install flag-gems` — 优先使用 pip 安装
-2. `git clone + pip install .` — pip 失败时自动降级到源码安装
-3. 宿主机降级 — 容器无网络时输出宿主机操作指令
 
 指定版本：
 ```bash
@@ -120,17 +113,11 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
     --component flaggems --action install --version 4.2.1rc0 --json"
 ```
 
-带代理：
-```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action install --proxy http://10.8.36.21:17890 --json"
-```
-
 ### FlagGems 升级
 
 ```bash
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action upgrade --branch main --json"
+    --component flaggems --action upgrade --json"
 ```
 
 ### FlagTree 安装
@@ -183,7 +170,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 # 完成条件
 
 - 目标组件已确定
-- 安装/升级操作已完成（或输出宿主机降级指令）
+- 安装/升级操作已完成
 - 版本变化已记录
 - API 兼容性已检查（FlagGems）
 - context.yaml 已更新
@@ -195,9 +182,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 | 问题 | 解决方案 |
 |------|----------|
-| pip install flag-gems 失败 | 自动降级到源码安装 |
-| 源码安装编译失败 | 脚本自动安装 setuptools/scikit-build-core |
-| 容器无网络 | 脚本自动输出宿主机操作指令 |
+| pip install flag-gems 失败 | 检查网络连通性和 pip 源配置 |
 | FlagTree 安装后 import triton 失败 | `install_flagtree.sh verify` 检查，`uninstall` 恢复原版 |
 | FlagTree 无预编译包 | 使用 `--source` 源码编译 |
 | 版本冲突 | 先 `pip uninstall` 再重新安装 |
