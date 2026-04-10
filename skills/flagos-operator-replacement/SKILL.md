@@ -124,12 +124,12 @@ modify-enable(调整算子) → 重启服务 → benchmark → 读取 txt 确认
 **脚本调用示例**：
 ```bash
 # 只启用指定算子
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py \
-    --action modify-enable --enabled-ops "addmm,mm,bmm,softmax" --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
+    --action modify-enable --enabled-ops 'addmm,mm,bmm,softmax' --json"
 
 # 禁用指定算子
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py \
-    --action modify-enable --disabled-ops "softmax,layer_norm" --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
+    --action modify-enable --disabled-ops 'softmax,layer_norm' --json"
 ```
 
 **`operator_search.py` 集成**：`_apply_non_plugin_config` 可直接调用 `toggle_flaggems.py --action modify-enable`，无需 Claude 编排层手动修改代码。

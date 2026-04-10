@@ -170,10 +170,16 @@ curl -s "https://modelscope.cn/api/v1/models/<owner>/<model_name>"
 容器就绪后立即执行：
 
 ```bash
-bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
+bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER $MODEL_NAME
 ```
 
-此命令自动创建 `results/`、`traces/`、`logs/`、`config/` 四个子目录并部署所有脚本。
+第二参数 `$MODEL_NAME` 为模型名称，传入后自动在宿主机创建 `/data/flagos-workspace/<MODEL_NAME>/` 及其子目录（results/traces/logs/config）。
+
+此命令会：
+1. 检测容器内 `results/`、`traces/`、`logs/` 是否有上一轮数据，若有则自动归档到 `archive/<YYYYMMDD_HHMMSS>/`
+2. 宿主机同步归档（如传了 MODEL_NAME）
+3. 创建干净的 `results/`、`traces/`、`logs/`、`config/` 目录
+4. 部署所有工具脚本
 
 ## 步骤 — 写入 context.yaml
 

@@ -146,13 +146,13 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; 
 
 **Native 模式**（关闭 FlagGems）：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --json"
 ```
 注释掉 `import flag_gems` / `flag_gems.enable()` 等代码行，服务启动时 FlagGems 不加载。
 
 **FlagOS 模式**（启用 FlagGems）：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --json"
 ```
 取消注释 `import flag_gems` / `flag_gems.enable()` 等代码行，服务启动时 FlagGems 自动生效。
 
@@ -160,7 +160,7 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --ac
 - 读取 `environment.flaggems_txt_path`（由 pre-service-inspection 步骤 2.6 写入）
 - 如果 `gems_txt_auto_detect: true`（代码解析未找到路径），启动后调用：
   ```bash
-  docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --action find-gems-txt --json
+  docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action find-gems-txt --json"
   ```
   从输出的 `recommended` 字段获取路径，回写 `context.yaml` 的 `environment.flaggems_txt_path`
 
@@ -170,13 +170,13 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --ac
 
 **Native 模式**（关闭 FlagGems）：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --integration-type plugin --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --integration-type plugin --json"
 ```
 输出 JSON 包含 `env_vars` 和 `env_inline` 字段，在启动命令中使用 `env_inline` 作为内联前缀。
 
 **FlagOS 模式**（启用 FlagGems）：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --integration-type plugin --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --integration-type plugin --json"
 ```
 
 **算子列表获取**（启动后）：
@@ -187,7 +187,7 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --ac
 在启动服务前，自动推算最小可用 `--tensor-parallel-size`：
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/calc_tp_size.py --model-path $MODEL_PATH --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/calc_tp_size.py --model-path $MODEL_PATH --json"
 ```
 
 输出示例：
@@ -312,7 +312,7 @@ docker exec $CONTAINER bash -c "/flagos-workspace/scripts/wait_for_service.sh --
 ## 步骤 5 — 服务验证
 
 ```bash
-curl -s http://localhost:$PORT/v1/models | python3 -m json.tool
+curl -s http://localhost:$PORT/v1/models
 curl -s http://localhost:$PORT/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "<model_name>", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 10}'
@@ -361,8 +361,8 @@ fi
 
 ```bash
 # 以 oplist 文件为准，同步保存到 results/ops_list.json
-docker exec $CONTAINER python3 /flagos-workspace/scripts/operator_optimizer.py discover \
-  --save-ops /flagos-workspace/results/ops_list.json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py discover \
+  --save-ops /flagos-workspace/results/ops_list.json"
 ```
 
 **关键原则**：

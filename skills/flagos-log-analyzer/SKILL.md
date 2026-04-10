@@ -66,9 +66,9 @@ diagnosis:
 ## 步骤 1 — 分析单个日志文件
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/log_analyzer.py analyze \
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/log_analyzer.py analyze \
     --log-path /flagos-workspace/logs/startup_flagos.log \
-    --json
+    --json"
 ```
 
 输出包含：错误分类列表、服务状态推断、FlagGems 检测、启动序列完成度、诊断建议。
@@ -76,9 +76,9 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/log_analyzer.py analyze
 ## 步骤 2 — 扫描整个日志目录
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/log_analyzer.py scan \
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/log_analyzer.py scan \
     --log-dir /flagos-workspace/logs/ \
-    --json
+    --json"
 ```
 
 扫描所有 `*.log` 文件，按时间排序，汇总错误和建议。

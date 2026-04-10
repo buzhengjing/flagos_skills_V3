@@ -88,7 +88,7 @@ environment:
 ## 步骤 1 — 运行环境检查脚本（一步完成）
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/inspect_env.py --output-json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json"
 ```
 
 此命令一次性完成：
@@ -135,7 +135,7 @@ FlagTree 仅记录 `has_flagtree`，不影响场景分类。
 当 `env_type == vllm_flaggems` 时，调用 `toggle_flaggems.py --action analyze` 深入分析代码中的 FlagGems 集成：
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/toggle_flaggems.py --action analyze --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action analyze --json"
 ```
 
 从输出中提取并写入 `context.yaml`：
@@ -152,7 +152,7 @@ environment:
 ## 步骤 3 — 生成报告
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/inspect_env.py --report
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --report"
 ```
 
 将报告内容分别保存到：

@@ -170,23 +170,23 @@ python3 issue_reporter.py full \
 ### 步骤 1 — 收集问题数据
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/issue_reporter.py collect \
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py collect \
     --type operator-crash \
     --log-path /flagos-workspace/logs/startup_flagos.log \
     --context-yaml /flagos-workspace/shared/context.yaml \
     --flaggems-code-path <flaggems代码文件路径> \
     --gems-txt-path /root/gems.txt \
     --output /flagos-workspace/results/issue_data.json \
-    --json
+    --json"
 ```
 
 ### 步骤 2 — 格式化为 Bug Report
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/issue_reporter.py format \
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py format \
     --collected-file /flagos-workspace/results/issue_data.json \
     --output /flagos-workspace/results/issue_report.md \
-    --json
+    --json"
 ```
 
 ### 步骤 3 — 提交 issue

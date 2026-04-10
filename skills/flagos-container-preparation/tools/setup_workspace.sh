@@ -10,7 +10,8 @@
 
 set -euo pipefail
 
-CONTAINER="${1:?用法: $0 <container_name>}"
+CONTAINER="${1:?用法: $0 <container_name> [model_path]}"
+MODEL_PATH="${2:-}"
 
 # 项目根目录（此脚本所在位置的上三级）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,17 +22,83 @@ echo "FlagOS 工作区初始化"
 echo "=========================================="
 echo "  容器: ${CONTAINER}"
 echo "  项目: ${PROJECT_ROOT}"
+[ -n "${MODEL_PATH}" ] && echo "  模型: ${MODEL_PATH}"
 echo ""
 
+# 0. 归档上一轮数据（容器内）
+echo "[0/5] 检查并归档历史数据..."
+HAS_HISTORY=$(docker exec "${CONTAINER}" bash -c "
+    found=0
+    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs; do
+        if [ -d \"\$d\" ] && [ \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
+            found=1; break
+        fi
+    done
+    echo \$found
+" 2>/dev/null || echo "0")
+
+if [ "${HAS_HISTORY}" = "1" ]; then
+    ARCHIVE_TS=$(date +%Y%m%d_%H%M%S)
+    echo "  发现历史数据，归档到 archive/${ARCHIVE_TS}/ ..."
+    docker exec "${CONTAINER}" bash -c "
+        ARCHIVE_DIR=/flagos-workspace/archive/${ARCHIVE_TS}
+        mkdir -p \"\${ARCHIVE_DIR}\"
+        for d in results traces logs; do
+            if [ -d /flagos-workspace/\$d ] && [ \"\$(ls -A /flagos-workspace/\$d 2>/dev/null)\" ]; then
+                mv /flagos-workspace/\$d \"\${ARCHIVE_DIR}/\$d\"
+            fi
+        done
+        if [ -f /flagos-workspace/shared/context.yaml ]; then
+            cp /flagos-workspace/shared/context.yaml \"\${ARCHIVE_DIR}/context.yaml\"
+        fi
+    "
+    echo "  容器内归档完成: /flagos-workspace/archive/${ARCHIVE_TS}/"
+else
+    echo "  无历史数据，跳过归档"
+fi
+
+# 0.5. 创建宿主机工作目录（避免花括号展开被 sandbox 拦截）
+if [ -n "${MODEL_PATH}" ]; then
+    echo "[0.5/5] 创建宿主机工作目录..."
+
+    # 归档宿主机历史数据
+    HOST_BASE="/data/flagos-workspace/${MODEL_PATH}"
+    if [ -d "${HOST_BASE}" ]; then
+        HOST_HAS_HISTORY=0
+        for d in results traces logs; do
+            if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
+                HOST_HAS_HISTORY=1; break
+            fi
+        done
+        if [ "${HOST_HAS_HISTORY}" = "1" ]; then
+            HOST_ARCHIVE_TS=${ARCHIVE_TS:-$(date +%Y%m%d_%H%M%S)}
+            HOST_ARCHIVE="${HOST_BASE}/archive/${HOST_ARCHIVE_TS}"
+            mkdir -p "${HOST_ARCHIVE}"
+            for d in results traces logs; do
+                if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
+                    mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
+                fi
+            done
+            echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
+        fi
+    fi
+
+    mkdir -p "${HOST_BASE}/results"
+    mkdir -p "${HOST_BASE}/traces"
+    mkdir -p "${HOST_BASE}/logs"
+    mkdir -p "${HOST_BASE}/config"
+    echo "  宿主机目录创建完成: ${HOST_BASE}"
+fi
+
 # 1. 创建容器内目录结构
-echo "[1/4] 创建目录结构..."
+echo "[1/5] 创建目录结构..."
 docker exec "${CONTAINER}" bash -c "
     mkdir -p /flagos-workspace/{scripts,logs,results,reports,eval,perf/config,shared,output,traces,config}
 "
 echo "  目录创建完成"
 
 # 2. 复制所有脚本到容器
-echo "[2/4] 复制脚本到容器..."
+echo "[2/5] 复制脚本到容器..."
 
 SCRIPTS_COPIED=0
 
@@ -121,14 +188,14 @@ if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>
 fi
 
 # 3. 安装脚本依赖（如需要）
-echo "[3/4] 检查脚本依赖..."
+echo "[3/5] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
 # 4. 验证
-echo "[4/4] 验证部署..."
+echo "[4/5] 验证部署..."
 SCRIPT_COUNT=$(docker exec "${CONTAINER}" bash -c "ls /flagos-workspace/scripts/*.py /flagos-workspace/scripts/*.sh 2>/dev/null | wc -l")
 echo "  容器内脚本数: ${SCRIPT_COUNT}"
 docker exec "${CONTAINER}" ls -la /flagos-workspace/scripts/ 2>/dev/null || true

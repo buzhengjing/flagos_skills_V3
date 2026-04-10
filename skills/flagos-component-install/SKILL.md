@@ -86,12 +86,12 @@ environment:
 ## 步骤 1 — 查看当前版本
 
 ```bash
-docker exec $CONTAINER pip show flag-gems flagscale flagcx 2>/dev/null
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip show flag-gems flagscale flagcx 2>/dev/null"
 ```
 
 FlagTree 状态从 `inspect_env.py` 的 `flagtree` 字段获取（或直接 verify）：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py --component flagtree --action verify --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py --component flagtree --action verify --json"
 ```
 
 ## 步骤 2 — 停止服务（如在运行）
@@ -105,8 +105,8 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; 
 ### FlagGems 安装（三级降级）
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action install --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flaggems --action install --json"
 ```
 
 降级策略：
@@ -116,43 +116,43 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
 
 指定版本：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action install --version 4.2.1rc0 --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flaggems --action install --version 4.2.1rc0 --json"
 ```
 
 带代理：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action install --proxy http://10.8.36.21:17890 --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flaggems --action install --proxy http://10.8.36.21:17890 --json"
 ```
 
 ### FlagGems 升级
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action upgrade --branch main --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flaggems --action upgrade --branch main --json"
 ```
 
 ### FlagTree 安装
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flagtree --action install --vendor nvidia --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flagtree --action install --vendor nvidia --json"
 ```
 
 `--vendor` 根据 `gpu.vendor` 自动选择，支持：nvidia, iluvatar, mthreads, metax, ascend, tsingmicro, hcu, enflame, sunrise, amd, xpu。
 
 源码编译（无预编译包时）：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flagtree --action install --vendor ascend --source --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flagtree --action install --vendor ascend --source --json"
 ```
 
 ### FlagTree 卸载
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flagtree --action uninstall --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flagtree --action uninstall --json"
 ```
 
 卸载时自动恢复原版 triton（从备份恢复）。
@@ -160,16 +160,16 @@ docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
 ### FlagTree 验证
 
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flagtree --action verify --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flagtree --action verify --json"
 ```
 
 ## 步骤 4 — 验证安装结果
 
 FlagGems 验证：
 ```bash
-docker exec $CONTAINER python3 /flagos-workspace/scripts/install_component.py \
-    --component flaggems --action verify --json
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_component.py \
+    --component flaggems --action verify --json"
 ```
 
 输出包含版本和 API 兼容性信息（has_enable, has_only_enable, enable_params）。

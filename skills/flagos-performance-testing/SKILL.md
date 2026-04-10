@@ -210,7 +210,7 @@ test_matrix:
 此时服务已以 native 模式启动（FlagGems 关闭）。
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/benchmark_runner.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config perf/config/perf_config.yaml \
   --strategy fast \
   --output-name native_performance \
@@ -240,7 +240,7 @@ print(f'已记录 {len(ops)} 个算子到 ops_list.json')
 ## 步骤 6：运行 V2 FlagGems 性能测试
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/benchmark_runner.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config perf/config/perf_config.yaml \
   --strategy fast \
   --output-name flagos_performance \
@@ -277,7 +277,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 优化完成后重测：
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/benchmark_runner.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config perf/config/perf_config.yaml \
   --strategy fast \
   --output-name flagos_optimized \
@@ -288,7 +288,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/benchmark
 ## 步骤 9：性能对比 + 报告
 
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace && python scripts/performance_compare.py \
+docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/performance_compare.py \
   --native results/native_performance.json \
   --flagos-optimized results/flagos_optimized.json \
   --flagos-full results/flagos_performance.json \

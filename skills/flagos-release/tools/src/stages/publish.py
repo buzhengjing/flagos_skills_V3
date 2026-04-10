@@ -63,6 +63,7 @@ class PublishStage(BaseStage):
 
         start_time = time.time()
         publish_config = self.config.publish
+        harbor_failed = False
 
         # 如果已有 Harbor 镜像地址，跳过 commit/tag/push
         if publish_config.existing_harbor_image:
@@ -93,7 +94,8 @@ class PublishStage(BaseStage):
             if publish_config.push_harbor:
                 success = self._push_to_harbor()
                 if not success:
-                    return self.make_result(False, "推送 Harbor 失败")
+                    harbor_failed = True
+                    print("  ⚠ Harbor 推送失败，继续执行后续步骤（README 生成、数据回传）")
             else:
                 self.skip_step("推送 Harbor", "配置跳过")
 
@@ -122,9 +124,103 @@ class PublishStage(BaseStage):
         else:
             self.skip_step("发布到 HuggingFace", "配置跳过")
 
+        # 6. 数据回传到宿主机
+        self._sync_to_host()
+
         duration = time.time() - start_time
         print(f"\n+ {self.name} 完成 (总耗时 {duration:.2f}s)")
-        return self.make_result(True)
+        return self.make_result(not harbor_failed)
+
+    def _sync_to_host(self):
+        """将容器内 /flagos-workspace 的产出同步到宿主机工作目录。
+
+        检查宿主机目标目录是否已有对应文件，缺失或大小不一致则 docker cp 回传。
+        回传失败不影响整体流水线结果。
+        """
+        container_name = self.config.container_name
+        host_base = self.config.host_workspace_base
+        model_source = self.config.model_info.source_of_model_weights
+
+        if not container_name or not model_source or not host_base:
+            self.skip_step("数据回传", "缺少容器名/模型名/宿主机路径")
+            return
+
+        host_target = os.path.join(host_base, model_source)
+        print(f"\n[数据回传] 同步到宿主机: {host_target}")
+
+        sync_dirs = ["results", "traces", "logs", "config"]
+        synced = 0
+        skipped = 0
+        failed = 0
+
+        for dir_name in sync_dirs:
+            container_dir = f"/flagos-workspace/{dir_name}"
+            host_dir = os.path.join(host_target, dir_name)
+
+            os.makedirs(host_dir, exist_ok=True)
+
+            # 列出容器内该目录的文件
+            try:
+                result = subprocess.run(
+                    ["docker", "exec", container_name, "find", container_dir,
+                     "-maxdepth", "1", "-type", "f", "-printf", "%f\\n"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.returncode != 0:
+                    print(f"  ⚠ 无法列出容器 {container_dir}: {result.stderr.strip()}")
+                    continue
+                files = [f for f in result.stdout.strip().split('\n') if f]
+            except Exception as e:
+                print(f"  ⚠ 列出容器 {container_dir} 异常: {e}")
+                continue
+
+            for filename in files:
+                container_file = f"{container_dir}/{filename}"
+                # context.yaml 回传时重命名为 context_snapshot.yaml
+                if dir_name == "config" and filename == "context.yaml":
+                    host_filename = "context_snapshot.yaml"
+                else:
+                    host_filename = filename
+                host_file = os.path.join(host_dir, host_filename)
+
+                # 跳过已存在且大小一致的文件
+                if os.path.exists(host_file):
+                    try:
+                        size_result = subprocess.run(
+                            ["docker", "exec", container_name, "stat", "-c", "%s", container_file],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        container_size = int(size_result.stdout.strip()) if size_result.returncode == 0 else -1
+                        host_size = os.path.getsize(host_file)
+                        if container_size == host_size:
+                            skipped += 1
+                            continue
+                    except Exception:
+                        pass
+
+                # docker cp 回传
+                try:
+                    cp_result = subprocess.run(
+                        ["docker", "cp", f"{container_name}:{container_file}", host_file],
+                        capture_output=True, text=True, timeout=60
+                    )
+                    if cp_result.returncode == 0:
+                        synced += 1
+                    else:
+                        print(f"  ⚠ 复制失败: {filename} → {cp_result.stderr.strip()}")
+                        failed += 1
+                except Exception as e:
+                    print(f"  ⚠ 复制异常: {filename} → {e}")
+                    failed += 1
+
+        summary = f"同步 {synced} 个文件, 跳过 {skipped} 个(已存在), 失败 {failed} 个"
+        print(f"  {summary}")
+
+        self.steps.append(StepResult(
+            step_name="数据回传到宿主机",
+            status=StepStatus.SUCCESS if failed == 0 else StepStatus.FAILED,
+            message=summary
+        ))
 
     def _commit_container(self) -> bool:
         """将容器 commit 为镜像"""

@@ -92,6 +92,7 @@ class PipelineConfig:
     """完整的流水线配置"""
     input_type: str = "container"
     container_name: str = ""
+    host_workspace_base: str = "/data/flagos-workspace"
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -179,6 +180,9 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     workspace = ctx.get('workspace', {})
     container_workspace = workspace.get('container_path', '/flagos-workspace')
     config.publish.results_dir = f"{container_workspace}/results"
+
+    # 宿主机工作目录（数据回传目标）
+    config.host_workspace_base = workspace.get('host_path', '/data/flagos-workspace')
 
     return config
 

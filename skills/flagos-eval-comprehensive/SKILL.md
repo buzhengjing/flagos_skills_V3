@@ -134,7 +134,7 @@ eval:
 
 ## 使用方式
 
-**步骤 1：复制工具到容器**
+**步骤 1：复制工具到容器**（已由 setup_workspace.sh 部署，仅在需要更新脚本/配置时执行）
 
 ```bash
 CONTAINER=<container_name>
@@ -145,12 +145,12 @@ docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml $CONTAINE
 **步骤 2：安装依赖**
 
 ```bash
-docker exec $CONTAINER pip install evalscope pyyaml requests
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests"
 ```
 
 如使用 ModelScope 数据源（默认）：
 ```bash
-docker exec $CONTAINER pip install modelscope
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install modelscope"
 ```
 
 **步骤 3：配置**
@@ -172,11 +172,11 @@ dataset_hub: "modelscope"               # modelscope 或 huggingface
 ```bash
 # 方式一：使用配置文件
 docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
-    python fast_gpqa.py --config fast_gpqa_config.yaml"
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 
 # 方式二：命令行参数（无需改配置文件）
 docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
-    python fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
 ```
 
 ## 输出
@@ -222,7 +222,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
 **步骤④ — V1 (Native) 精度**（始终执行）：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
-    python fast_gpqa.py --config fast_gpqa_config.yaml"
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 # 保存结果
 docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_native.json
 ```
@@ -230,7 +230,7 @@ docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-worksp
 **步骤④ — V2 (FlagGems) 精度**（始终执行）：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
-    python fast_gpqa.py --config fast_gpqa_config.yaml"
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 # 保存结果
 docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json
 ```
