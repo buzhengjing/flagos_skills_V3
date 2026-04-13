@@ -61,7 +61,7 @@ tools/
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -80,7 +80,7 @@ workflow:
   skip_reason: <来自编排层>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 image:

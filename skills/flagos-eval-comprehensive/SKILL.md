@@ -54,7 +54,7 @@ docker exec $CONTAINER bash -c "pgrep -f 'benchmark_runner\|vllm.*bench' && echo
 
 ## 上下文集成
 
-### 从 shared/context.yaml 读取
+### 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -79,7 +79,7 @@ inspection:
   flaggems_logic: <来自 pre-service-inspection>
 ```
 
-### 写入 shared/context.yaml
+### 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 eval:

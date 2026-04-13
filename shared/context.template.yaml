@@ -1,3 +1,13 @@
+# ============================================================================
+# context.template.yaml — 模板文件，仅用于初始化
+# ============================================================================
+# 此文件是 context.yaml 的模板，由 setup_workspace.sh 复制到每个容器内
+# 作为 /flagos-workspace/shared/context.yaml 的初始状态。
+#
+# ⚠ 禁止直接读写此文件作为运行时状态！
+# 运行时 context 位于容器内 /flagos-workspace/shared/context.yaml，每个容器独立。
+# ============================================================================
+#
 # Skill 间共享上下文
 # 由上游 skill 写入，下游 skill 读取
 #
@@ -135,28 +145,11 @@ plugin_control:
   dispatch_mode: ""             # flagos | vendor | reference
 
 # ============================================================================
-# FlagTree 信息 (由 pre-service-inspection 探测，component-install 更新)
-# ============================================================================
-flagtree:
-  installed: false             # 是否已安装
-  version: ""                  # FlagTree 版本
-  triton_version: ""           # 对应 Triton 版本
-  install_method: ""           # pip | source | pre_installed
-  backend: ""                  # nvidia | ascend | ...
-
-# ============================================================================
-# 环境状态 (由 pre-service-inspection 分类，service-startup 补充)
+# 环境状态 (由 service-startup 写入)
 # ============================================================================
 environment:
-  env_type: ""                     # native | vllm_flaggems | vllm_plugin_flaggems
-  has_plugin: false                # 是否有 vllm-plugin-FL
-  has_flagtree: false              # 是否安装了 FlagTree（不影响场景分类）
+  has_plugin: false          # 是否有 vllm-plugin-FL
   initial_env_verified: false      # 初始环境是否验证通过
-  # vllm_flaggems 场景专用（由 inspect_env.py / toggle_flaggems.py analyze 写入）
-  flaggems_code_path: ""           # import flag_gems 所在文件路径
-  flaggems_enable_call: ""         # flag_gems.enable() 完整调用代码
-  flaggems_txt_path: ""            # enable() 中指定的算子记录 txt 路径（如 /root/gems.txt）
-  gems_txt_auto_detect: false      # 代码解析未找到路径时为 true，需启动后 find 搜索
 
 # ============================================================================
 # FlagGems 启停方法 (由 pre-service-inspection 探测写入)
@@ -235,7 +228,7 @@ native_perf:
 # V2 性能 — Full FlagGems 全量算子 (由 performance-testing 写入)
 # ============================================================================
 flagos_full_perf:
-  result_path: ""             # flagos_performance.json 路径
+  result_path: ""             # flagos_full.json 路径
   output_throughput: 0
   total_throughput: 0
 
@@ -253,7 +246,7 @@ flagos_optimized_perf:
 optimization:
   target_ratio: 0.8           # 性能目标: 每个用例每个并发级别 FlagOS / V1 >= 80%
   current_ratio: 0            # 当前性能比
-  search_phase: ""            # group | done
+  search_phase: ""            # oot | group | done
   plugin_mode: false          # 是否使用 plugin 环境变量控制
   enabled_ops: []             # 当前启用的算子列表
   disabled_ops: []            # 当前禁用的算子列表
@@ -261,18 +254,6 @@ optimization:
   flagos_blacklist: []        # torch 底层需禁用的算子
   operator_config_path: ""    # operator_config.json 路径
   search_log: []              # 搜索历史记录
-
-# ============================================================================
-# 组件安装记录 (由 component-install 写入)
-# ============================================================================
-component_install:
-  component: ""                # flaggems | flagtree | flagscale | flagcx
-  action: ""                   # install | uninstall | upgrade
-  previous_version: ""
-  current_version: ""
-  install_method: ""           # pip | source | host_fallback | flagtree_pip | flagtree_source
-  success: false
-  timestamp: ""
 
 # ============================================================================
 # 流程计时 (由编排层维护)
@@ -294,28 +275,6 @@ timing:
     operator_replacement: 0
     perf_v3: 0
     final_report: 0
-
-# ============================================================================
-# 工作流状态 (由编排层维护，发布步骤读取)
-# ============================================================================
-workflow:
-  service_ok: false           # 步骤②：服务是否启动成功
-  accuracy_ok: false          # 步骤③：精度是否达标（含 3 轮内优化达标）
-  accuracy_rounds: 0          # 精度优化执行轮次
-  performance_ok: false       # 步骤④：性能是否达标（含 3 轮内优化达标）
-  performance_rounds: 0       # 性能优化执行轮次
-  qualified: false            # service_ok AND accuracy_ok AND performance_ok → 可公开发布
-  skip_reason: ""             # 跳过步骤的原因（如 "service_startup_failed"）
-
-# ============================================================================
-# Issue 提交记录 (由 flagos-issue-reporter 写入)
-# ============================================================================
-issues:
-  submitted: []             # 已提交的 issue 列表
-  # - type: operator-crash
-  #   url: https://github.com/flagos-ai/FlagGems/issues/123
-  #   ops: [mm, softmax]
-  #   timestamp: "2026-04-08T15:30:00"
 
 # ============================================================================
 # 元数据

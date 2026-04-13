@@ -3,6 +3,7 @@
 从 context.yaml 加载配置，并提供配置验证和自动填充
 """
 import os
+import subprocess
 from dataclasses import dataclass, field
 from typing import List
 import yaml
@@ -185,9 +186,22 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     if existing_tag:
         config.publish.existing_harbor_image = existing_tag
 
-    # token 从环境变量读取
+    # token 从宿主机环境变量读取，若不存在则尝试从容器内获取
     config.publish.modelscope_token = os.environ.get('MODELSCOPE_TOKEN', '')
     config.publish.huggingface_token = os.environ.get('HF_TOKEN', '')
+
+    if (not config.publish.modelscope_token or not config.publish.huggingface_token) and config.container_name:
+        for env_var, attr in [('MODELSCOPE_TOKEN', 'modelscope_token'), ('HF_TOKEN', 'huggingface_token')]:
+            if not getattr(config.publish, attr):
+                try:
+                    result = subprocess.run(
+                        ["docker", "exec", config.container_name, "printenv", env_var],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        setattr(config.publish, attr, result.stdout.strip())
+                except Exception:
+                    pass
 
     # 有 token 则启用对应平台上传
     config.publish.publish_modelscope = bool(config.publish.modelscope_token)

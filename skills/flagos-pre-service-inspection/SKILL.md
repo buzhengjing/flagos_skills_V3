@@ -38,7 +38,7 @@ provides:
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -49,7 +49,7 @@ entry:
   type: <来自 container-preparation>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 execution:
@@ -102,7 +102,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 ## 步骤 2 — 解析 JSON 结果并写入 context.yaml
 
-从 JSON 输出中提取字段，写入 `shared/context.yaml` 的 `execution`、`inspection`、`flaggems_control` 字段。
+从 JSON 输出中提取字段，写入容器内 `/flagos-workspace/shared/context.yaml` 的 `execution`、`inspection`、`flaggems_control` 字段。
 
 同时写入 `environment` 字段：
 ```yaml

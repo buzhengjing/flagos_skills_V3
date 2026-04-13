@@ -114,9 +114,9 @@ def validate_config(config: Dict[str, Any]) -> bool:
     errors = []
 
     if not config.get("server", {}).get("host"):
-        errors.append("server.host 未配置 (检查 shared/context.yaml)")
+        errors.append("server.host 未配置 (检查 /flagos-workspace/shared/context.yaml)")
     if not config.get("model", {}).get("tokenizer_path"):
-        errors.append("model.tokenizer_path 未配置 (检查 shared/context.yaml)")
+        errors.append("model.tokenizer_path 未配置 (检查 /flagos-workspace/shared/context.yaml)")
     if not config.get("test_matrix"):
         errors.append("test_matrix 为空")
     if not config.get("concurrency", {}).get("levels"):
@@ -512,6 +512,29 @@ def save_results(results: Dict[str, Any], config: Dict[str, Any],
 
     if timing:
         data["_timing"] = timing
+
+    data["_meta"] = {
+        "_structure": "顶层 key 为 test_case 名称（如 4k_input_1k_output），其下 key 为并发级别（1/2/4/.../max）",
+        "Successful requests": "成功完成的请求数",
+        "Failed requests": "失败的请求数",
+        "Benchmark duration (s)": "该并发级别测试总耗时（秒）",
+        "Total input tokens": "所有请求的输入 token 总数",
+        "Total generated tokens": "所有请求的生成 token 总数",
+        "Request throughput (req/s)": "请求吞吐量（每秒完成的请求数）",
+        "Output token throughput (tok/s)": "输出 token 吞吐量（tok/s），性能对比的核心指标",
+        "Total token throughput (tok/s)": "总 token 吞吐量（input + output，tok/s）",
+        "Peak output token throughput (tok/s)": "峰值输出 token 吞吐量（tok/s）",
+        "Peak concurrent requests": "峰值并发请求数",
+        "Mean TTFT (ms)": "平均首 token 延迟（Time To First Token，毫秒）",
+        "Median TTFT (ms)": "中位数首 token 延迟（毫秒）",
+        "P99 TTFT (ms)": "99 分位首 token 延迟（毫秒）",
+        "Mean TPOT (ms)": "平均每 token 生成延迟（Time Per Output Token，毫秒）",
+        "Median TPOT (ms)": "中位数每 token 生成延迟（毫秒）",
+        "P99 TPOT (ms)": "99 分位每 token 生成延迟（毫秒）",
+        "Mean ITL (ms)": "平均 token 间延迟（Inter-Token Latency，毫秒）",
+        "Median ITL (ms)": "中位数 token 间延迟（毫秒）",
+        "P99 ITL (ms)": "99 分位 token 间延迟（毫秒）",
+    }
 
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

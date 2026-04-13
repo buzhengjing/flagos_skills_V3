@@ -164,72 +164,52 @@ class PublishStage(BaseStage):
         host_target = host_base
         print(f"\n[数据回传] 同步到宿主机: {host_target}")
 
-        sync_dirs = ["results", "traces", "logs", "config"]
+        # 整目录 docker cp，确保子目录（如 results/outputs/...）也被同步
+        sync_dirs = ["results", "traces", "logs"]
         synced = 0
-        skipped = 0
         failed = 0
 
         for dir_name in sync_dirs:
             container_dir = f"/flagos-workspace/{dir_name}"
             host_dir = os.path.join(host_target, dir_name)
-
             os.makedirs(host_dir, exist_ok=True)
 
-            # 列出容器内该目录的文件
             try:
-                result = subprocess.run(
-                    ["docker", "exec", container_name, "find", container_dir,
-                     "-maxdepth", "1", "-type", "f", "-printf", "%f\\n"],
-                    capture_output=True, text=True, timeout=10
+                cp_result = subprocess.run(
+                    ["docker", "cp", f"{container_name}:{container_dir}/.", host_dir + "/"],
+                    capture_output=True, text=True, timeout=120
                 )
-                if result.returncode != 0:
-                    print(f"  ⚠ 无法列出容器 {container_dir}: {result.stderr.strip()}")
-                    continue
-                files = [f for f in result.stdout.strip().split('\n') if f]
-            except Exception as e:
-                print(f"  ⚠ 列出容器 {container_dir} 异常: {e}")
-                continue
-
-            for filename in files:
-                container_file = f"{container_dir}/{filename}"
-                # context.yaml 回传时重命名为 context_snapshot.yaml
-                if dir_name == "config" and filename == "context.yaml":
-                    host_filename = "context_snapshot.yaml"
+                if cp_result.returncode == 0:
+                    print(f"  ✓ {dir_name}/ 已同步")
+                    synced += 1
                 else:
-                    host_filename = filename
-                host_file = os.path.join(host_dir, host_filename)
-
-                # 跳过已存在且大小一致的文件
-                if os.path.exists(host_file):
-                    try:
-                        size_result = subprocess.run(
-                            ["docker", "exec", container_name, "stat", "-c", "%s", container_file],
-                            capture_output=True, text=True, timeout=5
-                        )
-                        container_size = int(size_result.stdout.strip()) if size_result.returncode == 0 else -1
-                        host_size = os.path.getsize(host_file)
-                        if container_size == host_size:
-                            skipped += 1
-                            continue
-                    except Exception:
-                        pass
-
-                # docker cp 回传
-                try:
-                    cp_result = subprocess.run(
-                        ["docker", "cp", f"{container_name}:{container_file}", host_file],
-                        capture_output=True, text=True, timeout=60
-                    )
-                    if cp_result.returncode == 0:
-                        synced += 1
-                    else:
-                        print(f"  ⚠ 复制失败: {filename} → {cp_result.stderr.strip()}")
-                        failed += 1
-                except Exception as e:
-                    print(f"  ⚠ 复制异常: {filename} → {e}")
+                    print(f"  ⚠ {dir_name}/ 同步失败: {cp_result.stderr.strip()}")
                     failed += 1
+            except Exception as e:
+                print(f"  ⚠ {dir_name}/ 同步异常: {e}")
+                failed += 1
 
-        summary = f"同步 {synced} 个文件, 跳过 {skipped} 个(已存在), 失败 {failed} 个"
+        # context.yaml 单独处理：回传时重命名为 context_snapshot.yaml
+        config_dir = os.path.join(host_target, "config")
+        os.makedirs(config_dir, exist_ok=True)
+        try:
+            cp_result = subprocess.run(
+                ["docker", "cp",
+                 f"{container_name}:/flagos-workspace/shared/context.yaml",
+                 os.path.join(config_dir, "context_snapshot.yaml")],
+                capture_output=True, text=True, timeout=30
+            )
+            if cp_result.returncode == 0:
+                print(f"  ✓ context_snapshot.yaml 已同步")
+                synced += 1
+            else:
+                print(f"  ⚠ context_snapshot.yaml 同步失败: {cp_result.stderr.strip()}")
+                failed += 1
+        except Exception as e:
+            print(f"  ⚠ context_snapshot.yaml 同步异常: {e}")
+            failed += 1
+
+        summary = f"同步 {synced} 个目录/文件, 失败 {failed} 个"
         print(f"  {summary}")
 
         self.steps.append(StepResult(

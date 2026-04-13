@@ -44,7 +44,7 @@ provides:
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -77,7 +77,7 @@ flaggems_control:
   disable_method: <来自 pre-service-inspection>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 operator_replacement:

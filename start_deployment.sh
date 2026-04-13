@@ -37,7 +37,7 @@ claude "
 → 报告整理收尾
 \`\`\`
 
-3. 通过 shared/context.yaml 在 Skills 间传递上下文
+3. 通过容器内 /flagos-workspace/shared/context.yaml 在 Skills 间传递上下文（每个容器独立，从 shared/context.template.yaml 初始化）
 
 ## 自动化原则
 

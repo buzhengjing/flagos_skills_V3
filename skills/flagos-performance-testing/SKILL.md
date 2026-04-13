@@ -162,7 +162,7 @@ except Exception as e:
 
 ## 步骤 1：同步配置
 
-从 `shared/context.yaml` 读取服务信息，写入 `/flagos-workspace/perf/config/perf_config.yaml`。
+从容器内 `/flagos-workspace/shared/context.yaml` 读取服务信息，写入 `/flagos-workspace/perf/config/perf_config.yaml`。
 
 同时将配置快照保存到 `config/` 目录：
 ```bash
@@ -189,7 +189,7 @@ test_matrix:
 
 ## 步骤 2：判断当前 FlagGems 状态
 
-从 `shared/context.yaml` 的 `flaggems_control.integration_type` 和 `inspection` 字段判断当前环境中 FlagGems 是否已启用。
+从容器内 `/flagos-workspace/shared/context.yaml` 的 `flaggems_control.integration_type` 和 `inspection` 字段判断当前环境中 FlagGems 是否已启用。
 
 判断依据（按优先级）：
 1. `flaggems_control.enable_method` 是否为 `auto`（plugin 自动启用）

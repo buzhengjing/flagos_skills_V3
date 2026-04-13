@@ -87,7 +87,7 @@ fi
 echo "[1/6] 检查并归档历史数据..."
 HAS_HISTORY=$(docker exec "${CONTAINER}" bash -c "
     found=0
-    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs; do
+    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs /flagos-workspace/config /flagos-workspace/output; do
         if [ -d \"\$d\" ] && [ \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
             found=1; break
         fi
@@ -101,7 +101,7 @@ if [ "${HAS_HISTORY}" = "1" ]; then
     docker exec "${CONTAINER}" bash -c "
         ARCHIVE_DIR=/flagos-workspace/archive/${ARCHIVE_TS}
         mkdir -p \"\${ARCHIVE_DIR}\"
-        for d in results traces logs; do
+        for d in results traces logs config output; do
             if [ -d /flagos-workspace/\$d ] && [ \"\$(ls -A /flagos-workspace/\$d 2>/dev/null)\" ]; then
                 mv /flagos-workspace/\$d \"\${ARCHIVE_DIR}/\$d\"
             fi
@@ -140,7 +140,7 @@ if [ -n "${MODEL_NAME}" ]; then
     HOST_BASE="/data/flagos-workspace/${MODEL_NAME}"
     if [ -d "${HOST_BASE}" ]; then
         HOST_HAS_HISTORY=0
-        for d in results traces logs; do
+        for d in results traces logs config; do
             if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                 HOST_HAS_HISTORY=1; break
             fi
@@ -149,19 +149,24 @@ if [ -n "${MODEL_NAME}" ]; then
             HOST_ARCHIVE_TS=${ARCHIVE_TS:-$(date +%Y%m%d_%H%M%S)}
             HOST_ARCHIVE="${HOST_BASE}/archive/${HOST_ARCHIVE_TS}"
             mkdir -p "${HOST_ARCHIVE}"
-            # results 和 traces 直接整目录归档
-            for d in results traces; do
+            for d in results traces config; do
                 if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                     mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
                 fi
             done
-            # logs 目录不归档：run_pipeline.sh 在启动时已完成宿主机 logs 归档，
-            # 此时 logs/ 中只有当前会话的活跃文件（tee 正在写入），不能移动
-            echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
-            # 归档后清理宿主机残留的 context 快照，避免旧数据被误读
-            if [ -f "${HOST_BASE}/config/context_snapshot.yaml" ]; then
-                mv "${HOST_BASE}/config/context_snapshot.yaml" "${HOST_ARCHIVE}/context_snapshot.yaml"
+            # logs 目录不整体移动：run_pipeline.sh 在启动时已完成宿主机 logs 归档，
+            # 此时 logs/ 中只有当前会话的活跃文件（tee 正在写入），不能移动。
+            # 但归档 logs 中已有的非活跃文件（上一轮残留）
+            if [ -d "${HOST_BASE}/logs" ] && [ "$(ls -A "${HOST_BASE}/logs" 2>/dev/null)" ]; then
+                mkdir -p "${HOST_ARCHIVE}/logs"
+                find "${HOST_BASE}/logs" -maxdepth 1 -type f ! -name "*.log" -newer "${HOST_BASE}/logs" -prune -o -type f -print 2>/dev/null | while read -r f; do
+                    # 跳过正在被 tee 写入的当前会话日志（通过 fuser 检测）
+                    if ! fuser "$f" >/dev/null 2>&1; then
+                        mv "$f" "${HOST_ARCHIVE}/logs/" 2>/dev/null || true
+                    fi
+                done
             fi
+            echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
         fi
     fi
 
@@ -261,19 +266,21 @@ fi
 
 echo "  共复制 ${SCRIPTS_COPIED} 个脚本"
 
-# 3.5. 确保 context.yaml 存在
-# 注意：如果归档流程已重置了 context.yaml（干净模板），这里不会覆盖它
-# 只有当文件完全不存在时（首次运行）才从项目根目录复制或创建空文件
-if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>/dev/null; then
+# 3.5. 从模板初始化容器内 context.yaml（每个容器独立，避免多任务冲突）
+# 每次都从模板重新初始化，确保干净的初始状态
+TEMPLATE_FILE="${PROJECT_ROOT}/shared/context.template.yaml"
+if [ -f "${TEMPLATE_FILE}" ]; then
+    docker cp "${TEMPLATE_FILE}" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
+    echo "  ✓ shared/context.yaml (从 context.template.yaml 初始化)"
+else
+    # 兼容旧版：模板文件不存在时尝试旧路径
     if [ -f "${PROJECT_ROOT}/shared/context.yaml" ]; then
         docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
-        echo "  ✓ shared/context.yaml (从模板创建)"
+        echo "  ⚠ shared/context.yaml (从旧 context.yaml 复制，请迁移到 context.template.yaml)"
     else
         docker exec "${CONTAINER}" bash -c "echo '# FlagOS context' > /flagos-workspace/shared/context.yaml"
-        echo "  ✓ shared/context.yaml (空文件)"
+        echo "  ⚠ shared/context.yaml (空文件，未找到模板)"
     fi
-else
-    echo "  ✓ shared/context.yaml (已存在，保持当前状态)"
 fi
 
 # 4. 安装脚本依赖（如需要）

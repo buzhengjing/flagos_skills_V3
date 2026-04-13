@@ -556,6 +556,22 @@ def run_fast_gpqa(
         'total_duration_seconds': total_elapsed,
         'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
         'work_dir': work_dir,
+        '_meta': {
+            'model': '模型名称或路径',
+            'benchmark': '评测基准名称（固定 gpqa_diamond）',
+            'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
+            'score': 'GPQA Diamond 正确率百分比',
+            'total_questions': '评测题目总数（GPQA Diamond 固定 198 题）',
+            'eval_batch_size': '评测并发数（自动探测选择）',
+            'max_tokens': '单次生成最大 token 数',
+            'max_model_len': '模型支持的最大上下文长度',
+            'truncation_detected': '是否检测到输出被截断（true 时分数可能偏低）',
+            'temperature': '采样温度（0.0=贪心解码）',
+            'probe_time_seconds': '并发探测阶段耗时（秒）',
+            'eval_duration_seconds': '实际评测阶段耗时（秒）',
+            'total_duration_seconds': '总耗时（含探测，秒）',
+            'work_dir': 'evalscope 原始输出目录（含预测、报告、日志）',
+        },
     }
 
     # 写 JSON 报告

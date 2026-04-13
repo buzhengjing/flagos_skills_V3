@@ -251,7 +251,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER $MO
 3. 创建干净的 `results/`、`traces/`、`logs/`、`config/` 目录
 4. 部署所有工具脚本
 
-## 步骤 — 写入 context.yaml
+## 步骤 — 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 entry:
@@ -280,9 +280,9 @@ workspace:
 - 容器已运行，GPU 可见，模型目录已确认
 - 工具脚本已通过 setup_workspace.sh 部署
 - 四个子目录已创建（results/、traces/、logs/、config/）
-- context.yaml 已更新
+- 容器内 `/flagos-workspace/shared/context.yaml` 已更新
 - `traces/01_container_preparation.json` 已写入（记录 docker run 命令、setup_workspace 部署结果）
-- `timing.workflow_start` 已写入 context.yaml（ISO 8601，流程起始时间）
+- `timing.workflow_start` 已写入容器内 context.yaml（ISO 8601，流程起始时间）
 - `timing.steps.container_preparation` 已更新为本步骤的 `duration_seconds`
 
 ---

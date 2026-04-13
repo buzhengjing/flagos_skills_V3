@@ -6,28 +6,53 @@
       "Bash(docker inspect *)",
       "Bash(docker ps *)",
       "Bash(docker start *)",
+      "Bash(docker stop *)",
+      "Bash(docker restart *)",
+      "Bash(docker rm *)",
       "Bash(docker logs *)",
       "Bash(docker commit *)",
+      "Bash(docker login *)",
+      "Bash(docker push *)",
       "Bash(docker tag *)",
       "Bash(docker run *)",
       "Bash(docker pull *)",
+      "Bash(docker load *)",
+      "Bash(docker images *)",
+      "Bash(docker --version)",
 
       "Bash(pip install *)",
       "Bash(pip3 install *)",
+      "Bash(pip show *)",
+      "Bash(pip uninstall *)",
       "Bash(pkill *)",
       "Bash(kill *)",
       "Bash(modelscope download *)",
+      "Bash(modelscope login *)",
+      "Bash(modelscope upload *)",
+      "Bash(huggingface-cli download *)",
+      "Bash(huggingface-cli login *)",
+      "Bash(huggingface-cli upload *)",
+      "Bash(hf auth login *)",
 
       "Bash(curl -s http://localhost:*)",
       "Bash(curl -s http://127.0.0.1:*)",
       "Bash(curl -s --connect-timeout *)",
+      "Bash(curl -s https://*)",
+      "Bash(curl -X POST *)",
+      "Bash(curl -X GET *)",
 
       "Bash(mkdir -p /data/flagos-workspace/*)",
+      "Bash(mkdir -p /data/flagos-logs/*)",
       "Bash(ls *)",
       "Bash(cat /data/flagos-workspace/*)",
+      "Bash(cat /data/flagos-logs/*)",
       "Bash(tail *)",
       "Bash(find /data/flagos-workspace/*)",
+      "Bash(find /data/flagos-logs/*)",
       "Bash(wc *)",
+      "Bash(grep *)",
+      "Bash(sleep *)",
+      "Bash(lsof *)",
 
       "Bash(nvidia-smi *)",
       "Bash(nvidia-smi)",
@@ -36,7 +61,6 @@
       "Bash(hostname)",
       "Bash(df *)",
       "Bash(free *)",
-      "Bash(docker --version)",
 
       "Bash(cd /tmp && git clone *)",
       "Bash(git clone *)",
@@ -44,7 +68,13 @@
       "Bash(cp *)",
       "Bash(ln -s *)",
 
-      "Bash(bash skills/flagos-container-preparation/tools/setup_workspace.sh *)"
+      "Bash(bash skills/flagos-container-preparation/tools/setup_workspace.sh *)",
+
+      "Bash(python3 skills/*)",
+      "Bash(python skills/*)",
+      "Bash(python3 -c *)",
+      "Bash(python main.py *)",
+      "Bash(python3 issue_reporter.py *)"
     ]
   }
 }
