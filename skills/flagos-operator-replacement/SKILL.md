@@ -357,8 +357,8 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups 
 输出每组的 test_env 配置（含 `env_inline`），测试流程：
 
 ```
-1. baseline: 全禁用（USE_FLAGGEMS=0）→ quick eval → 确认精度正常
-2. 逐组启用: 用每组的 env_inline 启动服务 → quick eval
+1. baseline: 全禁用（USE_FLAGGEMS=0）→ fast_gpqa.py 评测 → 确认精度正常
+2. 逐组启用: 用每组的 env_inline 启动服务 → fast_gpqa.py 评测
 3. 哪组启用后精度下降 → 该组有问题
 4. 问题组内逐个算子排查（最多 N 个算子，N 轮）
 ```
@@ -690,7 +690,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --max-rounds 3
 ```
 
-搜索阶段每轮 benchmark **始终使用 quick**（只跑 prefill1_decode512），无需配置。quick 足以判断单算子对性能的影响。
+搜索阶段每轮 benchmark **始终使用 quick**（只跑 `4k_input_1k_output` + max，`num_prompts=concurrency`），无需配置。quick 足以判断单算子对性能的影响。
 
 脚本自动完成：next→应用算子配置→清除Triton cache→重启服务→验证 txt→quick benchmark→更新结果→循环。
 
