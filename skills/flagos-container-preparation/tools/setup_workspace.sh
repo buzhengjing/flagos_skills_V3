@@ -190,6 +190,8 @@ SCRIPT_MAP=(
     # GPQA Diamond 快速精度评测
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:eval/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"
+    # 精度对比
+    "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
     # 问题自动提交

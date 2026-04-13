@@ -244,6 +244,7 @@ docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-worksp
 tools/
 ├── fast_gpqa.py              ← 快速 GPQA Diamond 评测（主入口）
 ├── fast_gpqa_config.yaml     ← 快速评测配置模板
+├── accuracy_compare.py       ← V1 vs V2 精度对比与阈值判定
 ├── eval_monitor.py           ← 远端评测监控（提交→轮询→结果获取）
 ├── eval_orchestrator.py      ← 全量评测编排器（保留，按需使用）
 ├── evalscope_runner.py       ← EvalScope 执行器（保留）
@@ -472,10 +473,29 @@ curl -X GET http://110.43.160.159:5050/evaluation_diffs \
 
 ## 对比逻辑
 
+通过 `accuracy_compare.py` 脚本执行对比：
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/accuracy_compare.py \
+    --v1 /flagos-workspace/results/gpqa_native.json \
+    --v2 /flagos-workspace/results/gpqa_flagos.json \
+    --output /flagos-workspace/results/accuracy_compare.json \
+    --json"
+```
+
+脚本逻辑：
 1. 读取 `results/gpqa_native.json`（V1）和 `results/gpqa_flagos.json`（V2）
 2. 提取 `score` 字段
 3. 计算 `accuracy_diff = |V2_score - V1_score|`
-4. 判定：`accuracy_diff ≤ 5.0%` → 通过；`> 5.0%` → 不达标
+4. 判定：`accuracy_diff ≤ 5.0%` → 通过（退出码 0）；`> 5.0%` → 不达标（退出码 1）
+
+| CLI 参数 | 说明 |
+|----------|------|
+| `--v1` | V1 (Native) 评测结果 JSON |
+| `--v2` | V2 (FlagGems) 评测结果 JSON |
+| `--threshold` | 偏差阈值百分比（默认 5.0%） |
+| `--json` | JSON 格式输出 |
+| `--output` | 结果输出文件路径 |
 
 ## 对比输出格式
 
