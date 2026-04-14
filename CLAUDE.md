@@ -125,8 +125,8 @@ FlagGems 模式启动失败：
 ```
 1. 关闭 flaggems → 启动服务 → benchmark 4k_input_1k_output V1 性能基线 → 停服务
 2. 开启 flaggems → 启动服务 → benchmark V2 性能
-3. V2/V1 性能对比，每个并发级别 ≥ 80%?
-   ├── 全部达标 → 标记 workflow.performance_ok=true
+3. V2/V1 性能对比（quick 模式：4k_input_1k_output 并发 64 单数据点；comprehensive 模式：所有用例所有并发），ratio ≥ 80%?
+   ├── 达标 → 标记 workflow.performance_ok=true
    └── 不达标 → 调用 issue_reporter.py 提交 performance-degraded issue：
          docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
              --type performance-degraded \
@@ -228,7 +228,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 | docker run | **模板优先**：严格按 SKILL.md 中 GPU 厂商对应模板执行（NVIDIA: `-itd --gpus=all --network=host -v MODEL -v WORKSPACE`）。**模板失败时**：先检查变量值（路径拼写、权限白名单）修正后重试；**修正仍失败**：`docker inspect` 借鉴同宿主机已有容器的挂载配置重试一次；**仍失败则终止** | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
-| 性能目标 | 每个用例的每个并发级别均 ≥ 80% of V1 | 不询问"目标是多少" |
+| 性能目标 | quick: 4k_input_1k_output 并发 64 ratio ≥ 80% of V1；comprehensive: 每个用例每个并发级别均 ≥ 80% | 不询问"目标是多少" |
 | pip install 模式 | `pip install .`（非 editable） | 避免 `-e .` 在容器中的问题 |
 | pip 国内镜像 | `-i https://mirrors.aliyun.com/pypi/simple/` | pip 失败时自动加镜像重试 |
 | 服务端口 | 默认 8000，启动前检测可用性，被占用则自动递增（+1 到 +10），不停止占用方 | 不询问端口号 |
@@ -703,7 +703,7 @@ ISSUE_EOF"
 ```
 | Test Case | Concurrency | V1 TPS | V2 TPS | V2/V1      |
 | --------- | ----------- | ------ | ------ | ---------- |
-| 1k→1k     | 256         | 17328  | 17511  | **101.1%** |
+| 4k→1k     | 64          | 12500  | 11200  | **89.6%**  |
 ```
 
 格式规则：
@@ -778,7 +778,7 @@ GPU: <gpu_count>x <gpu_type>
 性能对比 (4k_input_1k_output):
 | Test Case | Conc | V1 TPS | V2 TPS | V2/V1     |
 | --------- | ---- | ------ | ------ | --------- |
-| 4k→1k     | 256  | XXXXX  | XXXXX  | **XX.X%** |
+| 4k→1k     | 64   | XXXXX  | XXXXX  | **XX.X%** |
 
 流程耗时:
   ①容器准备:          XXm XXs
@@ -811,7 +811,7 @@ GPU: <gpu_count>x <gpu_type>
 5. **每个 Skill 完成后必须写入对应的 trace JSON**，记录实际执行的命令、参数和关键输出
 6. **禁止添加 SKILL.md 未记录的 vLLM/sglang 启动参数**（如 `--enforce-eager`、`--disable-log-stats` 等），遇到启动问题应分析日志找根因，而非猜测参数绕过
 7. **精度评测和性能测试严禁同时进行**。必须等一个完全结束后再启动另一个。并发执行会互相抢占 GPU 资源，导致两边结果都不可信。启动前必须检查是否有正在运行的评测/测试进程
-8. **性能达标判定粒度：每个用例的每个并发级别**。不是只看平均值或最佳并发，而是 `performance_compare.py` 中所有 ratio 的最小值 ≥ 80% 才算达标。包括 quick 模式也遵循此规则
+8. **性能达标判定粒度：每个数据点**。quick 模式下只有一个数据点（4k_input_1k_output × 并发 64），comprehensive 模式下每个 (test_case, concurrency) 组合独立计算。`performance_compare.py` 中所有 ratio 的最小值 ≥ 80% 才算达标
 8. **算子列表以 `flaggems_enable_oplist.txt` 为唯一权威来源**。每次服务启动后必须检查该文件（默认 `/tmp/flaggems_enable_oplist.txt`）：
    - **文件存在且有内容** → FlagGems 实际在运行，以此文件内容作为当前生效的算子列表
    - **文件不存在或为空** → FlagGems 未启用，不依赖任何缓存的算子列表
@@ -837,7 +837,7 @@ GPU: <gpu_count>x <gpu_type>
 15. **流程中断后自动诊断**。`run_pipeline.sh` 在 Claude 退出后会自动运行 `diagnose_failure.py`，将诊断结果打印到终端并保存到 `logs/failure_diagnosis.json`。新会话启动时应优先读取此文件了解中断原因
 16. **编排层生成的 JSON 必须包含 `_meta` 字段说明**。Claude 通过 heredoc 写入的 JSON 文件（trace JSON、final_report.json 等）必须在顶层包含 `_meta` 对象，用中文说明关键字段含义，格式为 `{"字段名": "说明", ...}`。工具脚本（fast_gpqa.py、benchmark_runner.py、error_writer.py）已内置 `_meta` 输出，无需额外处理。所有消费方已通过 `_` 前缀约定自动跳过该字段
 17. **Issue 提交只能通过 `issue_reporter.py` 执行**，禁止手动拼 `gh issue create` 或直接调用 GitHub API。issue_reporter.py 自动处理三级降级（gh CLI → GitHub API → markdown 文件），并将结果写入 context.yaml 的 `issues.submitted[]`
-18. **性能对比必须通过 `performance_compare.py` 执行**。步骤⑤ V1/V2 性能测试完成后，必须调用 `performance_compare.py` 生成全量并发级别对比表。禁止自行从 JSON 中提取峰值或单一并发级别手动计算 ratio。`performance_ok` 的判定必须基于 `performance_compare.py` 输出的 `min_ratio`，不是峰值对比
+18. **性能对比必须通过 `performance_compare.py` 执行**。步骤⑤ V1/V2 性能测试完成后，必须调用 `performance_compare.py` 生成对比表（quick 模式下只有 4k_input_1k_output × 64 一行，comprehensive 模式下为全量用例全并发）。禁止自行从 JSON 中提取数据手动计算 ratio。`performance_ok` 的判定必须基于 `performance_compare.py` 输出的 `min_ratio`
 19. **性能测试 output-name 必须使用标准命名**：V1 用 `native_performance`，V2 用 `flagos_performance`，V3 用 `flagos_optimized`。禁止使用 `benchmark_native`、`benchmark_flagos` 等非标准名称，否则 `performance_compare.py` 和下游消费方无法找到文件
 20. **工具脚本必须从项目目录或容器内 `/flagos-workspace` 执行**。禁止将脚本复制到 `/tmp` 或其他临时目录后执行。权限配置仅匹配 `python3 skills/*` 路径，复制到其他路径会被权限系统拦截
 

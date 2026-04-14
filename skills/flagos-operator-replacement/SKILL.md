@@ -575,13 +575,24 @@ Plugin 场景：通过 VLLM_FL_FLAGOS_BLACKLIST 环境变量控制
 非 plugin 场景：通过 Layer 1-4 策略控制
 每轮重启后读取 txt 文件验证算子变化
 
-备选策略：--search-strategy group（分组二分搜索）或 linear（线性逐个搜索）
+备选策略：--search-strategy group（分组二分搜索）或 linear（线性逐个搜索）或 elimination（逐删策略）
 ```
 
 **为什么用渐进排除而非分组二分？**
 - 算子列表通常只有 20-30 个，分组二分轮次过多（最坏 ~22 轮）
 - 渐进排除最多 3 轮即可定位问题所在的风险等级
 - 达标即停，保留尽可能多的算子
+
+**逐删策略**（elimination）：
+
+```
+从 txt 算子列表中按顺序逐个累积禁用，每禁用一个就测试，达标即停。
+与 linear 的关键区别：linear 独立测试（禁用→测→恢复），elimination 累积禁用（禁用→测→保持禁用→禁下一个→测）。
+
+适用场景：精度/性能不达标时的暴力削减，不关心具体哪个算子有问题，只要达标即可。
+最坏情况：所有算子都禁用仍不达标 → 标记 failed。
+不支持反向搜索（--reverse），语义冲突。
+```
 
 ## 工作流程
 
@@ -665,6 +676,16 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
   --search-strategy group
 ```
 
+**备选：使用逐删策略**（累积禁用算子直到达标）：
+```bash
+${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
+  --ops-file /flagos-workspace/results/ops_list.json \
+  --native-throughput <native_perf.output_throughput> \
+  --native-benchmark /flagos-workspace/results/v1_benchmark.json \
+  --target-ratio 0.8 \
+  --search-strategy elimination
+```
+
 ### 步骤 O4 — 运行搜索循环
 
 **推荐方式：使用 operator_search.py 全自动搜索**（减少 Claude Code 思考开销）：
@@ -690,7 +711,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --max-rounds 3
 ```
 
-搜索阶段每轮 benchmark **始终使用 quick**（只跑 prefill1_decode512），无需配置。quick 足以判断单算子对性能的影响。
+搜索阶段每轮 benchmark **始终使用 quick**（4k_input_1k_output 并发 64），无需配置。quick 足以判断单算子对性能的影响。
 
 脚本自动完成：next→应用算子配置→清除Triton cache→重启服务→验证 txt→quick benchmark→更新结果→循环。
 
@@ -713,7 +734,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
 
 5. 更新优化器:
    ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py update \
-     --op-name <名称> --throughputs '{"1":800,"64":900,"256":850}' \
+     --op-name <名称> --throughputs '{"64":900}' \
      --native-throughput <native_perf.output_throughput>
 
 6. 检查状态，继续或结束

@@ -2,27 +2,13 @@
 """
 vLLM 性能基准测试工具
 
-新增:
-- --strategy: 四档测试强度 (quick/fast/comprehensive/fixed)
-- --final-burst: 显式 opt-in 最终无限制并发测试 (num_prompts=1000)
-- --output-name: 指定输出文件名
-- --output-dir: 指定输出目录
-- --mode: 标记测试模式 (native/flagos_initial/flagos_optimized)
-- per-test-case 预热: 消除冷启动开销
-- 所有档统一 num_prompts=concurrency
-
-向后兼容别名:
-- --quick → --strategy quick
-- --concurrency-search → --strategy fast
+两档测试策略:
+- quick: 只跑 4k_input_1k_output 并发 64，预热后单次测试（主流程默认）
+- comprehensive: 所有用例，所有并发全跑
 
 Usage:
-    python benchmark_runner.py --config config.yaml --strategy fast
     python benchmark_runner.py --config config.yaml --strategy quick
     python benchmark_runner.py --config config.yaml --strategy comprehensive
-    python benchmark_runner.py --config config.yaml --strategy fixed
-    python benchmark_runner.py --config config.yaml --strategy fast --final-burst
-    python benchmark_runner.py --config config.yaml --quick          # 向后兼容
-    python benchmark_runner.py --config config.yaml --concurrency-search  # 向后兼容
     python benchmark_runner.py --output-name native_performance
     python benchmark_runner.py --test-case 1k_input_1k_output
     python benchmark_runner.py --dry-run
@@ -255,10 +241,12 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
         return {"error": str(e)}
 
 
+# =============================================================================
+# 测试策略
+# =============================================================================
 
-
-# Quick 模式最大并发
-QUICK_MAX_CONCURRENCY = 256
+# Quick 模式固定并发
+QUICK_CONCURRENCY = 64
 
 # 预热请求数（消除 CUDA kernel 编译、KV cache 分配等冷启动开销）
 WARMUP_NUM_PROMPTS = 2
@@ -269,159 +257,49 @@ QUICK_TEST_CASE_NAME = "4k_input_1k_output"
 
 
 def run_test_case(config: Dict[str, Any], test_case: Dict[str, Any],
-                  dry_run: bool = False, strategy: str = "fast",
-                  final_burst: bool = False) -> Dict[str, Any]:
+                  dry_run: bool = False, strategy: str = "quick") -> Dict[str, Any]:
     """运行单个测试用例的所有并发级别，返回结果中包含 _elapsed_seconds"""
     tc_start = time.time()
     base_cmd = build_command(config, test_case)
 
     levels = config["concurrency"]["levels"]
-    final_prompts = config["concurrency"]["final_num_prompts"]
-    use_early_stop = test_case.get("early_stop", True)
 
     if strategy == "quick":
-        results = run_quick_test(base_cmd, levels, dry_run)
-    elif strategy == "fixed":
-        # fixed: 只跑 fixed_concurrency 指定的单个并发级别
-        fixed_conc = test_case.get("fixed_concurrency")
-        if fixed_conc is None:
-            raise ValueError(f"Test case {test_case['name']} missing fixed_concurrency for --strategy fixed")
-        results = run_single_concurrency(base_cmd, fixed_conc, dry_run)
-    elif strategy == "comprehensive":
-        # comprehensive: 所有并发全跑，强制不早停
-        results = run_concurrency_search(base_cmd, levels, dry_run,
-                                         early_stop=False)
+        results = run_quick_test(base_cmd, dry_run)
     else:
-        # fast (default): 按 early_stop 配置决定是否早停
-        results = run_concurrency_search(base_cmd, levels, dry_run,
-                                         early_stop=use_early_stop)
-
-    # --final-burst opt-in: 任何 strategy 完成后追加 final burst
-    if final_burst:
-        results = run_final_burst(base_cmd, final_prompts, results, dry_run)
+        # comprehensive: 所有并发全跑，不早停
+        results = run_comprehensive_test(base_cmd, levels, dry_run)
 
     results["_elapsed_seconds"] = round(time.time() - tc_start, 1)
     return results
 
 
-def run_concurrency_search(base_cmd: List[str], levels: List[int],
-                           dry_run: bool = False,
-                           early_stop: bool = True) -> Dict[str, Any]:
+def run_comprehensive_test(base_cmd: List[str], levels: List[int],
+                           dry_run: bool = False) -> Dict[str, Any]:
     """
-    按并发级别逐级测试，记录每级结果。
+    Comprehensive 模式：所有并发级别全跑，不早停。
 
-    early_stop=True 时的停止条件：
-    1. 连续 2 级增长 < 3% → 已饱和，停止搜索
-    2. 吞吐下降 > 5% → 过拐点，停止搜索
-    3. 请求失败数 > 0 → 过载，停止搜索
-
-    early_stop=False 时所有并发级别全跑，不检查停止条件。
+    num_prompts = concurrency，逐级测试。
     """
-    GROWTH_THRESHOLD = 0.03      # 3% 增长阈值
-    DECLINE_THRESHOLD = 0.05     # 5% 下降阈值
-    CONSECUTIVE_LOW = 2          # 连续低增长次数
-
     results = {}
-    prev_throughput = 0.0
     best_throughput = 0.0
     best_concurrency = levels[0]
-    stopped = False
-    consecutive_low_growth = 0
 
-    print(f"  [CONCURRENCY SEARCH] levels={levels}, early_stop={early_stop}, num_prompts=concurrency")
-    if early_stop:
-        print(f"    stop conditions: growth<{GROWTH_THRESHOLD*100}% x{CONSECUTIVE_LOW} | decline>{DECLINE_THRESHOLD*100}% | failures")
-
-    for conc in levels:
-        # num_prompts = concurrency，所有档统一
-        metrics = run_benchmark(base_cmd, conc, conc, dry_run)
-        results[str(conc)] = metrics
-
-        if dry_run or "error" in metrics:
-            if "error" in metrics and not dry_run:
-                print(f"    Error at concurrency={conc}, stopping search: {metrics['error'][:100]}")
-                stopped = True
-                break
-            continue
-
-        current_throughput = metrics.get('Output token throughput (tok/s)', 0) or 0
-
-        if current_throughput > best_throughput:
-            best_throughput = current_throughput
-            best_concurrency = conc
-
-        if early_stop:
-            # 检查请求失败
-            failed_requests = metrics.get('Failed requests', 0)
-            if failed_requests and failed_requests > 0:
-                print(f"    {failed_requests} failed requests at concurrency={conc}, stopping search")
-                stopped = True
-                break
-
-            # 检查停止条件
-            if prev_throughput > 0 and current_throughput > 0:
-                growth = (current_throughput - prev_throughput) / prev_throughput
-
-                # 条件 2：吞吐下降超过 5%
-                if current_throughput < prev_throughput * (1 - DECLINE_THRESHOLD):
-                    print(f"    Growth: {growth*100:.1f}% — throughput declined >{DECLINE_THRESHOLD*100}%")
-                    print(f"    Peak at concurrency={best_concurrency}, stopping search")
-                    stopped = True
-                    break
-
-                # 条件 1：连续低增长
-                if growth < GROWTH_THRESHOLD:
-                    consecutive_low_growth += 1
-                    print(f"    Growth: {growth*100:.1f}% — low growth {consecutive_low_growth}/{CONSECUTIVE_LOW}")
-                    if consecutive_low_growth >= CONSECUTIVE_LOW:
-                        print(f"    Peak at concurrency={best_concurrency}, stopping search")
-                        stopped = True
-                        break
-                else:
-                    consecutive_low_growth = 0
-                    print(f"    Growth: {growth*100:.1f}%")
-
-        prev_throughput = current_throughput
-
-    # 记录搜索元信息
-    results["_search_meta"] = {
-        "best_concurrency": best_concurrency,
-        "best_throughput": best_throughput,
-        "tested_levels": [l for l in levels if str(l) in results],
-        "all_levels_tested": not stopped,
-    }
-
-    return results
-
-
-def run_quick_test(base_cmd: List[str], levels: List[int],
-                   dry_run: bool = False) -> Dict[str, Any]:
-    """
-    快速模式：num_prompts = concurrency，并发最高到 256，不早停。
-
-    用于流程验证和快速三版对比，不追求精确结果。
-    正式测试前先发预热请求，消除冷启动开销（结果丢弃）。
-    """
-    # 并发上限 256
-    levels = [l for l in levels if l <= QUICK_MAX_CONCURRENCY]
-
-    # 预热：发少量请求让 GPU/vLLM 完成初始化，结果丢弃
+    # 预热
     if not dry_run:
         print(f"  [WARMUP] Sending {WARMUP_NUM_PROMPTS} warmup requests (concurrency={WARMUP_CONCURRENCY}) ...")
         run_benchmark(base_cmd, WARMUP_NUM_PROMPTS, WARMUP_CONCURRENCY, dry_run=False)
         print(f"  [WARMUP] Done, starting benchmark")
 
-    results = {}
-    best_throughput = 0.0
-    best_concurrency = levels[0]
-
-    print(f"  [QUICK MODE] levels={levels}, num_prompts=concurrency, max_conc={QUICK_MAX_CONCURRENCY}")
+    print(f"  [COMPREHENSIVE MODE] levels={levels}, num_prompts=concurrency")
 
     for conc in levels:
         metrics = run_benchmark(base_cmd, conc, conc, dry_run)
         results[str(conc)] = metrics
 
         if dry_run or "error" in metrics:
+            if "error" in metrics and not dry_run:
+                print(f"    Error at concurrency={conc}: {metrics['error'][:100]}")
             continue
 
         current_throughput = metrics.get('Output token throughput (tok/s)', 0) or 0
@@ -434,45 +312,41 @@ def run_quick_test(base_cmd: List[str], levels: List[int],
         "best_throughput": best_throughput,
         "tested_levels": levels,
         "all_levels_tested": True,
+    }
+
+    return results
+
+
+def run_quick_test(base_cmd: List[str],
+                   dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Quick 模式：预热后只跑固定并发 64，num_prompts = 64。
+
+    用于主流程快速验证，不遍历所有并发级别。
+    """
+    # 预热
+    if not dry_run:
+        print(f"  [WARMUP] Sending {WARMUP_NUM_PROMPTS} warmup requests (concurrency={WARMUP_CONCURRENCY}) ...")
+        run_benchmark(base_cmd, WARMUP_NUM_PROMPTS, WARMUP_CONCURRENCY, dry_run=False)
+        print(f"  [WARMUP] Done, starting benchmark")
+
+    print(f"  [QUICK MODE] concurrency={QUICK_CONCURRENCY}, num_prompts={QUICK_CONCURRENCY}")
+
+    metrics = run_benchmark(base_cmd, QUICK_CONCURRENCY, QUICK_CONCURRENCY, dry_run)
+    results = {str(QUICK_CONCURRENCY): metrics}
+
+    throughput = 0
+    if not dry_run and "error" not in metrics:
+        throughput = metrics.get('Output token throughput (tok/s)', 0) or 0
+
+    results["_search_meta"] = {
+        "best_concurrency": QUICK_CONCURRENCY,
+        "best_throughput": throughput,
+        "tested_levels": [QUICK_CONCURRENCY],
+        "all_levels_tested": True,
         "quick_mode": True,
     }
 
-    return results
-
-
-def run_single_concurrency(base_cmd: List[str], concurrency: int,
-                           dry_run: bool = False) -> Dict[str, Any]:
-    """
-    Fixed 模式：只跑单个固定并发级别。
-
-    用于 --strategy fixed，跳过搜索，直接测试指定并发。
-    """
-    print(f"  [FIXED MODE] concurrency={concurrency}")
-    metrics = run_benchmark(base_cmd, concurrency, concurrency, dry_run)
-    results = {str(concurrency): metrics}
-
-    throughput = metrics.get('Output token throughput (tok/s)', 0) or 0
-    results["_search_meta"] = {
-        "best_concurrency": concurrency,
-        "best_throughput": throughput,
-        "tested_levels": [concurrency],
-        "all_levels_tested": True,
-        "fixed_mode": True,
-    }
-
-    return results
-
-
-def run_final_burst(base_cmd: List[str], final_num_prompts: int,
-                    results: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
-    """
-    Final burst: 无限制并发的大规模测试。
-
-    仅在用户显式传入 --final-burst 时调用。
-    num_prompts=final_num_prompts (默认 1000), max_concurrency=None。
-    """
-    print(f"  [FINAL BURST] num_prompts={final_num_prompts}, unlimited concurrency")
-    results["max"] = run_benchmark(base_cmd, final_num_prompts, None, dry_run)
     return results
 
 
@@ -508,33 +382,20 @@ def save_results(results: Dict[str, Any], config: Dict[str, Any],
         if not isinstance(tc_results, dict):
             data[tc_name] = tc_results
             continue
-        data[tc_name] = {k: v for k, v in tc_results.items() if not k.startswith("_")}
+        cleaned = {k: v for k, v in tc_results.items() if not k.startswith("_")}
+        if cleaned:
+            data[tc_name] = cleaned
 
-    if timing:
-        data["_timing"] = timing
-
+    # 添加 _meta 说明
     data["_meta"] = {
-        "_structure": "顶层 key 为 test_case 名称（如 4k_input_1k_output），其下 key 为并发级别（1/2/4/.../max）",
-        "Successful requests": "成功完成的请求数",
-        "Failed requests": "失败的请求数",
-        "Benchmark duration (s)": "该并发级别测试总耗时（秒）",
-        "Total input tokens": "所有请求的输入 token 总数",
-        "Total generated tokens": "所有请求的生成 token 总数",
-        "Request throughput (req/s)": "请求吞吐量（每秒完成的请求数）",
-        "Output token throughput (tok/s)": "输出 token 吞吐量（tok/s），性能对比的核心指标",
-        "Total token throughput (tok/s)": "总 token 吞吐量（input + output，tok/s）",
-        "Peak output token throughput (tok/s)": "峰值输出 token 吞吐量（tok/s）",
-        "Peak concurrent requests": "峰值并发请求数",
-        "Mean TTFT (ms)": "平均首 token 延迟（Time To First Token，毫秒）",
-        "Median TTFT (ms)": "中位数首 token 延迟（毫秒）",
-        "P99 TTFT (ms)": "99 分位首 token 延迟（毫秒）",
-        "Mean TPOT (ms)": "平均每 token 生成延迟（Time Per Output Token，毫秒）",
-        "Median TPOT (ms)": "中位数每 token 生成延迟（毫秒）",
-        "P99 TPOT (ms)": "99 分位每 token 生成延迟（毫秒）",
-        "Mean ITL (ms)": "平均 token 间延迟（Inter-Token Latency，毫秒）",
-        "Median ITL (ms)": "中位数 token 间延迟（毫秒）",
-        "P99 ITL (ms)": "99 分位 token 间延迟（毫秒）",
+        "说明": "vLLM 性能基准测试结果",
+        "格式": "{test_case: {concurrency: {metric: value}}}",
+        "关键指标": "Output token throughput (tok/s) 和 Total token throughput (tok/s)",
+        "mode": mode or "default",
+        "timestamp": datetime.now().isoformat(),
     }
+    if timing:
+        data["_meta"]["timing"] = timing
 
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -580,25 +441,22 @@ def print_summary(results: Dict[str, Any], mode: str = "default"):
                 print(f"  Tested levels:     {tested} (early-stopped)")
 
 
-
 # =============================================================================
 # Strategy 解析
 # =============================================================================
 
-STRATEGY_CHOICES = ['quick', 'fast', 'comprehensive', 'fixed']
+STRATEGY_CHOICES = ['quick', 'comprehensive']
 
 
 def resolve_strategy(args) -> str:
     """
-    解析 strategy，优先级：--strategy > --quick > --concurrency-search > 默认 fast
+    解析 strategy，优先级：--strategy > --quick > 默认 quick
     """
     if args.strategy:
         return args.strategy
     if args.quick:
         return "quick"
-    if args.concurrency_search:
-        return "fast"
-    return "fast"
+    return "quick"
 
 
 # =============================================================================
@@ -609,16 +467,10 @@ def main():
     parser = argparse.ArgumentParser(description="vLLM 性能基准测试 (重构版)")
     parser.add_argument("--config", help="配置文件路径")
     parser.add_argument("--test-case", help="运行指定测试用例")
-    parser.add_argument("--skip-case", action="append", default=[],
-                        help="跳过指定用例（可多次使用），如 --skip-case prefill1_decode512")
     parser.add_argument("--dry-run", action="store_true", help="仅打印命令")
     parser.add_argument("--strategy", choices=STRATEGY_CHOICES,
-                        help="测试策略: quick(烟雾测试) / fast(饱和即停,默认) / comprehensive(全跑) / fixed(固定并发)")
-    parser.add_argument("--final-burst", action="store_true",
-                        help="追加无限制并发的大规模最终测试")
+                        help="测试策略: quick(只跑4k_input_1k_output并发64,默认) / comprehensive(全跑)")
     # 向后兼容别名
-    parser.add_argument("--concurrency-search", action="store_true",
-                        help="(向后兼容) 等同于 --strategy fast")
     parser.add_argument("--quick", action="store_true",
                         help="(向后兼容) 等同于 --strategy quick")
     parser.add_argument("--output-name", help="输出文件名（不含扩展名）")
@@ -639,55 +491,24 @@ def main():
         sys.exit(1)
 
     # 筛选测试用例
-    test_matrix = config["test_matrix"]
+    test_matrix = [tc for tc in config["test_matrix"] if tc.get("enabled", True)]
+
     if args.test_case:
         test_matrix = [tc for tc in test_matrix if tc["name"] == args.test_case]
         if not test_matrix:
-            print(f"ERROR: 测试用例 '{args.test_case}' 不存在")
+            print(f"ERROR: 测试用例 '{args.test_case}' 不存在或未启用")
             sys.exit(1)
-    elif strategy == "quick":
-        # quick 模式：只跑 4k_input_1k_output + 自动追加 max
+
+    # quick 模式只跑 4k_input_1k_output
+    if strategy == "quick":
         test_matrix = [tc for tc in test_matrix if tc["name"] == QUICK_TEST_CASE_NAME]
         if not test_matrix:
-            print(f"WARN: 未找到 '{QUICK_TEST_CASE_NAME}' 用例，使用第一个已启用的用例")
-            test_matrix = [tc for tc in config["test_matrix"] if tc.get("enabled", True)][:1]
-        # quick 模式自动启用 final-burst（max 测试）
-        if not args.final_burst:
-            args.final_burst = True
-            print("[QUICK MODE] 自动启用 --final-burst (max 测试)")
-    elif strategy == "fixed":
-        # fixed 模式：只跑有 fixed_concurrency 字段的用例
-        test_matrix = [tc for tc in test_matrix if tc.get("enabled", True) and "fixed_concurrency" in tc]
-        if not test_matrix:
-            print("ERROR: --strategy fixed 需要至少一个用例配置了 fixed_concurrency 字段")
+            print(f"ERROR: quick 模式需要 '{QUICK_TEST_CASE_NAME}' 用例，但未找到或未启用")
             sys.exit(1)
-    else:
-        # fast / comprehensive：跑所有 enabled 用例
-        test_matrix = [tc for tc in test_matrix if tc.get("enabled", True)]
 
-    # --skip-case 过滤
-    if args.skip_case:
-        skipped = set(args.skip_case)
-        before = len(test_matrix)
-        test_matrix = [tc for tc in test_matrix if tc["name"] not in skipped]
-        if before > len(test_matrix):
-            print(f"跳过用例: {', '.join(skipped)}")
-
-    if not test_matrix:
-        print("ERROR: 无可运行的测试用例（全部被跳过或未启用）")
-        sys.exit(1)
-
-    print(f"将运行 {len(test_matrix)} 个测试用例")
-
-    strategy_labels = {
-        "quick": "[策略] quick — 烟雾测试（num_prompts=concurrency, 只跑 4k_input_1k_output + max）",
-        "fast": "[策略] fast — 智能搜索（num_prompts=concurrency, 饱和即停）",
-        "comprehensive": "[策略] comprehensive — 全量测试（num_prompts=concurrency, 所有并发全跑）",
-        "fixed": "[策略] fixed — 固定并发（只跑配置的 fixed_concurrency 级别）",
-    }
-    print(strategy_labels[strategy])
-    if args.final_burst:
-        print("[选项] --final-burst 已启用，每个用例完成后追加无限制并发测试")
+    print(f"\n策略: {strategy}")
+    print(f"测试用例: {[tc['name'] for tc in test_matrix]}")
+    print(f"模式: {args.mode}")
 
     # 执行测试
     all_results = {}
@@ -699,7 +520,7 @@ def main():
         print('='*50)
         all_results[tc["name"]] = run_test_case(
             config, tc, args.dry_run,
-            strategy=strategy, final_burst=args.final_burst
+            strategy=strategy
         )
         tc_timings[tc["name"]] = all_results[tc["name"]].get("_elapsed_seconds", 0)
     total_elapsed = round(time.time() - total_start, 1)
