@@ -121,12 +121,17 @@ except:
     print('')
 " 2>/dev/null) || MODEL_PATH=""
 
+    MODEL_FOUND_ON_HOST=false
     if [ -n "$MODEL_PATH" ]; then
         echo "  ✓ 找到: ${MODEL_PATH}"
+        MODEL_FOUND_ON_HOST=true
     else
-        echo "  ⚠ 宿主机未找到模型，将在容器创建后自动下载"
-        MODEL_PATH="__AUTO_DOWNLOAD__"
+        MODEL_SHORT=$(echo "${MODEL}" | sed 's|.*/||')
+        MODEL_PATH="/data/models/${MODEL_SHORT}"
+        mkdir -p "${MODEL_PATH}"
+        echo "  ⚠ 宿主机未找到模型，预创建挂载目录: ${MODEL_PATH}"
     fi
+    CONTAINER_MODEL_PATH="${MODEL_PATH}"
 fi
 
 # ========== Banner ==========
@@ -139,13 +144,15 @@ else
     echo "  目标: ${CONTAINER} (容器，自动识别)"
 fi
 echo "  模型: ${MODEL}"
-if $IMAGE_MODE && [ "$MODEL_PATH" != "__AUTO_DOWNLOAD__" ] && [ -n "$MODEL_PATH" ]; then
-    echo "  模型路径: ${MODEL_PATH} (自动检测)"
-elif $IMAGE_MODE; then
-    echo "  模型路径: 容器创建后自动下载"
+if $IMAGE_MODE; then
+    if $MODEL_FOUND_ON_HOST; then
+        echo "  模型路径: ${MODEL_PATH} (自动检测)"
+    else
+        echo "  模型路径: ${MODEL_PATH} (预创建，容器内下载)"
+    fi
 fi
 echo "  模式: V1 + V2（无 V3 算子优化）"
-echo "  权限: --permission-mode auto + settings allowlist"
+echo "  权限: --permission-mode auto + settings.local.json allowlist (78 rules)"
 echo "============================================================"
 echo ""
 
@@ -153,7 +160,7 @@ echo ""
 # 公共部分：tokens、执行模式、进度输出要求、步骤②-⑥
 COMMON_TOKENS=$(cat <<TOKENS_EOF
 
-**容器内上传 Token**（⑥发布阶段在容器内 docker exec 时设置）：
+**容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载；docker exec -e 仍建议保留作为双保险）：
   MODELSCOPE_TOKEN=${MODELSCOPE_TOKEN}
   HF_TOKEN=${HF_TOKEN}
   GITHUB_TOKEN=${GITHUB_TOKEN}
@@ -222,7 +229,16 @@ COMMON_STEPS_2_TO_6=$(cat <<STEPS_EOF
    - wait_for_service.sh 等待就绪
    - 检查 flaggems_enable_oplist.txt
    - 验证 /v1/models 和推理测试
-   - 启动失败时写入 issue 到容器内 /flagos-workspace/logs/issues_startup.log
+   - 启动失败时通过 issue_reporter.py 提交 issue：
+     docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+         --type operator-crash \
+         --log-path /flagos-workspace/logs/startup_flagos.log \
+         --context-yaml /flagos-workspace/shared/context.yaml \
+         --repo flagos-ai/FlagGems \
+         --output-dir /flagos-workspace/results/ \
+         --step '③启服务' \
+         --json"
+   - 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_startup.log
    - 写入容器内 /flagos-workspace/shared/context.yaml + traces/03_service_startup.json
 
 ④ 精度评测（GPQA Diamond，仅 V1+V2）：
@@ -235,7 +251,17 @@ COMMON_STEPS_2_TO_6=$(cat <<STEPS_EOF
       - fast_gpqa.py 评测 → 保存 results/gpqa_flagos.json
    c) V1 vs V2 精度对比（5% 阈值）：
       - 达标 → 输出"精度达标"
-      - 不达标 → 写入 accuracy_anomaly issue + 输出偏差报告 + 当前算子列表，不排查算子，继续后续
+      - 不达标 → 通过 issue_reporter.py 提交 accuracy-degraded issue：
+        docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+            --type accuracy-degraded \
+            --disabled-ops '<逗号分隔的问题算子>' \
+            --disabled-reasons '<JSON: {算子: 原因}>' \
+            --context-yaml /flagos-workspace/shared/context.yaml \
+            --repo flagos-ai/FlagGems \
+            --output-dir /flagos-workspace/results/ \
+            --step '④精度评测' \
+            --json"
+      - 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_accuracy.log + 输出偏差报告 + 当前算子列表，不排查算子，继续后续
    - 写入 traces/04_quick_accuracy.json
 
 ⑤ 性能评测（quick 策略 4k→1k，仅 V1+V2）：
@@ -249,7 +275,17 @@ COMMON_STEPS_2_TO_6=$(cat <<STEPS_EOF
    c) 性能对比：
       - performance_compare.py --native ... --flagos-full ... --format markdown
       - 达标(≥80%) → 输出"性能达标"
-      - 不达标 → 写入 performance_low issue + 输出对比报告，不触发算子优化，继续后续
+      - 不达标 → 通过 issue_reporter.py 提交 performance-degraded issue：
+        docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+            --type performance-degraded \
+            --disabled-ops '<逗号分隔的问题算子>' \
+            --disabled-reasons '<JSON: {算子: 原因}>' \
+            --context-yaml /flagos-workspace/shared/context.yaml \
+            --repo flagos-ai/FlagGems \
+            --output-dir /flagos-workspace/results/ \
+            --step '⑤性能评测' \
+            --json"
+      - 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_performance.log + 输出对比报告，不触发算子优化，继续后续
    - 写入 traces/05_quick_performance.json
 
 ⑥ 打包发布（使用 flagos-release skill）：
@@ -274,43 +310,40 @@ COMMON_STEPS_2_TO_6=$(cat <<STEPS_EOF
 - 写入 context 统一用：docker exec \${CONTAINER} 在容器内操作
 
 全流程结束后输出完整的 FlagOS 迁移报告（含精度、性能、发布信息、耗时统计、问题记录摘要）。
+报告中的"问题记录摘要"必须包含所有已提交 issue 的 GitHub URL（从 context.yaml 的 issues.submitted[] 读取），格式示例：
+  已提交 Issue:
+  - [performance-degraded] https://github.com/flagos-ai/FlagGems/issues/XXX (⑤性能评测)
+  - [operator-crash] https://github.com/flagos-ai/FlagGems/issues/YYY (③启服务)
+若无 issue 则标注"无问题提交"。
 STEPS_EOF
 )
 
 # ========== 根据模式构造步骤① ==========
 if $IMAGE_MODE; then
-    if [ "$MODEL_PATH" = "__AUTO_DOWNLOAD__" ]; then
-        # 镜像模式 + 宿主机未找到模型 → 容器创建后自动下载
-        STEP1=$(cat <<STEP1_EOF
-① 容器准备（从镜像创建 + 自动下载模型）：
-   - 宿主机未找到模型 ${MODEL}，需在容器创建后下载
-   - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
-   - docker run 创建容器（镜像: ${IMAGE}，不挂载模型路径）
-   - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
-   - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
-   - 镜像模式下禁止复用已有容器，必须 docker run 新建
-   - 容器创建后，在容器内搜索+下载模型：
-     python3 skills/flagos-container-preparation/tools/check_model_local.py --model "${MODEL}" --mode container --container \${CONTAINER} --output-json
-     从输出 JSON 中提取 final_container_path 和 final_host_path，记录到容器内 /flagos-workspace/shared/context.yaml
-   - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} 部署工具脚本
-   - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
-STEP1_EOF
-        )
+    if $MODEL_FOUND_ON_HOST; then
+        MODEL_NOTE="宿主机模型路径已自动检测: ${MODEL_PATH}"
+        DOWNLOAD_NOTE=""
     else
-        # 镜像模式 + 宿主机找到模型路径
-        STEP1=$(cat <<STEP1_EOF
+        MODEL_NOTE="宿主机未找到模型 ${MODEL}，已预创建挂载目录: ${MODEL_PATH}"
+        DOWNLOAD_NOTE="
+   - 容器创建后，在容器内搜索+下载模型（下载到已挂载的 ${CONTAINER_MODEL_PATH}）：
+     python3 skills/flagos-container-preparation/tools/check_model_local.py --model \"${MODEL}\" --mode container --container \${CONTAINER} --container-model-path ${CONTAINER_MODEL_PATH} --output-json
+     从输出 JSON 中提取 final_container_path 和 final_host_path，记录到容器内 /flagos-workspace/shared/context.yaml"
+    fi
+    STEP1=$(cat <<STEP1_EOF
 ① 容器准备（从镜像创建）：
-   - 宿主机模型路径已自动检测: ${MODEL_PATH}
+   - ${MODEL_NOTE}
    - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
-   - docker run 创建容器（镜像: ${IMAGE}，挂载宿主机模型路径: ${MODEL_PATH}）
+   - **NVIDIA 模板（严格执行，仅替换变量值，禁止增删参数）**：
+     docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace:/flagos-workspace ${IMAGE}
+   - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败则 docker inspect 借鉴已有容器挂载配置重试一次 → 仍失败则终止
    - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
    - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
-   - 镜像模式下禁止复用已有容器，必须 docker run 新建
+   - 镜像模式下禁止复用已有容器，必须 docker run 新建${DOWNLOAD_NOTE}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} 部署工具脚本
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
 STEP1_EOF
-        )
-    fi
+    )
     PROMPT="镜像: ${IMAGE}，模型名: ${MODEL}
 ${COMMON_TOKENS}
 ${COMMON_PLAN_FIRST}
@@ -343,24 +376,65 @@ fi
 # ========== 部署权限白名单 ==========
 [ -f .claude/settings.local.json ] || (mkdir -p .claude && cp settings.local.json .claude/settings.local.json)
 
+# ========== 动态注入模型特定权限 ==========
+# auto mode 可能被降级为 default mode（mco-4 等非官方模型 ID），
+# default mode 下通配符规则对链式命令不生效，需要精确匹配的模型特定规则
+python3 -c "
+import json, sys
+model = sys.argv[1]
+with open('.claude/settings.local.json') as f:
+    cfg = json.load(f)
+rules = cfg.setdefault('permissions', {}).setdefault('allow', [])
+# 模型特定的目录操作权限
+for d in ['logs', 'config', 'results', 'traces']:
+    rule = f'Bash(mkdir -p /data/flagos-workspace/{model}/{d})'
+    if rule not in rules:
+        rules.append(rule)
+# 模型特定的文件读取权限
+for rule in [
+    f'Read(//data/flagos-workspace/{model}/**)',
+    f'Bash(cat /data/flagos-workspace/{model}/*)',
+    f'Bash(find /data/flagos-workspace/{model}/*)',
+    f'Bash(tail /data/flagos-workspace/{model}/*)',
+]:
+    if rule not in rules:
+        rules.append(rule)
+with open('.claude/settings.local.json', 'w') as f:
+    json.dump(cfg, f, indent=2)
+" "${MODEL}"
+echo "  ✓ 已注入 ${MODEL} 模型特定权限规则"
+
 # ========== 启动 Claude Code ==========
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 Claude Code 全自动流程..."
 echo ""
 
-# ========== 宿主机日志目录归档 ==========
-LOG_DIR="/data/flagos-workspace/${MODEL}/logs"
-if [ -d "${LOG_DIR}" ] && [ "$(ls -A "${LOG_DIR}" 2>/dev/null)" ]; then
-    ARCHIVE_TS="$(date +%Y%m%d_%H%M%S)"
-    HOST_ARCHIVE="/data/flagos-workspace/${MODEL}/archive/${ARCHIVE_TS}/logs"
-    mkdir -p "${HOST_ARCHIVE}"
-    for f in "${LOG_DIR}"/*; do
-        [ -f "$f" ] || [ -L "$f" ] || continue
-        mv "$f" "${HOST_ARCHIVE}/"
+# ========== 宿主机历史数据全量归档 ==========
+# 在创建任何新文件之前，统一归档上一轮的全部产出（results/traces/logs/config）
+# setup_workspace.sh 中的宿主机归档作为独立调用时的兜底
+HOST_BASE="/data/flagos-workspace/${MODEL}"
+if [ -d "${HOST_BASE}" ]; then
+    HOST_HAS_HISTORY=0
+    for d in results traces logs config; do
+        if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
+            HOST_HAS_HISTORY=1; break
+        fi
     done
-    echo "  宿主机 logs 已归档到: ${HOST_ARCHIVE}/"
+    if [ "${HOST_HAS_HISTORY}" = "1" ]; then
+        ARCHIVE_TS="$(date +%Y%m%d_%H%M%S)"
+        HOST_ARCHIVE="${HOST_BASE}/archive/${ARCHIVE_TS}"
+        mkdir -p "${HOST_ARCHIVE}"
+        for d in results traces logs config; do
+            if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
+                mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
+            fi
+        done
+        echo "  宿主机历史数据已归档到: ${HOST_ARCHIVE}/"
+    fi
 fi
 
-mkdir -p "/data/flagos-workspace/${MODEL}/logs"
+for d in logs config results traces; do
+    mkdir -p "/data/flagos-workspace/${MODEL}/${d}"
+done
 
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 LOG_DIR="/data/flagos-workspace/${MODEL}/logs"

@@ -8,13 +8,13 @@
 
 **在执行任何用户任务之前，先静默完成以下初始化**（不需要告知用户）：
 
-检查 `.claude/settings.local.json` 是否存在，如果不存在则自动从项目根目录复制：
+权限配置 `settings.local.json` 已由 `run_pipeline.sh` 在启动前自动部署到 `.claude/settings.local.json`。**跳过此步骤，不要尝试创建或复制 settings 文件**。如果是交互式会话（非 pipeline 启动），可检查文件是否存在：
 
 ```bash
-[ -f .claude/settings.local.json ] || (mkdir -p .claude && cp settings.local.json .claude/settings.local.json)
+ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING — 请手动执行: mkdir -p .claude && cp settings.local.json .claude/settings.local.json"
 ```
 
-此操作将权限预批准配置部署到位，使后续 `docker exec`、`curl` 等命令无需反复确认。
+**注意**：`.claude/` 目录是 Claude Code 的敏感目录，headless 模式下写入会被拦截。pipeline 模式下此文件一定已存在，无需任何操作。
 
 ### context.yaml 使用规则（多任务隔离）
 
@@ -80,7 +80,16 @@
 
 ```
 FlagGems 模式启动失败：
-  → 保存日志 → 提交 operator-crash issue（含 flaggems.enable 代码）
+  → 保存日志 → 调用 issue_reporter.py 提交 operator-crash issue：
+    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+        --type operator-crash \
+        --log-path /flagos-workspace/logs/startup_flagos.log \
+        --context-yaml /flagos-workspace/shared/context.yaml \
+        --repo flagos-ai/FlagGems \
+        --output-dir /flagos-workspace/results/ \
+        --step '③启服务' \
+        --json"
+  → 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_startup.log
   → 排除操作失误：native 模式也失败 → 环境问题，需人工介入
   → 确认是 FlagGems 问题 → workflow.service_ok = false
   → 跳过④⑤ → 直接到⑥发布（私有）
@@ -95,8 +104,19 @@ FlagGems 模式启动失败：
 2. 开启 flaggems → 启动服务 → GPQA Diamond V2 精度
 3. V1 vs V2 精度对比（偏差阈值 5%）
 4. 出现问题时：
-   ├── 服务崩溃 → 提交 operator-crash issue
-   ├── 精度偏差 >5% → 提交 accuracy-degraded issue → 标记 workflow.accuracy_ok=false
+   ├── 服务崩溃 → 调用 issue_reporter.py --type operator-crash（同步骤③）
+   ├── 精度偏差 >5% → 调用 issue_reporter.py 提交 accuracy-degraded issue：
+   │     docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+   │         --type accuracy-degraded \
+   │         --disabled-ops '<逗号分隔的问题算子>' \
+   │         --disabled-reasons '<JSON: {算子: 原因}>' \
+   │         --context-yaml /flagos-workspace/shared/context.yaml \
+   │         --repo flagos-ai/FlagGems \
+   │         --output-dir /flagos-workspace/results/ \
+   │         --step '④精度评测' \
+   │         --json"
+   │   → 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_accuracy.log
+   │   → 标记 workflow.accuracy_ok=false
    └── 继续进入⑤性能评测
 ```
 
@@ -107,7 +127,18 @@ FlagGems 模式启动失败：
 2. 开启 flaggems → 启动服务 → benchmark V2 性能
 3. V2/V1 性能对比，每个并发级别 ≥ 80%?
    ├── 全部达标 → 标记 workflow.performance_ok=true
-   └── 不达标 → 提交 performance-degraded issue → 标记 workflow.performance_ok=false
+   └── 不达标 → 调用 issue_reporter.py 提交 performance-degraded issue：
+         docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+             --type performance-degraded \
+             --disabled-ops '<逗号分隔的问题算子>' \
+             --disabled-reasons '<JSON: {算子: 原因}>' \
+             --context-yaml /flagos-workspace/shared/context.yaml \
+             --repo flagos-ai/FlagGems \
+             --output-dir /flagos-workspace/results/ \
+             --step '⑤性能评测' \
+             --json"
+       → 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_performance.log
+       → 标记 workflow.performance_ok=false
 4. 继续进入⑥发布
 ```
 
@@ -117,16 +148,24 @@ FlagGems 模式启动失败：
 
 ```bash
 # 宿主机执行（不是 docker exec），先同步 context 到宿主机再调用
-docker cp <container>:/flagos-workspace/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+# mount_mode=mounted/symlink 时，context.yaml 已在宿主机，直接 cp；否则 docker cp
+MOUNT_MODE=$(docker exec <container> cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+    cp /data/flagos-workspace/<model>/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+else
+    docker cp <container>:/flagos-workspace/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+fi
 python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/<model>/config/context_snapshot.yaml
 ```
+
+**执行路径强制规则**：release 脚本**必须从项目目录执行**（`python3 skills/flagos-release/tools/main.py`），**严禁**将脚本复制到 `/tmp` 或其他临时目录后执行。复制到非项目路径会导致权限配置不匹配而被拦截。
 
 工具自动完成：
 1. 从 context_snapshot.yaml 读取 `workflow.qualified`（= service_ok AND accuracy_ok AND performance_ok）判定发布可见性（公开/私有）
 2. docker commit → docker tag（自动生成标准命名）→ docker push Harbor
 3. 生成 README（含评测结果、环境信息、启动命令）
 4. 发布到 ModelScope / HuggingFace（SDK 优先，CLI 降级，Token 从环境变量读取）
-5. 数据回传宿主机（docker cp results/traces/logs）
+5. 数据回传宿主机（挂载模式下已自动可见，非挂载模式通过 docker cp 回传 results/traces/logs）
 
 工具执行完成后，编排层仍需完成：
 - 写入 `traces/06_release.json`（记录工具输出、发布 URL、耗时）
@@ -185,8 +224,8 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 | 决策项 | 默认值 | 说明 |
 |--------|--------|------|
 | 目标识别 | 含 `:` 或 `/` → 镜像模式；否则 `docker inspect --type=container` 判断 | 避免镜像地址被误识别为同名容器 |
-| 宿主机模型路径 | `check_model_local.py --no-download` 自动搜索 | 找到则挂载，未找到则容器内下载 |
-| docker run | 按 GPU 模板自适应降级执行：NVIDIA 先用最小命令（`-itd --gpus=all --network=host -v`），authZ 拒绝则终止，其他失败再加完整参数重试 | 不需确认 |
+| 宿主机模型路径 | `check_model_local.py --no-download` 自动搜索。**找到则使用实际路径**（如 `/home/admin/workspace/models/Qwen3-0.6B`）挂载；**未找到则使用 `/data/models/<model_name>`** 预创建并挂载空目录，容器内下载到此挂载点 | `${MODEL_PATH}` 和 `${CONTAINER_MODEL_PATH}` 均取此路径 |
+| docker run | **模板优先**：严格按 SKILL.md 中 GPU 厂商对应模板执行（NVIDIA: `-itd --gpus=all --network=host -v MODEL -v WORKSPACE`）。**模板失败时**：先检查变量值（路径拼写、权限白名单）修正后重试；**修正仍失败**：`docker inspect` 借鉴同宿主机已有容器的挂载配置重试一次；**仍失败则终止** | 不需确认 |
 | 精度评测 | 始终执行 V1 和 V2 | 不询问是否跳过 |
 | FlagGems 仓库地址 | `https://github.com/FlagOpen/FlagGems.git` | 无需用户提供 |
 | 性能目标 | 每个用例的每个并发级别均 ≥ 80% of V1 | 不询问"目标是多少" |
@@ -198,7 +237,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 | 模型仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 自动生成 |
 | 仓库可见性 | 条件发布：qualified=true 公开 / 不合格私有 | 由 workflow 状态自动判定 |
 | 容器内模型搜索路径 | `/data,/models,/root,/home,/workspace,/mnt,/opt` | 不询问搜索哪些路径 |
-| 容器内模型下载目录 | 优先已挂载宿主机卷路径（/data > /mnt > /nfs > /share），fallback `/data/models/` | 避免写入 overlay |
+| 容器内模型下载目录 | 镜像模式：始终下载到已挂载的 `${CONTAINER_MODEL_PATH}`；容器模式：优先已挂载宿主机卷路径（/data > /mnt > /nfs > /share），fallback `/data/models/` | 镜像模式下模型权重保证落在宿主机 |
 | 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器 | 禁止复用已有容器，必须 docker run 新建 |
 
 ---
@@ -252,10 +291,14 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 ├── results/                              # 最终交付物
 │   ├── native_performance.json              # V1 性能
 │   ├── flagos_performance.json              # V2 性能
+│   ├── performance_compare.csv              # 性能对比（performance_compare.py 生成）
 │   ├── ops_list.json
-│   ├── performance_compare.csv              # 性能对比
-│   ├── gpqa_native.json                     # V1 精度 (GPQA Diamond)
-│   ├── gpqa_flagos.json                     # V2 精度 (GPQA Diamond)
+│   ├── gpqa_native.json                     # V1 精度摘要 (GPQA Diamond)
+│   ├── gpqa_flagos.json                     # V2 精度摘要 (GPQA Diamond)
+│   ├── gpqa_native_detail.json              # V1 精度详情（evalscope 原始报告）
+│   ├── gpqa_flagos_detail.json              # V2 精度详情（evalscope 原始报告）
+│   ├── gpqa_result.json                     # V1 vs V2 精度汇总
+│   ├── README.md                            # 发布 README（release 脚本生成）
 │   ├── eval_result.json                     # 远端评测结果（可选）
 │   └── release_info.json                    # 发布结果（可选）
 │
@@ -681,24 +724,38 @@ ISSUE_EOF"
 - `logs/` — 运行日志（含 `pipeline.log` 全流程执行记录）
 - `config/context_snapshot.yaml` — 流程结束时的完整 context 快照
 
-### 容器产出同步到宿主机（强制）
+### 容器产出同步到宿主机（按挂载模式决定）
 
-**强制规则**：步骤⑥完成后、输出最终报告之前，必须将容器内 `/flagos-workspace/` 的产出文件同步到宿主机工作目录。容器的 `/flagos-workspace` 是 overlay 文件系统，不是宿主机挂载点，不同步则宿主机无数据。
+步骤⑥完成后、输出最终报告之前，根据 `workspace.mount_mode` 决定同步策略。
+
+**判断方式**：读取容器内 `/flagos-workspace/.mount_mode` 标记文件（由 setup_workspace.sh 写入）。
+
+| mount_mode | 含义 | 同步策略 |
+|------------|------|---------|
+| `mounted` | /flagos-workspace 直接挂载宿主机目录 | 无需 docker cp，文件已在宿主机，只需同步 context_snapshot |
+| `symlink` | /flagos-workspace 软链接到已挂载卷下的子目录 | 同 mounted，文件已在宿主机 |
+| `internal` | 容器内非持久化目录（overlay） | 必须 docker cp 回传 |
 
 ```bash
 CONTAINER=<container_name>
 HOST_BASE=/data/flagos-workspace/<model>
+MOUNT_MODE=$(docker exec ${CONTAINER} cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
 
-# 同步三个产出目录
-for dir in results traces logs; do
-    docker cp ${CONTAINER}:/flagos-workspace/${dir}/. ${HOST_BASE}/${dir}/
-done
-
-# 同步 context 快照
-docker cp ${CONTAINER}:/flagos-workspace/shared/context.yaml ${HOST_BASE}/config/context_snapshot.yaml
+if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+    # 挂载模式：results/traces/logs 已直接写入宿主机，只需同步 context 快照
+    cp ${HOST_BASE}/shared/context.yaml ${HOST_BASE}/config/context_snapshot.yaml
+else
+    # 非挂载模式：必须 docker cp 回传全部产出
+    for dir in results traces logs; do
+        docker cp ${CONTAINER}:/flagos-workspace/${dir}/. ${HOST_BASE}/${dir}/
+    done
+    docker cp ${CONTAINER}:/flagos-workspace/shared/context.yaml ${HOST_BASE}/config/context_snapshot.yaml
+fi
 ```
 
-同步完成后验证宿主机文件数量与容器内一致。如果某个 Skill 中途失败需要人工介入，也应先执行此同步，避免已产出的数据丢失。
+**禁止回传到项目源码目录**：`docker cp` 的目标必须是 `/data/flagos-workspace/<model>/` 下的子目录，**严禁**回传到项目目录（如 `/mnt/data/ckxu/flagos_skills_V3/results/`、`/mnt/data/ckxu/flagos_skills_V3/traces/`、`/mnt/data/ckxu/flagos_skills_V3/output/`）。项目目录是代码仓库，不是数据存储。
+
+同步完成后验证宿主机文件存在。非挂载模式下还需验证文件数量与容器内一致。如果某个 Skill 中途失败需要人工介入，也应先执行此同步，避免已产出的数据丢失。
 
 **报告同时保存两份**：容器 `/root/flagos_report/` + 宿主机 `/data/flagos-workspace/<model>/results/`
 
@@ -762,7 +819,7 @@ GPU: <gpu_count>x <gpu_type>
    - 如果启动模式为 native 但文件残留 → 是上次 flagos 的旧数据，不可作为当前算子列表
    - 所有后续操作（算子替换、搜索、性能对比、报告生成）中的"当前算子列表"均以此文件为准
 9. **容器内 Python 必须用 conda 环境**。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=/opt/conda/bin:$PATH` 前缀，禁止依赖容器默认 `/usr/bin/python3`（系统 Python 缺少 torch/requests/yaml 等包）
-10. **宿主机 mkdir 禁止使用花括号展开**。`mkdir -p /data/flagos-workspace/xxx/{a,b,c}` 会被 sandbox 拦截。必须拆成多条 `mkdir -p` 逐个创建，或通过 `setup_workspace.sh` 的第二参数统一创建宿主机目录
+10. **宿主机 mkdir/ls 严禁使用花括号展开（这是硬性限制，违反必定失败）**。`mkdir -p /data/flagos-workspace/xxx/{a,b,c}` 和 `ls /path/{a,b}` 会被 sandbox 拦截导致整个命令失败。必须逐条执行，例如：`mkdir -p /data/flagos-workspace/xxx/a && mkdir -p /data/flagos-workspace/xxx/b && mkdir -p /data/flagos-workspace/xxx/c`，或通过 `setup_workspace.sh` 的第二参数统一创建宿主机目录。**注意**：容器内 `docker exec bash -c "mkdir -p {a,b,c}"` 不受此限制，花括号展开仅在宿主机 Bash 工具中被拦截
 11. **流程不可中途终止**。精度不达标、性能不达标都不是终止流程的理由。编排层必须：
     - 写入对应的 issue log（`issues_accuracy.log` / `issues_performance.log`）
     - 标记 `workflow.xxx_ok=false`，继续下一步
@@ -779,6 +836,10 @@ GPU: <gpu_count>x <gpu_type>
     - 根据错误类型决定后续操作（重试/跳过/继续）
 15. **流程中断后自动诊断**。`run_pipeline.sh` 在 Claude 退出后会自动运行 `diagnose_failure.py`，将诊断结果打印到终端并保存到 `logs/failure_diagnosis.json`。新会话启动时应优先读取此文件了解中断原因
 16. **编排层生成的 JSON 必须包含 `_meta` 字段说明**。Claude 通过 heredoc 写入的 JSON 文件（trace JSON、final_report.json 等）必须在顶层包含 `_meta` 对象，用中文说明关键字段含义，格式为 `{"字段名": "说明", ...}`。工具脚本（fast_gpqa.py、benchmark_runner.py、error_writer.py）已内置 `_meta` 输出，无需额外处理。所有消费方已通过 `_` 前缀约定自动跳过该字段
+17. **Issue 提交只能通过 `issue_reporter.py` 执行**，禁止手动拼 `gh issue create` 或直接调用 GitHub API。issue_reporter.py 自动处理三级降级（gh CLI → GitHub API → markdown 文件），并将结果写入 context.yaml 的 `issues.submitted[]`
+18. **性能对比必须通过 `performance_compare.py` 执行**。步骤⑤ V1/V2 性能测试完成后，必须调用 `performance_compare.py` 生成全量并发级别对比表。禁止自行从 JSON 中提取峰值或单一并发级别手动计算 ratio。`performance_ok` 的判定必须基于 `performance_compare.py` 输出的 `min_ratio`，不是峰值对比
+19. **性能测试 output-name 必须使用标准命名**：V1 用 `native_performance`，V2 用 `flagos_performance`，V3 用 `flagos_optimized`。禁止使用 `benchmark_native`、`benchmark_flagos` 等非标准名称，否则 `performance_compare.py` 和下游消费方无法找到文件
+20. **工具脚本必须从项目目录或容器内 `/flagos-workspace` 执行**。禁止将脚本复制到 `/tmp` 或其他临时目录后执行。权限配置仅匹配 `python3 skills/*` 路径，复制到其他路径会被权限系统拦截
 
 ---
 

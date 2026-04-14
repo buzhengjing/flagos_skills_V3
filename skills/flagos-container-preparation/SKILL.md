@@ -52,8 +52,8 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 - 在宿主机搜索路径（/data, /nfs, /share, /models, /home）中查找匹配目录
 - 三级匹配：精确匹配 > 包含匹配 > config.json 匹配
-- **找到** → 记录 `model.local_path`，docker run 直接挂载到容器
-- **未找到** → docker run 不挂载模型路径，容器创建后通过 `--mode container` 在容器内搜索+下载
+- **找到** → 记录 `model.local_path`，docker run 挂载到容器
+- **未找到** → 预创建宿主机目录 `/data/models/<model_name>`，docker run 仍挂载此空目录，容器内下载到已挂载路径
 - `--download-dir` 可指定下载目录（默认 `/mnt/data/models`）
 
 ### 已有容器入口 — 容器内搜索
@@ -111,13 +111,13 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 | 变量 | 说明 | 来源 |
 |------|------|------|
 | `${CONTAINER_NAME}` | 容器名称 | 自动生成，含冲突检测（见下方命名规则） |
-| `${MODEL_PATH}` | 宿主机模型路径 | `check_model_local.py` 自动搜索（未找到则不挂载） |
-| `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 与宿主机路径同名，或 `/data/models/<model_name>` |
+| `${MODEL_PATH}` | 宿主机模型路径 | `check_model_local.py` 搜索：**找到则使用实际路径**（如 `/home/admin/workspace/models/Qwen3-0.6B`）；**未找到则使用 `/data/models/<model_name>`**（预创建并挂载空目录，容器内下载） |
+| `${CONTAINER_MODEL_PATH}` | 容器内模型路径 | 与 `${MODEL_PATH}` 保持一致（宿主机路径原样映射到容器内同路径） |
 | `${WORKSPACE_PATH}` | 宿主机工作目录 | `/data/flagos-workspace` |
 | `${SHM_SIZE}` | 共享内存 | `64g` |
 | `${IMAGE}` | 镜像地址 | 用户提供 |
 
-> **模型路径未找到时**：docker run 命令中省略 `-v ${MODEL_PATH}:${CONTAINER_MODEL_PATH}` 挂载行。容器创建后通过 `check_model_local.py --mode container` 在容器内搜索+自动下载。
+> **模型路径未找到时**：`run_pipeline.sh` 自动预创建 `/data/models/<model_name>` 目录，docker run 始终包含 `-v ${MODEL_PATH}:${CONTAINER_MODEL_PATH}` 挂载行。容器创建后通过 `check_model_local.py --mode container --container-model-path` 下载到已挂载目录，确保权重落在宿主机。
 
 ### 容器命名与冲突处理（镜像模式专用）
 
@@ -129,9 +129,7 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 **禁止行为**：镜像模式下禁止复用任何已存在的容器，即使该容器是由同一镜像创建的。必须通过 `docker run` 创建全新容器。
 
-#### 模板 A：NVIDIA（自适应降级）
-
-**Level 1 — 最小命令（优先尝试）**：
+#### 模板 A：NVIDIA
 
 ```bash
 docker run -itd --name=${CONTAINER_NAME} \
@@ -141,23 +139,15 @@ docker run -itd --name=${CONTAINER_NAME} \
     ${IMAGE}
 ```
 
-**Level 2 — 完整参数（Level 1 失败且错误非 authZ 拒绝时尝试）**：
-
-```bash
-docker run -itd --name=${CONTAINER_NAME} \
-    --network=host --ipc=host --privileged \
-    --gpus=all --shm-size=${SHM_SIZE:-64g} \
-    --ulimit memlock=-1 --security-opt=seccomp=unconfined \
-    -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
-    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
-    ${IMAGE}
-```
-
-**降级规则**：
-- Level 1 成功 → 直接使用，记录 `container.docker_run_level: 1`
-- Level 1 失败且错误包含 `authorization denied` / `authZ` → 不重试 Level 2（更多参数只会更严格），记录错误并终止
-- Level 1 失败且错误为其他原因（如缺少 GPU runtime）→ 尝试 Level 2
-- Level 2 也失败 → 记录错误并终止
+> **NVIDIA 专属限制**：严禁添加模板之外的任何参数（如 `--privileged`、`--ipc=host`、`--shm-size`、`--ulimit`、`--security-opt`、`--cap-add` 等，会触发 authZ 拒绝）。生成的 docker run 命令必须与上述模板完全一致，仅替换变量值，不增删参数。
+>
+> **降级策略（仅 NVIDIA）**：
+> 1. **首选**：严格按上述模板生成 docker run 命令并执行
+> 2. **模板失败时**（如 authZ 拦截）：先检查变量值是否正确（路径拼写、权限白名单匹配），修正后重试一次
+> 3. **修正后仍失败**：通过 `docker inspect` 查看同宿主机上已有的**同镜像或同类型**容器的挂载配置，借鉴其 `-v` 参数组合重试一次
+> 4. **借鉴重试仍失败**：终止任务，输出错误信息
+>
+> **禁止行为**：禁止跳过步骤 1-2 直接借鉴已有容器。必须先尝试模板，模板失败且修正无效后才允许借鉴。
 
 #### 模板 B：Ascend（华为昇腾）
 
