@@ -23,8 +23,9 @@ provides:
 **目标仓库**：`flagos-ai/FlagGems`（以用户身份提交 issue）
 
 **认证方式**：`GITHUB_TOKEN` 环境变量（GitHub Personal Access Token，需 `public_repo` 权限）
-- Token 已设置 → 全自动提交（gh CLI 或 API）
-- Token 未设置 → 降级输出 markdown 文件，用户手动提交
+- 始终生成带仓库名+时间戳的 markdown 文件保存到本地（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
+- Token 已设置 → 保存 markdown + 自动通过 GitHub API 提交
+- Token 未设置 → 只保存 markdown 到宿主机工作目录，用户可手动提交
 
 ---
 
@@ -198,19 +199,20 @@ python3 issue_reporter.py submit \
     --json
 ```
 
-**提交方式**（自动降级）：
-1. `gh issue create`（若宿主机已 `gh auth login`）
-2. GitHub API（若 `GITHUB_TOKEN` 环境变量已设置）
-3. 输出 markdown 文件供手动提交（无认证时）
+**提交方式**：
+1. 始终保存 markdown 到本地（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
+2. 有 `GITHUB_TOKEN` → 自动通过 GitHub API 提交
+3. 无 token → 只保存 markdown，用户手动提交
 
 ---
 
 # 完成条件
 
 - 问题数据已收集（`issue_data.json`），包含 flaggems 代码上下文
-- Bug Report 已格式化（`issue_report.md`），包含 FlagGems Integration Code section
-- issue 已提交或 markdown 已保存供手动提交
-- context.yaml `issues.submitted` 已更新
+- Bug Report 已格式化并保存为带仓库名+时间戳的 markdown 文件（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
+- markdown 文件包含元信息头（目标仓库、生成时间、issue 类型）
+- 有 `GITHUB_TOKEN` 时 issue 已通过 API 提交，无 token 时 markdown 已保存到宿主机工作目录
+- context.yaml `issues.submitted` 已更新（编排层负责）
 - 对应 trace 文件中记录了 issue 提交操作
 
 ---
@@ -219,11 +221,9 @@ python3 issue_reporter.py submit \
 
 | 问题 | 解决方案 |
 |------|----------|
-| gh CLI 未安装 | 自动降级到 GitHub API（需 `GITHUB_TOKEN`） |
-| gh 未登录 | 自动降级到 GitHub API（需 `GITHUB_TOKEN`） |
-| `GITHUB_TOKEN` 未设置 | 设置环境变量：`export GITHUB_TOKEN=ghp_xxx`（需 `public_repo` 权限） |
+| `GITHUB_TOKEN` 未设置 | markdown 已保存到本地，如需自动提交：`export GITHUB_TOKEN=ghp_xxx`（需 `public_repo` 权限） |
 | Token 无权限 | 重新生成 PAT：GitHub Settings → Developer settings → Fine-grained tokens → Issues Read/Write |
-| gh 和 Token 都没有 | 降级输出 markdown 文件到 `results/issue_report.md`，用户手动提交 |
+| API 提交失败 | markdown 已保存到本地，可手动提交到对应仓库 issues 页面 |
 | flaggems 代码路径未知 | 从 context.yaml `environment.flaggems_code_path` 读取，或用 `--flaggems-code-path` 指定 |
 | gems.txt 不存在 | 服务未启动或 FlagGems 未启用，issue 中标注 "gems.txt not found" |
 | 无法定位问题算子 | 手动在 `--disabled-ops` 参数中指定 |

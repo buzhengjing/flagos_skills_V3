@@ -5,8 +5,13 @@ issue_reporter.py — FlagGems/FlagTree 问题自动收集、格式化与提交
 子命令:
     collect   从日志/结果文件收集问题信息 + 环境版本
     format    将 issue_data.json 格式化为 Bug Report markdown
-    submit    通过 gh CLI / GitHub API / 手动 降级提交 issue
+    submit    保存 markdown 到本地，有 GITHUB_TOKEN 时自动提交
     full      collect → format → submit 一步完成
+
+提交策略:
+    始终生成带仓库名+时间戳的 markdown 文件保存到本地
+    有 GITHUB_TOKEN 环境变量时自动通过 GitHub API 提交
+    无 token 时只保存 markdown，用户可手动提交
 
 Issue 类型:
     operator-crash       算子导致服务崩溃
@@ -21,16 +26,14 @@ Usage:
     python3 issue_reporter.py submit --issue-file issue_report.md --repo flagos-ai/FlagGems --json
     python3 issue_reporter.py full --type operator-crash --log-path crash.log --env-file env.json --repo flagos-ai/FlagGems --json
 
-退出码: 0=成功, 1=收集无结果, 2=参数错误
+退出码: 0=成功（含 markdown 已保存）, 1=收集无结果或 API 提交失败, 2=参数错误
 """
 
 import argparse
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -547,6 +550,7 @@ def _read_log_tail(log_path: str, max_chars: int) -> str:
 def format_issue(
     issue_data: Dict[str, Any],
     output_path: Optional[str] = None,
+    repo: str = "flagos-ai/FlagGems",
 ) -> str:
     """将 issue_data 格式化为 Bug Report markdown"""
 
@@ -582,7 +586,12 @@ def format_issue(
     directions = _generate_directions(issue_type, env, affected_ops)
 
     # Assemble markdown
-    md = f"""## Bug Report: {title}
+    header = (
+        f"<!-- Issue Target: https://github.com/{repo}/issues/new -->\n"
+        f"<!-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -->\n"
+        f"<!-- Type: {issue_type} -->\n\n"
+    )
+    md = header + f"""## Bug Report: {title}
 
 ### Description
 
@@ -860,8 +869,9 @@ def submit_issue(
     title: Optional[str] = None,
     labels: Optional[List[str]] = None,
     dry_run: bool = False,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """三级降级提交 issue: gh CLI → GitHub API → 手动"""
+    """提交 issue: 始终保存 markdown 到本地，有 GITHUB_TOKEN 时自动提交"""
 
     # 读取 issue 内容
     try:
@@ -880,6 +890,23 @@ def submit_issue(
         if not title:
             title = "Bug Report"
 
+    # 始终保存带仓库名+时间戳的 markdown 文件
+    repo_short = repo.replace("/", "_")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"issue_{repo_short}_{timestamp}.md"
+    save_dir = output_dir or os.path.dirname(os.path.abspath(issue_file))
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, filename)
+
+    # 写入带元信息头的 markdown
+    header = (
+        f"<!-- Issue Target: https://github.com/{repo}/issues/new -->\n"
+        f"<!-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -->\n"
+        f"<!-- Title: {title} -->\n\n"
+    )
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(header + body)
+
     if dry_run:
         return {
             "submitted": False,
@@ -888,70 +915,36 @@ def submit_issue(
             "repo": repo,
             "labels": labels or [],
             "body_length": len(body),
-            "report_path": os.path.abspath(issue_file),
+            "report_path": save_path,
         }
 
-    # 策略 1: gh CLI
-    result = _submit_via_gh(issue_file, repo, title, labels)
-    if result.get("submitted"):
-        return result
-
-    # 策略 2: GitHub API token
+    # 有 GITHUB_TOKEN 时自动提交
     token = os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", ""))
     if token:
-        result = _submit_via_api(body, repo, title, labels, token)
-        if result.get("submitted"):
-            return result
+        api_result = _submit_via_api(body, repo, title, labels, token)
+        if api_result.get("submitted"):
+            api_result["report_path"] = save_path
+            return api_result
+        # API 失败，markdown 已保存
+        return {
+            "submitted": False,
+            "method": "api_failed",
+            "error": api_result.get("error", ""),
+            "report_path": save_path,
+            "message": f"API 提交失败，Issue 报告已保存到 {save_path}",
+        }
 
-    # 策略 3: 手动
+    # 无 token，只保存 markdown
     return {
         "submitted": False,
-        "method": "manual",
-        "title": title,
-        "report_path": os.path.abspath(issue_file),
-        "instructions": (
-            f"Issue 文件已保存到 {os.path.abspath(issue_file)}\n"
-            f"请手动提交到 https://github.com/{repo}/issues/new\n"
-            f"或执行: gh auth login && gh issue create --repo {repo} "
-            f"--title \"{title}\" --body-file {issue_file}"
+        "method": "local_only",
+        "report_path": save_path,
+        "message": (
+            f"Issue 报告已保存到 {save_path}\n"
+            f"如需自动提交，请设置环境变量: export GITHUB_TOKEN=ghp_xxx\n"
+            f"或手动提交到 https://github.com/{repo}/issues/new"
         ),
     }
-
-
-def _submit_via_gh(issue_file: str, repo: str, title: str, labels: Optional[List[str]]) -> Dict[str, Any]:
-    """通过 gh CLI 提交"""
-    try:
-        # 检查 gh 是否可用且已登录
-        check = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=10)
-        if check.returncode != 0:
-            return {"submitted": False, "error": "gh 未登录"}
-
-        cmd = [
-            "gh", "issue", "create",
-            "--repo", repo,
-            "--title", title,
-            "--body-file", issue_file,
-        ]
-        if labels:
-            for label in labels:
-                cmd.extend(["--label", label])
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            url = result.stdout.strip()
-            number = _extract_issue_number(url)
-            return {
-                "submitted": True,
-                "method": "gh_cli",
-                "issue_url": url,
-                "issue_number": number,
-                "report_path": os.path.abspath(issue_file),
-            }
-        else:
-            return {"submitted": False, "error": f"gh issue create 失败: {result.stderr.strip()}"}
-
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return {"submitted": False, "error": "gh CLI 不可用"}
 
 
 def _submit_via_api(body: str, repo: str, title: str, labels: Optional[List[str]], token: str) -> Dict[str, Any]:
@@ -1027,7 +1020,7 @@ def full_pipeline(args) -> Dict[str, Any]:
 
     # format
     report_path = os.path.join(output_dir, "issue_report.md")
-    format_issue(data, output_path=report_path)
+    format_issue(data, output_path=report_path, repo=args.repo)
 
     # submit
     result = submit_issue(
@@ -1036,10 +1029,10 @@ def full_pipeline(args) -> Dict[str, Any]:
         title=data.get("title"),
         labels=data.get("labels"),
         dry_run=args.dry_run,
+        output_dir=output_dir,
     )
 
     result["collected_data"] = data_path
-    result["report_path"] = report_path
     return result
 
 
@@ -1075,6 +1068,7 @@ def main():
     fmt = subparsers.add_parser("format", help="格式化为 issue markdown")
     fmt.add_argument("--collected-file", required=True, help="issue_data.json 路径")
     fmt.add_argument("--output", default=None, help="输出 markdown 路径")
+    fmt.add_argument("--repo", default="flagos-ai/FlagGems", help="目标 GitHub 仓库（用于 markdown 元信息）")
     fmt.add_argument("--json", action="store_true", help="JSON 输出")
 
     # submit
@@ -1083,6 +1077,7 @@ def main():
     sub.add_argument("--repo", default="flagos-ai/FlagGems", help="目标 GitHub 仓库")
     sub.add_argument("--title", help="issue 标题（默认从 markdown 提取）")
     sub.add_argument("--labels", help="逗号分隔的标签")
+    sub.add_argument("--output-dir", default=None, help="markdown 保存目录")
     sub.add_argument("--dry-run", action="store_true", help="不实际提交")
     sub.add_argument("--json", action="store_true", help="JSON 输出")
 
@@ -1145,7 +1140,7 @@ def main():
     elif args.command == "format":
         with open(args.collected_file, "r") as f:
             data = json.load(f)
-        md = format_issue(data, output_path=args.output)
+        md = format_issue(data, output_path=args.output, repo=args.repo)
         if args.json:
             print(json.dumps({"markdown": md, "output_path": args.output}, ensure_ascii=False, indent=2))
         else:
@@ -1159,12 +1154,14 @@ def main():
             title=args.title,
             labels=labels,
             dry_run=args.dry_run,
+            output_dir=args.output_dir,
         )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             _print_submit_report(result)
-        sys.exit(0 if result.get("submitted") else 1)
+        # local_only / dry_run 也算成功（markdown 已保存），仅 api_failed 算失败
+        sys.exit(0 if result.get("submitted") or result.get("method") in ("local_only", "dry_run") else 1)
 
     elif args.command == "full":
         result = full_pipeline(args)
@@ -1172,7 +1169,7 @@ def main():
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             _print_submit_report(result)
-        sys.exit(0 if result.get("submitted") else 1)
+        sys.exit(0 if result.get("submitted") or result.get("method") in ("local_only", "dry_run") else 1)
 
 
 def _print_collect_report(data):
@@ -1206,8 +1203,8 @@ def _print_submit_report(result):
     else:
         print(f"状态: 未提交")
         print(f"方式: {result.get('method', 'N/A')}")
-        if result.get("instructions"):
-            print(f"\n{result['instructions']}")
+        if result.get("message"):
+            print(f"\n{result['message']}")
         if result.get("error"):
             print(f"错误: {result['error']}")
     if result.get("report_path"):
