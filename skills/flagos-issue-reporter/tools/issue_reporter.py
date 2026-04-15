@@ -9,9 +9,9 @@ issue_reporter.py — FlagGems/FlagTree 问题自动收集、格式化与提交
     full      collect → format → submit 一步完成
 
 提交策略:
-    始终生成带仓库名+时间戳的 markdown 文件保存到本地
-    有 GITHUB_TOKEN 环境变量时自动通过 GitHub API 提交
-    无 token 时只保存 markdown，用户可手动提交
+    默认只生成带类型标注的 markdown 文件保存到本地
+    显式传入 --submit 且有 GITHUB_TOKEN 环境变量时才提交到 GitHub
+    文件命名: issue_{type}_{repo}_{timestamp}.md
 
 Issue 类型:
     operator-crash       算子导致服务崩溃
@@ -39,6 +39,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+_ENV_FILE = "/flagos-workspace/.env"
+
+
+def _load_env_file():
+    """从 /flagos-workspace/.env 加载 token，环境变量已有值的不覆盖"""
+    if not os.path.isfile(_ENV_FILE):
+        return
+    with open(_ENV_FILE, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key and not os.environ.get(key):
+                os.environ[key] = val
+
+
+_load_env_file()
 
 # 共享模块导入（兼容本地开发和容器内扁平部署）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -870,8 +889,10 @@ def submit_issue(
     labels: Optional[List[str]] = None,
     dry_run: bool = False,
     output_dir: Optional[str] = None,
+    issue_type: Optional[str] = None,
+    auto_submit: bool = False,
 ) -> Dict[str, Any]:
-    """提交 issue: 始终保存 markdown 到本地，有 GITHUB_TOKEN 时自动提交"""
+    """保存 issue markdown 到本地，仅在 auto_submit=True 且有 GITHUB_TOKEN 时提交"""
 
     # 读取 issue 内容
     try:
@@ -890,10 +911,11 @@ def submit_issue(
         if not title:
             title = "Bug Report"
 
-    # 始终保存带仓库名+时间戳的 markdown 文件
+    # 保存带类型+仓库名+时间戳的 markdown 文件
     repo_short = repo.replace("/", "_")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"issue_{repo_short}_{timestamp}.md"
+    type_tag = f"{issue_type}_" if issue_type else ""
+    filename = f"issue_{type_tag}{repo_short}_{timestamp}.md"
     save_dir = output_dir or os.path.dirname(os.path.abspath(issue_file))
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, filename)
@@ -902,7 +924,8 @@ def submit_issue(
     header = (
         f"<!-- Issue Target: https://github.com/{repo}/issues/new -->\n"
         f"<!-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -->\n"
-        f"<!-- Title: {title} -->\n\n"
+        f"<!-- Title: {title} -->\n"
+        f"<!-- Type: {issue_type or 'unknown'} -->\n\n"
     )
     with open(save_path, "w", encoding="utf-8") as f:
         f.write(header + body)
@@ -918,7 +941,20 @@ def submit_issue(
             "report_path": save_path,
         }
 
-    # 有 GITHUB_TOKEN 时自动提交
+    # 仅在显式 --submit 时尝试提交 GitHub
+    if not auto_submit:
+        return {
+            "submitted": False,
+            "method": "local_only",
+            "report_path": save_path,
+            "message": (
+                f"Issue 报告已保存到 {save_path}\n"
+                f"如需提交到 GitHub，请加 --submit 参数\n"
+                f"或手动提交到 https://github.com/{repo}/issues/new"
+            ),
+        }
+
+    # auto_submit=True: 有 GITHUB_TOKEN 时提交
     token = os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", ""))
     if token:
         api_result = _submit_via_api(body, repo, title, labels, token)
@@ -934,10 +970,10 @@ def submit_issue(
             "message": f"API 提交失败，Issue 报告已保存到 {save_path}",
         }
 
-    # 无 token，只保存 markdown
+    # auto_submit=True 但无 token
     return {
         "submitted": False,
-        "method": "local_only",
+        "method": "no_token",
         "report_path": save_path,
         "message": (
             f"Issue 报告已保存到 {save_path}\n"
@@ -1001,7 +1037,8 @@ def full_pipeline(args) -> Dict[str, Any]:
     output_dir = args.output_dir or "/flagos-workspace/results"
     os.makedirs(output_dir, exist_ok=True)
 
-    data_path = os.path.join(output_dir, "issue_data.json")
+    type_tag = args.type.replace("-", "_")
+    data_path = os.path.join(output_dir, f"issue_data_{type_tag}.json")
     data = collect_issue_data(
         issue_type=args.type,
         log_path=args.log_path,
@@ -1019,7 +1056,7 @@ def full_pipeline(args) -> Dict[str, Any]:
     )
 
     # format
-    report_path = os.path.join(output_dir, "issue_report.md")
+    report_path = os.path.join(output_dir, f"issue_report_{type_tag}.md")
     format_issue(data, output_path=report_path, repo=args.repo)
 
     # submit
@@ -1030,6 +1067,8 @@ def full_pipeline(args) -> Dict[str, Any]:
         labels=data.get("labels"),
         dry_run=args.dry_run,
         output_dir=output_dir,
+        issue_type=args.type,
+        auto_submit=getattr(args, "submit", False),
     )
 
     result["collected_data"] = data_path
@@ -1079,6 +1118,8 @@ def main():
     sub.add_argument("--labels", help="逗号分隔的标签")
     sub.add_argument("--output-dir", default=None, help="markdown 保存目录")
     sub.add_argument("--dry-run", action="store_true", help="不实际提交")
+    sub.add_argument("--submit", action="store_true", help="显式提交到 GitHub（默认只生成 markdown）")
+    sub.add_argument("--issue-type", default=None, help="issue 类型（用于文件名标注）")
     sub.add_argument("--json", action="store_true", help="JSON 输出")
 
     # full
@@ -1098,6 +1139,7 @@ def main():
     fl.add_argument("--repo", default="flagos-ai/FlagGems", help="目标 GitHub 仓库")
     fl.add_argument("--output-dir", default=None, help="输出目录")
     fl.add_argument("--dry-run", action="store_true", help="不实际提交")
+    fl.add_argument("--submit", action="store_true", help="显式提交到 GitHub（默认只生成 markdown）")
     fl.add_argument("--json", action="store_true", help="JSON 输出")
 
     args = parser.parse_args()
@@ -1155,6 +1197,8 @@ def main():
             labels=labels,
             dry_run=args.dry_run,
             output_dir=args.output_dir,
+            issue_type=getattr(args, "issue_type", None),
+            auto_submit=getattr(args, "submit", False),
         )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))

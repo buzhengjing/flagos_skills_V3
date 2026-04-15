@@ -228,7 +228,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 
 前置条件：`ops_list.json` 已存在（步骤 5 中已记录）。
 
-调用 `flagos-operator-replacement` 算子搜索优化。优化过程中以 `gems.txt`（或 `flaggems_enable_oplist.txt`）中已替换的算子为唯一候选范围。自动继续（上限 3 轮，超限标记 `workflow.performance_ok: false` 进入下一步）。
+调用 `flagos-operator-replacement` 算子搜索优化。优化过程中以 `gems.txt`（或 `flaggems_enable_oplist.txt`）中已替换的算子为唯一候选范围。使用 elimination 逐删策略，轮次不限（由算子总数决定），达标即停；全部禁完仍不达标则标记 `workflow.performance_ok: false` 进入下一步。
 
 ### 性能不达标时的强制闭环（不可跳过）
 

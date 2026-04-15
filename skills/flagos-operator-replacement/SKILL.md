@@ -914,10 +914,11 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 - **累计替换报告已输出给用户**
 - operator_config.json 已保存
 - context.yaml 已更新
-- 算子调优记录写入对应步骤的 trace 文件中：
-  - 精度调优 → 记录在 `traces/04_quick_accuracy.json` 的 actions 中
-  - 性能调优 → 记录在 `traces/05_quick_performance.json` 的 actions 中
-- `timing.steps.operator_replacement` 已更新为本步骤的 `duration_seconds`
+- 算子调优记录写入独立的 trace 文件：
+  - 精度调优 → `traces/07_accuracy_tuning.json`
+  - 性能调优 → `traces/08_performance_tuning.json`
+- 精度调优耗时更新 `timing.steps.accuracy_tuning`
+- 性能调优耗时更新 `timing.steps.performance_tuning`
 
 ---
 
