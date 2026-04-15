@@ -148,8 +148,14 @@ plugin_control:
 # 环境状态 (由 service-startup 写入)
 # ============================================================================
 environment:
+  env_type: ""              # 环境场景: native | vllm_flaggems | vllm_plugin_flaggems
   has_plugin: false          # 是否有 vllm-plugin-FL
+  has_flagtree: false        # 是否有 FlagTree
   initial_env_verified: false      # 初始环境是否验证通过
+  flaggems_code_path: ""    # flaggems 代码文件路径 (仅 vllm_flaggems)
+  flaggems_enable_call: ""  # flag_gems.enable() 完整调用 (仅 vllm_flaggems)
+  flaggems_txt_path: ""     # enable() 中指定的 txt 路径 (仅 vllm_flaggems)
+  gems_txt_auto_detect: false  # 是否需要启动后自动搜索 gems.txt
 
 # ============================================================================
 # FlagGems 启停方法 (由 pre-service-inspection 探测写入)
@@ -167,6 +173,11 @@ runtime:
   flaggems_enabled: false # 是否启用 FlagGems
   tp_size: 0              # tensor-parallel-size（由 calc_tp_size.py 推算）
   tp_reason: ""           # TP 推算原因
+  gpu_count: 0            # 实际使用的 GPU 数量
+  total_gpus: 0           # 宿主机总 GPU 数量
+  cuda_visible_devices: "" # CUDA_VISIBLE_DEVICES 值
+  gpu_selection_reason: "" # GPU 选择原因
+  thinking_model: false   # 是否为 thinking model
 
 # ============================================================================
 # 服务信息 (由 service-startup 写入)
@@ -217,6 +228,22 @@ operator_replacement:
   rollback_info: ""         # 如何还原此次替换操作
 
 # ============================================================================
+# 性能对比汇总 (由 performance-testing 写入，步骤 10)
+# ============================================================================
+perf:
+  strategy: ""              # 使用的测试策略: quick | comprehensive
+  test_case: ""             # 测试用例名 (quick 模式下为 4k_input_1k_output)
+  concurrency: 0            # 并发数 (quick 模式下为 64)
+  v1_output_tps: 0          # V1 Output token throughput (tok/s)
+  v1_total_tps: 0           # V1 Total token throughput (tok/s)
+  v2_output_tps: 0          # V2 Output token throughput (tok/s)
+  v2_total_tps: 0           # V2 Total token throughput (tok/s)
+  output_ratio_pct: 0       # V2/V1 output throughput ratio (%)
+  total_ratio_pct: 0        # V2/V1 total throughput ratio (%)
+  ratio_pct: 0              # min(output_ratio, total_ratio) (%)
+  pass: false               # ratio >= 80%?
+
+# ============================================================================
 # V1 性能基线 — Native 无 FlagGems (由 performance-testing 写入)
 # ============================================================================
 native_perf:
@@ -262,19 +289,111 @@ timing:
   workflow_start: ""          # 流程开始时间 (ISO 8601)
   workflow_end: ""            # 流程结束时间 (ISO 8601)
   total_duration_seconds: 0   # 全流程总耗时 (秒)
-  steps:                      # 各步骤耗时 (秒)
-    container_preparation: 0
-    environment_inspection: 0
-    service_startup_default: 0
-    eval_v1: 0
-    perf_v1: 0
-    service_startup_flagos: 0
-    eval_v2: 0
-    perf_v2: 0
-    performance_compare: 0
-    operator_replacement: 0
-    perf_v3: 0
-    final_report: 0
+  steps:                      # 各步骤耗时 (秒)，与 workflow_ledger 步骤名对齐
+    container_preparation: 0    # 步骤① 容器准备
+    environment_inspection: 0   # 步骤② 环境检测
+    service_startup: 0          # 步骤③ 服务启动（含 default/native/flagos 模式）
+    quick_accuracy: 0           # 步骤④ 精度评测（含 V1+V2）
+    accuracy_tuning: 0          # 步骤⑦ 精度算子调优
+    quick_performance: 0        # 步骤⑤ 性能评测（含 V1+V2）
+    performance_tuning: 0       # 步骤⑧ 性能算子调优
+    release: 0                  # 步骤⑥ 自动发布
+
+# ============================================================================
+# 流程状态 (由编排层维护)
+# ============================================================================
+workflow:
+  mode: "full"                # 流程模式: full (完整流程) | verify (简化验证)
+  service_ok: false           # 步骤③ 服务启动是否成功
+  accuracy_ok: false          # 步骤④/⑦ 精度是否达标 (偏差 ≤5%)
+  performance_ok: false       # 步骤⑤/⑧ 性能是否达标 (ratio ≥80%)
+  qualified: false            # 综合判定: service_ok AND accuracy_ok AND performance_ok
+  all_done: false             # 全流程是否完成
+  last_error: ""              # 最近一次错误信息
+
+# ============================================================================
+# 工作流台账 (由编排层维护，每步开始/结束时更新)
+# ============================================================================
+workflow_ledger:
+  steps:
+    - step: "01_container_preparation"
+      name: "容器准备"
+      status: "pending"       # pending | in_progress | success | failed | skipped
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "02_environment_inspection"
+      name: "环境检测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "03_service_startup"
+      name: "服务启动"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "04_quick_accuracy"
+      name: "精度评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "07_accuracy_tuning"
+      name: "精度算子调优"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "05_quick_performance"
+      name: "性能评测"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "08_performance_tuning"
+      name: "性能算子调优"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+    - step: "06_release"
+      name: "自动发布"
+      status: "pending"
+      started_at: ""
+      finished_at: ""
+      duration_seconds: 0
+      notes: ""
+      fail_reason: ""
+      skip_reason: ""
+
+# ============================================================================
+# Issue 记录 (由 issue_reporter.py 写入)
+# ============================================================================
+issues:
+  submitted: []               # 已提交的 issue 列表
 
 # ============================================================================
 # 元数据

@@ -124,7 +124,7 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         pkill -f 'sglang' 2>/dev/null || true
     "
     # 重置 context.yaml：从项目模板复制，确保与模板字段同步
-    docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
+    docker cp "${PROJECT_ROOT}/shared/context.template.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
     echo "  ✓ context.yaml 已重置（从模板复制）"
     echo "  ✓ 残留算子列表已清理"
     echo "  ✓ 残留服务进程已清理"
@@ -198,6 +198,8 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/toggle_flaggems.py:scripts/toggle_flaggems.py"
     # 服务就绪检测
     "skills/flagos-service-startup/tools/wait_for_service.sh:scripts/wait_for_service.sh"
+    # 服务启动（供 operator_search.py 调用）
+    "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
     # TP 推算
     "skills/flagos-service-startup/tools/calc_tp_size.py:scripts/calc_tp_size.py"
     # 性能测试
@@ -289,6 +291,22 @@ docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
+
+# 4.5. 写入 Token 到容器 .env（供脚本 fallback 读取）
+echo "[4.5/6] 写入 Token 到容器 .env..."
+ENV_LINES=""
+for VAR_NAME in GITHUB_TOKEN MODELSCOPE_TOKEN HF_TOKEN HARBOR_USER HARBOR_PASSWORD; do
+    VAR_VAL="${!VAR_NAME:-}"
+    if [ -n "${VAR_VAL}" ]; then
+        ENV_LINES="${ENV_LINES}${VAR_NAME}=${VAR_VAL}\n"
+    fi
+done
+if [ -n "${ENV_LINES}" ]; then
+    docker exec "${CONTAINER}" bash -c "printf '${ENV_LINES}' > /flagos-workspace/.env && chmod 600 /flagos-workspace/.env"
+    echo "  ✓ /flagos-workspace/.env 已写入 ($(echo -e "${ENV_LINES}" | grep -c '=') 个 token)"
+else
+    echo "  ⚠ 宿主机未设置任何 token 环境变量，跳过 .env 写入"
+fi
 
 # 5. 验证
 echo "[5/6] 验证部署..."

@@ -227,7 +227,7 @@ output/
 
 **流程集成**：
 - context.yaml 已更新（`image.registry_url`、`image.upload_timestamp`、`release.modelscope_url`、`release.huggingface_url`）
-- `traces/05_release.json` 已写入（记录发布条件判定、commit/tag/push 命令、README 路径、ModelScope/HuggingFace URL）
+- `traces/06_release.json` 已写入（记录发布条件判定、commit/tag/push 命令、README 路径、ModelScope/HuggingFace URL）
 - `results/release_info.json` 已保存（qualified 状态、Harbor URL、ModelScope URL、HuggingFace URL）
 - `timing.steps.release` 已更新为本步骤的 `duration_seconds`
 

@@ -99,15 +99,15 @@ issues:
 
 # 触发规则（按工作流步骤）
 
-## 步骤② 启服务
+## 步骤③ 启服务
 
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|
 | FlagGems 模式启动崩溃 | `operator-crash` | 即时提交 |
 
-**处理流程**：保存日志 → 提交 issue（含 flaggems.enable 代码）→ 排除操作失误 → 标记 `workflow.service_ok: false` → 跳过③④到⑤发布（私有）
+**处理流程**：保存日志 → 提交 issue（含 flaggems.enable 代码）→ 排除操作失误 → 标记 `workflow.service_ok: false` → 跳过④⑤到⑥发布（私有）
 
-## 步骤③ 精度评测
+## 步骤④ 精度评测
 
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|
@@ -115,7 +115,7 @@ issues:
 | V1/V2 精度偏差 >5% | `accuracy-degraded` | 发现即提交，然后开始算子优化 |
 | 3 轮优化后仍不达标 | `accuracy-degraded` | 最终汇总提交（含所有禁用算子及原因） |
 
-## 步骤④ 性能评测
+## 步骤⑤ 性能评测
 
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|

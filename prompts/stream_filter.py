@@ -24,8 +24,8 @@ from datetime import datetime
 # pipeline.log 匹配规则（不受 --verbose 影响，始终按规则写入）
 # ============================================================================
 
-# 步骤标记: [步骤①] ~ [步骤⑥] 或 [步骤1] ~ [步骤6]
-RE_STEP = re.compile(r'\[步骤[①②③④⑤⑥1-6]\]')
+# 步骤标记: [步骤①] ~ [步骤⑧] 或 [步骤1] ~ [步骤8]（⑦⑧为条件触发的算子调优步骤）
+RE_STEP = re.compile(r'\[步骤[①②③④⑤⑥⑦⑧1-8]\]')
 
 # 关键结果行: ✓ / ✗ / ⚠ 开头（去掉前导空格后）
 RE_RESULT = re.compile(r'^\s*[✓✗⚠]')
@@ -87,7 +87,7 @@ SHOW_COMMANDS = [
     # 关键工具脚本（docker exec 内执行）
     'setup_workspace', 'inspect_env', 'toggle_flaggems',
     'wait_for_service', 'fast_gpqa', 'benchmark_runner',
-    'performance_compare', 'operator_search', 'diagnose_ops',
+    'performance_compare', 'operator_search', 'operator_optimizer', 'diagnose_ops',
     'eval_monitor', 'install_component', 'issue_reporter',
     # 外部服务
     'modelscope', 'huggingface-cli',
@@ -110,7 +110,7 @@ HIDE_DOCKER_PATTERNS = [
 LOG_COMMANDS = [
     'setup_workspace', 'inspect_env', 'toggle_flaggems',
     'wait_for_service', 'fast_gpqa', 'benchmark_runner',
-    'performance_compare', 'operator_search', 'diagnose_ops',
+    'performance_compare', 'operator_search', 'operator_optimizer', 'diagnose_ops',
     'docker commit', 'docker tag', 'docker push',
     'modelscope upload', 'huggingface-cli upload',
 ]
@@ -160,22 +160,24 @@ PIPELINE_STEPS = [
     ('②', '环境检测'),
     ('③', '服务启动'),
     ('④', '精度评测'),
+    ('⑦', '精度算子调优'),
     ('⑤', '性能评测'),
+    ('⑧', '性能算子调优'),
     ('⑥', '打包发布'),
 ]
 
 # 匹配 [步骤①] 开始 / 完成 / 失败 / 跳过
-RE_STEP_START = re.compile(r'\[步骤([①②③④⑤⑥1-6])\].*(?:开始|启动)')
-RE_STEP_DONE = re.compile(r'\[步骤([①②③④⑤⑥1-6])\].*(?:完成|结束)')
-RE_STEP_FAIL = re.compile(r'\[步骤([①②③④⑤⑥1-6])\].*失败')
-RE_STEP_SKIP = re.compile(r'\[步骤([①②③④⑤⑥1-6])\].*跳过')
+RE_STEP_START = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*(?:开始|启动)')
+RE_STEP_DONE = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*(?:完成|结束)')
+RE_STEP_FAIL = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*失败')
+RE_STEP_SKIP = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*跳过')
 
 # 数字到圆数字映射
-NUM_TO_CIRCLE = {'1': '①', '2': '②', '3': '③', '4': '④', '5': '⑤', '6': '⑥'}
+NUM_TO_CIRCLE = {'1': '①', '2': '②', '3': '③', '4': '④', '5': '⑤', '6': '⑥', '7': '⑦', '8': '⑧'}
 
 
 class ProgressBar:
-    """6 步进度条，实时刷新在终端"""
+    """8 步进度条，实时刷新在终端（⑦⑧为条件触发的算子调优步骤）"""
 
     # 状态符号
     SYM_PENDING = '○'
@@ -184,7 +186,7 @@ class ProgressBar:
     SYM_FAIL = '✗'
     SYM_SKIP = '⚠'
 
-    def __init__(self, colors: Colors, enabled: bool = True):
+    def __init__(self, colors: Colors, enabled: bool = True, start_step: int = 1):
         self.colors = colors
         self.enabled = enabled
         # 每步状态: pending / running / done / fail
@@ -193,6 +195,10 @@ class ProgressBar:
         self.step_durations = [None] * len(PIPELINE_STEPS)
         self.workflow_start = None
         self.last_render = ''
+        # 分段执行：将 start_step 之前的步骤标记为 done
+        if start_step > 1:
+            for i in range(min(start_step - 1, len(PIPELINE_STEPS))):
+                self.states[i] = 'done'
 
     def _normalize(self, step_id: str) -> int:
         """步骤标识 → 索引 (0-based)"""
@@ -438,6 +444,9 @@ class PipelineLogger:
     def open(self):
         if self.log_path:
             self.log_file = open(self.log_path, 'a', encoding='utf-8')
+            # 分段执行时，段2/3 追加写入已有文件，跳过重复 header
+            if self.log_file.tell() > 0:
+                self.header_written = True
 
     def close(self):
         if self.log_file:
@@ -548,6 +557,8 @@ def main():
     parser.add_argument('--pipeline-log', help='Path to pipeline.log for writing progress')
     parser.add_argument('--verbose', action='store_true', help='详细模式：显示全量输出（同旧版行为）')
     parser.add_argument('--no-color', action='store_true', help='关闭 ANSI 颜色')
+    parser.add_argument('--start-step', type=int, default=1,
+                        help='分段执行时的起始步骤编号（1-8），之前的步骤标记为已完成')
     args = parser.parse_args()
 
     verbose = args.verbose
@@ -557,7 +568,7 @@ def main():
     logger = PipelineLogger(args.pipeline_log)
     logger.open()
 
-    progress = ProgressBar(colors, enabled=use_color and not verbose)
+    progress = ProgressBar(colors, enabled=use_color and not verbose, start_step=args.start_step)
 
     # 跟踪上一个 tool_use 是否应该显示结果（精简模式用）
     last_tool_visible = False

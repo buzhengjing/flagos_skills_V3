@@ -547,12 +547,13 @@ IF deviation > threshold (5%):
     # 2. 设置状态
     workflow.accuracy_ok = false
 
-    # 3. 继续到性能评测（不终止流程）
+    # 3. 触发步骤⑦精度算子调优（不终止流程）
+    #    ⑦完成后再继续到步骤⑤性能评测
 
 ELSE:
     workflow.accuracy_ok = true
 
-→ 继续性能评测
+→ accuracy_ok=false 时触发步骤⑦精度算子调优，⑦完成（或跳过）后继续步骤⑤性能评测
 ```
 
 **禁止行为**：偏差 > 5% 时终止流程。必须写入 issue log、标记 `accuracy_ok=false`，然后继续后续步骤，最终走到发布（私有发布）。

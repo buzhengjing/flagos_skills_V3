@@ -1,8 +1,12 @@
 #!/bin/bash
-# FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2，无 V3）
+# FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
+#   完整流程:
 #   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]
+#
+#   简化验证流程 (plugin+flaggems+flagtree):
+#   bash prompts/run_pipeline.sh --mode verify <容器名或镜像地址> <模型名> <模型路径> [GITHUB_TOKEN] [--verbose]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
 # 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载
@@ -10,6 +14,8 @@
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
 #   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
+#   bash prompts/run_pipeline.sh --mode verify qwen3-8b-test Qwen3-8B /data/models/Qwen3-8B
+#   bash prompts/run_pipeline.sh --mode verify qwen3-8b-test Qwen3-8B /data/models/Qwen3-8B ghp_xxx
 #
 # 向后兼容（已弃用）:
 #   bash prompts/run_pipeline.sh --image <镜像地址> <模型名> [<宿主机模型路径>] <tokens...>
@@ -32,8 +38,57 @@ fi
 IMAGE_MODE=false
 MODEL_PATH=""
 FILTER_FLAGS=""
+WORKFLOW_MODE="full"  # full | verify
 
-if [[ "${1:-}" == "--image" ]]; then
+# 检查是否为 verify 模式
+if [[ "${1:-}" == "--mode" ]] && [[ "${2:-}" == "verify" ]]; then
+    WORKFLOW_MODE="verify"
+    shift 2  # 移除 --mode verify
+    # verify 模式参数：<容器名或镜像> <模型名> <模型路径> [GITHUB_TOKEN] [--verbose]
+    if [ $# -lt 3 ]; then
+        echo "用法: $0 --mode verify <容器名或镜像地址> <模型名> <模型路径> [GITHUB_TOKEN] [--verbose]"
+        echo ""
+        echo "简化验证流程：仅验证 plugin+flaggems+flagtree 环境能否正常启动服务并完成推理"
+        echo ""
+        echo "参数:"
+        echo "  <容器名或镜像地址>  已有容器名或镜像地址"
+        echo "  <模型名>            模型标识名（如 Qwen3-8B）"
+        echo "  <模型路径>          模型权重路径（宿主机或容器内绝对路径）"
+        echo "  [GITHUB_TOKEN]      GitHub Token（可选，用于 issue 自动提交）"
+        echo ""
+        echo "示例:"
+        echo "  $0 --mode verify qwen3-8b-test Qwen3-8B /data/models/Qwen3-8B"
+        echo "  $0 --mode verify qwen3-8b-test Qwen3-8B /data/models/Qwen3-8B ghp_xxx"
+        echo "  $0 --mode verify harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B /data/models/Qwen3-8B ghp_xxx"
+        exit 1
+    fi
+    TARGET="$1"
+    MODEL="$2"
+    MODEL_PATH="$3"
+    CONTAINER_MODEL_PATH="${MODEL_PATH}"
+    MODEL_FOUND_ON_HOST=true  # verify 模式用户已明确提供路径
+    export GITHUB_TOKEN="${4:-}"
+    # verify 模式不需要其他 token
+    export MODELSCOPE_TOKEN=""
+    export HF_TOKEN=""
+    export HARBOR_USER=""
+    export HARBOR_PASSWORD=""
+    if [[ "${5:-}" == "--verbose" ]] || [[ "${4:-}" == "--verbose" ]]; then
+        FILTER_FLAGS="--verbose"
+    fi
+
+    # 自动识别容器/镜像
+    if [[ "$TARGET" == *":"* ]] || [[ "$TARGET" == *"/"* ]]; then
+        IMAGE_MODE=true
+        IMAGE="$TARGET"
+    elif docker inspect --type=container "$TARGET" &>/dev/null; then
+        IMAGE_MODE=false
+        CONTAINER="$TARGET"
+    else
+        IMAGE_MODE=true
+        IMAGE="$TARGET"
+    fi
+elif [[ "${1:-}" == "--image" ]]; then
     # 向后兼容：旧 --image 格式
     echo "⚠ --image 标志已弃用，直接传镜像地址作为第一参数即可自动识别"
     shift
@@ -136,7 +191,11 @@ fi
 
 # ========== Banner ==========
 echo "============================================================"
-echo "  FlagOS 全自动迁移流程"
+if [ "$WORKFLOW_MODE" = "verify" ]; then
+    echo "  FlagOS 简化验证流程 (plugin+flaggems+flagtree)"
+else
+    echo "  FlagOS 全自动迁移流程"
+fi
 echo "============================================================"
 if $IMAGE_MODE; then
     echo "  目标: ${IMAGE} (镜像，自动识别)"
@@ -144,14 +203,20 @@ else
     echo "  目标: ${CONTAINER} (容器，自动识别)"
 fi
 echo "  模型: ${MODEL}"
-if $IMAGE_MODE; then
+if [ "$WORKFLOW_MODE" = "verify" ]; then
+    echo "  模型路径: ${MODEL_PATH} (用户指定)"
+elif $IMAGE_MODE; then
     if $MODEL_FOUND_ON_HOST; then
         echo "  模型路径: ${MODEL_PATH} (自动检测)"
     else
         echo "  模型路径: ${MODEL_PATH} (预创建，容器内下载)"
     fi
 fi
-echo "  模式: V1 + V2（无 V3 算子优化）"
+if [ "$WORKFLOW_MODE" = "verify" ]; then
+    echo "  模式: 简化验证（①容器准备 → ②环境检测 → ③启服务+curl验证）"
+else
+    echo "  模式: V1 + V2 + V3（不达标时自动算子优化）"
+fi
 echo "  权限: --permission-mode auto + settings.local.json allowlist (78 rules)"
 echo "============================================================"
 echo ""
@@ -180,6 +245,7 @@ COMMON_PLAN_FIRST=$(cat <<'PLAN_EOF'
    - skills/flagos-service-startup/SKILL.md
    - skills/flagos-eval-comprehensive/SKILL.md
    - skills/flagos-performance-testing/SKILL.md
+   - skills/flagos-operator-replacement/SKILL.md
    - skills/flagos-release/SKILL.md
 PLAN_EOF
 )
@@ -188,135 +254,124 @@ COMMON_PLAN_STEPS=$(cat <<PLAN_STEPS_EOF
 2. 生成 execution_plan.md，写入 /data/flagos-workspace/${MODEL}/config/execution_plan.md
    - 包含每步的完整命令（变量已替换为实际值：容器名、模型名、端口等）
    - 包含每步的输入/输出文件路径
-   - 包含每步的 context.yaml 读写字段清单（注意：context.yaml 位于容器内 /flagos-workspace/shared/context.yaml）
+   - 包含每步的 context.yaml 读写字段清单
    - 包含每步的校验检查项
 3. 每个步骤开始前，Read execution_plan.md 中对应段落刷新记忆
-4. 每个步骤开始前，通过 docker exec 读取容器内 /flagos-workspace/shared/context.yaml 获取最新状态（禁止读写项目目录下的 shared/context.template.yaml）
+4. 每个步骤开始前，通过 docker exec 读取容器内 /flagos-workspace/shared/context.yaml 获取最新状态
 
-请严格按以下 6 步执行 FlagOS 全自动迁移流程。步骤①-⑤ 全自动执行，步骤间无需询问我。仅在⑥发布阶段如需 token 再来询问。
-
-**严格禁止**：不进行 V3 算子优化。精度或性能不达标时仅输出报告，不调用 operator_search.py / operator_optimizer.py / diagnose_ops.py 进行任何算子排查或优化。直接继续后续步骤。
-
-**进度输出要求（-p 模式下必须遵守）**：
-由于本流程在非交互模式（-p）下运行，工具调用结果不会直接显示。你必须在以下时机主动输出文本，确保用户能实时了解进度：
-
-1. 每个步骤（①-⑥）开始时，输出：\`[步骤X] 开始 — <步骤名称>\`
-2. 每个关键命令执行后，输出一行结果摘要（成功/失败 + 关键数据），例如：
-   - \`  ✓ 容器 xxx 运行中，GPU 8x\`
-   - \`  ✓ env_type=vllm_flaggems，flaggems=5.1.0\`
-   - \`  ✓ 服务就绪，端口 8000，模型已加载\`
-   - \`  ✓ V1 精度: 62.1%\`
-   - \`  ✗ V2/V1 性能比 72.1% < 80%，已写入 issue\`
-3. 每个步骤完成时，输出：\`[步骤X] 完成 — 耗时 Xm Xs\`
-4. 遇到错误或异常时，立即输出错误摘要，不要等到步骤结束
-5. 长时间操作（服务启动、精度评测、性能测试）期间，每 30 秒输出一次等待状态
-
-不要省略这些输出。宁可多输出一行，也不要让用户看到长时间空白。
+全自动执行，步骤间无需询问。
+**算子调优**：精度偏差>5%或性能ratio<80%时，按 CLAUDE.md 步骤⑦⑧自动触发算子调优。
+**进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。按 CLAUDE.md 流水线执行日志规范输出。
 PLAN_STEPS_EOF
 )
 
-# 步骤②-⑥ 共用
-COMMON_STEPS_2_TO_6=$(cat <<STEPS_EOF
 
-② 环境检测：
-   - docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/inspect_env.py --output-json"
-   - 判定 env_type（native / vllm_flaggems / vllm_plugin_flaggems）
-   - 如 env_type=vllm_flaggems，额外执行 toggle_flaggems.py --action analyze
-   - 写入容器内 /flagos-workspace/shared/context.yaml + traces/02_environment_inspection.json
+# ========== Verify 模式 Prompt 构造 ==========
+if [ "$WORKFLOW_MODE" = "verify" ]; then
 
-③ 服务启动（default 模式验证）：
-   - 不修改 FlagGems 状态，原样启动服务
-   - wait_for_service.sh 等待就绪
-   - 检查 flaggems_enable_oplist.txt
-   - 验证 /v1/models 和推理测试
-   - 启动失败时通过 issue_reporter.py 提交 issue：
-     docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
-         --type operator-crash \
-         --log-path /flagos-workspace/logs/startup_flagos.log \
-         --context-yaml /flagos-workspace/shared/context.yaml \
-         --repo flagos-ai/FlagGems \
-         --output-dir /flagos-workspace/results/ \
-         --step '③启服务' \
-         --json"
-   - 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_startup.log
-   - 写入容器内 /flagos-workspace/shared/context.yaml + traces/03_service_startup.json
+VERIFY_PLAN_FIRST=$(cat <<'VPLAN_EOF'
 
-④ 精度评测（GPQA Diamond，仅 V1+V2）：
-   - 先确认无性能测试进程在运行
-   a) V1 精度（Native）：
-      - toggle_flaggems.py --action disable → 重启服务（native 模式）
-      - fast_gpqa.py 评测 → 保存 results/gpqa_native.json
-   b) V2 精度（FlagGems）：
-      - toggle_flaggems.py --action enable → 重启服务（flagos 模式）
-      - fast_gpqa.py 评测 → 保存 results/gpqa_flagos.json
-   c) V1 vs V2 精度对比（5% 阈值）：
-      - 达标 → 输出"精度达标"
-      - 不达标 → 通过 issue_reporter.py 提交 accuracy-degraded issue：
-        docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
-            --type accuracy-degraded \
-            --disabled-ops '<逗号分隔的问题算子>' \
-            --disabled-reasons '<JSON: {算子: 原因}>' \
-            --context-yaml /flagos-workspace/shared/context.yaml \
-            --repo flagos-ai/FlagGems \
-            --output-dir /flagos-workspace/results/ \
-            --step '④精度评测' \
-            --json"
-      - 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_accuracy.log + 输出偏差报告 + 当前算子列表，不排查算子，继续后续
-   - 写入 traces/04_quick_accuracy.json
+**执行模式：计划优先（Plan-First）**
 
-⑤ 性能评测（quick 策略 4k→1k，仅 V1+V2）：
-   - 先确认无精度评测进程在运行
-   a) V1 性能（Native）：
-      - toggle_flaggems.py --action disable → 重启服务（native 模式）
-      - benchmark_runner.py --strategy quick --output-name native_performance → 保存 results/native_performance.json
-   b) V2 性能（FlagGems）：
-      - toggle_flaggems.py --action enable → 重启服务（flagos 模式）
-      - benchmark_runner.py --strategy quick --output-name flagos_performance → 保存 results/flagos_performance.json
-   c) 性能对比：
-      - performance_compare.py --native ... --flagos-full ... --format markdown
-      - 达标(≥80%) → 输出"性能达标"
-      - 不达标 → 通过 issue_reporter.py 提交 performance-degraded issue：
-        docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
-            --type performance-degraded \
-            --disabled-ops '<逗号分隔的问题算子>' \
-            --disabled-reasons '<JSON: {算子: 原因}>' \
-            --context-yaml /flagos-workspace/shared/context.yaml \
-            --repo flagos-ai/FlagGems \
-            --output-dir /flagos-workspace/results/ \
-            --step '⑤性能评测' \
-            --json"
-      - 脚本自动回写 context.yaml 的 issues.submitted[] 和 logs/issues_performance.log + 输出对比报告，不触发算子优化，继续后续
-   - 写入 traces/05_quick_performance.json
-
-⑥ 打包发布（使用 flagos-release skill）：
-   - 先将容器内最新 context.yaml 同步到宿主机：
-     docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-   - 在宿主机执行 release 工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-   - 工具自动完成: qualified 判定 → docker commit/tag/push → README 生成 → ModelScope/HuggingFace 上传 → 数据回传
-   - 工具完成后写入 traces/06_release.json + 更新容器内 /flagos-workspace/shared/context.yaml
-   - **必须**：发布完成后（无论是否成功调用了 main.py），都要执行数据回传，确保宿主机有结果文件：
-     for dir in results traces; do
-       docker cp \${CONTAINER}:/flagos-workspace/\${dir}/. /data/flagos-workspace/${MODEL}/\${dir}/
-     done
-     docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-
-全流程最后一步（报告输出前），将最终 context 回传到宿主机：
-  docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
-
-**重要：context.yaml 隔离规则**
-- 运行时 context 位于容器内 /flagos-workspace/shared/context.yaml，每个容器独立
-- 禁止读写项目目录下的 shared/context.template.yaml（那是初始化模板）
-- 读取 context 统一用：docker exec \${CONTAINER} cat /flagos-workspace/shared/context.yaml
-- 写入 context 统一用：docker exec \${CONTAINER} 在容器内操作
-
-全流程结束后输出完整的 FlagOS 迁移报告（含精度、性能、发布信息、耗时统计、问题记录摘要）。
-报告中的"问题记录摘要"必须包含所有已提交 issue 的 GitHub URL（从 context.yaml 的 issues.submitted[] 读取），格式示例：
-  已提交 Issue:
-  - [performance-degraded] https://github.com/flagos-ai/FlagGems/issues/XXX (⑤性能评测)
-  - [operator-crash] https://github.com/flagos-ai/FlagGems/issues/YYY (③启服务)
-若无 issue 则标注"无问题提交"。
-STEPS_EOF
+在执行任何操作之前，先完成规划阶段：
+1. 依次读取以下 SKILL.md 文件，提取每步的关键命令、参数、文件路径：
+   - skills/flagos-container-preparation/SKILL.md
+   - skills/flagos-pre-service-inspection/SKILL.md
+   - skills/flagos-service-startup/SKILL.md
+   - skills/flagos-issue-reporter/SKILL.md
+VPLAN_EOF
 )
+
+VERIFY_PLAN_STEPS=$(cat <<VPLAN_STEPS_EOF
+2. 生成 execution_plan.md，写入 /data/flagos-workspace/${MODEL}/config/execution_plan.md
+   - 包含每步的完整命令（变量已替换为实际值：容器名、模型名、端口等）
+   - 包含每步的输入/输出文件路径
+   - 包含每步的 context.yaml 读写字段清单
+   - 包含每步的校验检查项
+3. 每个步骤开始前，Read execution_plan.md 中对应段落刷新记忆
+4. 每个步骤开始前，通过 docker exec 读取容器内 /flagos-workspace/shared/context.yaml 获取最新状态
+
+全自动执行，步骤间无需询问。
+**简化验证流程**：仅执行 ①容器准备 → ②环境检测 → ③启服务+curl验证，不执行精度评测、性能评测、算子调优、发布。
+**任何步骤失败都通过 issue_reporter.py 生成 issue 文件**（容器准备失败除外，因为容器不可用无法运行 issue_reporter）。
+**进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。按 CLAUDE.md 简化验证流程规范输出。
+VPLAN_STEPS_EOF
+)
+
+    if $IMAGE_MODE; then
+        VERIFY_STEP1=$(cat <<VSTEP1_EOF
+① 容器准备（从镜像创建）：
+   - 模型路径（用户指定）: ${MODEL_PATH}
+   - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
+   - **NVIDIA 模板（严格执行，仅替换变量值，禁止增删参数）**：
+     docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace:/flagos-workspace ${IMAGE}
+   - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败则 docker inspect 借鉴已有容器挂载配置重试一次 → 仍失败则终止
+   - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
+   - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
+   - 镜像模式下禁止复用已有容器，必须 docker run 新建
+   - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} 部署工具脚本
+   - 写入容器内 /flagos-workspace/shared/context.yaml：
+     model.container_path=${CONTAINER_MODEL_PATH}, model.local_path=${MODEL_PATH}, model.name=${MODEL}
+     entry.type=new_container, image.name=${IMAGE}, workflow.mode=verify
+   - 写入 traces/01_container_preparation.json
+VSTEP1_EOF
+        )
+        PROMPT_VERIFY="镜像: ${IMAGE}，模型名: ${MODEL}
+
+**容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载）：
+  GITHUB_TOKEN=${GITHUB_TOKEN}
+${VERIFY_PLAN_FIRST}
+${VERIFY_PLAN_STEPS}
+
+${VERIFY_STEP1}
+
+② 环境检测：按 CLAUDE.md 简化验证流程执行。确认 env_type=vllm_plugin_flaggems 且 has_flagtree=true。
+   环境不符合预期 → 调用 issue_reporter.py full --type flagtree-error 生成 issue 文件 → 终止流程。
+
+③ 启服务 + curl 验证：按 CLAUDE.md 简化验证流程执行。
+   3a. default 模式启动服务（start_service.sh + wait_for_service.sh）
+   3b. curl /v1/models 健康检查
+   3c. curl /v1/chat/completions 推理验证
+   任何子步骤失败 → 调用 issue_reporter.py full --type operator-crash 生成 issue 文件。
+
+GITHUB_TOKEN=${GITHUB_TOKEN}（issue 生成时通过 docker exec -e 传入）。
+完成后确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。
+全部通过后输出简化验证报告（按 CLAUDE.md 简化验证流程的报告格式）。"
+    else
+        VERIFY_STEP1=$(cat <<VSTEP1_EOF
+① 容器准备：
+   - 验证容器 ${CONTAINER} 运行状态（docker inspect + docker start）
+   - 模型路径（用户指定）: ${MODEL_PATH}
+     直接使用此路径，不搜索不下载。写入容器内 /flagos-workspace/shared/context.yaml 的 model.container_path
+   - bash skills/flagos-container-preparation/tools/setup_workspace.sh ${CONTAINER} ${MODEL} 部署工具脚本
+   - 写入容器内 /flagos-workspace/shared/context.yaml：
+     model.container_path=${MODEL_PATH}, model.name=${MODEL}, workflow.mode=verify
+   - 写入 traces/01_container_preparation.json
+VSTEP1_EOF
+        )
+        PROMPT_VERIFY="容器名: ${CONTAINER}，模型名: ${MODEL}
+
+**容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载）：
+  GITHUB_TOKEN=${GITHUB_TOKEN}
+${VERIFY_PLAN_FIRST}
+${VERIFY_PLAN_STEPS}
+
+${VERIFY_STEP1}
+
+② 环境检测：按 CLAUDE.md 简化验证流程执行。确认 env_type=vllm_plugin_flaggems 且 has_flagtree=true。
+   环境不符合预期 → 调用 issue_reporter.py full --type flagtree-error 生成 issue 文件 → 终止流程。
+
+③ 启服务 + curl 验证：按 CLAUDE.md 简化验证流程执行。
+   3a. default 模式启动服务（start_service.sh + wait_for_service.sh）
+   3b. curl /v1/models 健康检查
+   3c. curl /v1/chat/completions 推理验证
+   任何子步骤失败 → 调用 issue_reporter.py full --type operator-crash 生成 issue 文件。
+
+GITHUB_TOKEN=${GITHUB_TOKEN}（issue 生成时通过 docker exec -e 传入）。
+完成后确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。
+全部通过后输出简化验证报告（按 CLAUDE.md 简化验证流程的报告格式）。"
+    fi
+fi
 
 # ========== 根据模式构造步骤① ==========
 if $IMAGE_MODE; then
@@ -344,13 +399,15 @@ if $IMAGE_MODE; then
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
 STEP1_EOF
     )
-    PROMPT="镜像: ${IMAGE}，模型名: ${MODEL}
+    PROMPT_SEG1="镜像: ${IMAGE}，模型名: ${MODEL}
 ${COMMON_TOKENS}
 ${COMMON_PLAN_FIRST}
 ${COMMON_PLAN_STEPS}
 
 ${STEP1}
-${COMMON_STEPS_2_TO_6}"
+
+步骤②③ 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+完成步骤③后，确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。"
 else
     STEP1=$(cat <<STEP1_EOF
 ① 下载模型+容器准备：
@@ -364,13 +421,15 @@ else
    - 写入容器内 /flagos-workspace/shared/context.yaml + traces/01_container_preparation.json
 STEP1_EOF
     )
-    PROMPT="容器名: ${CONTAINER}，模型名: ${MODEL}
+    PROMPT_SEG1="容器名: ${CONTAINER}，模型名: ${MODEL}
 ${COMMON_TOKENS}
 ${COMMON_PLAN_FIRST}
 ${COMMON_PLAN_STEPS}
 
 ${STEP1}
-${COMMON_STEPS_2_TO_6}"
+
+步骤②③ 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+完成步骤③后，确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。"
 fi
 
 # ========== 部署权限白名单 ==========
@@ -405,7 +464,11 @@ with open('.claude/settings.local.json', 'w') as f:
 echo "  ✓ 已注入 ${MODEL} 模型特定权限规则"
 
 # ========== 启动 Claude Code ==========
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 Claude Code 全自动流程..."
+if [ "$WORKFLOW_MODE" = "verify" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 Claude Code 简化验证流程..."
+else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 Claude Code 全自动流程..."
+fi
 echo ""
 
 # ========== 宿主机历史数据全量归档 ==========
@@ -454,14 +517,141 @@ echo ""
 # 禁用实验性 beta 功能，避免第三方代理不支持 context_management 返回 400
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 
-claude -p "${PROMPT}" \
+# ===== 段间状态传递函数 =====
+read_context() {
+    local MODEL_ARG="$1"
+    local CTX="/data/flagos-workspace/${MODEL_ARG}/config/context_snapshot.yaml"
+    if [ ! -f "${CTX}" ]; then
+        echo "ERROR: context_snapshot.yaml 不存在，前段可能未完成" >&2
+        return 1
+    fi
+    # 输出 CONTAINER_NAME|ENV_TYPE|LAST_COMPLETED_STEP
+    python3 -c "
+import yaml
+with open('${CTX}') as f:
+    ctx = yaml.safe_load(f)
+ctr = ctx.get('container',{}).get('name','')
+env = ctx.get('environment',{}).get('env_type','')
+ledger = ctx.get('workflow_ledger',{}).get('steps',[])
+last = ''
+for s in ledger:
+    if s.get('status') == 'success':
+        last = s.get('step','')
+print(f'{ctr}|{env}|{last}')
+" 2>/dev/null
+}
+
+if [ "$WORKFLOW_MODE" = "verify" ]; then
+# ===== Verify 模式：单段执行 ①②③ =====
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 简化验证流程: 容器准备+环境检测+启服务+curl验证 ====="
+claude -p "${PROMPT_VERIFY}" \
     --permission-mode auto \
-    --verbose \
     --output-format stream-json \
-    --debug-file "${DEBUG_FILE}" \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.verify" \
+    --max-turns 60 \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
          | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" ${FILTER_FLAGS} || true
+
+else
+# ===== Full 模式：段1 ①②③ (容器准备 + 环境检测 + 服务启动) =====
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 段1: 容器准备+环境检测+服务启动 ====="
+claude -p "${PROMPT_SEG1}" \
+    --permission-mode auto \
+    --output-format stream-json \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.seg1" \
+    --max-turns 60 \
+    2>&1 | tee "${LOG_FILE}" \
+         | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" ${FILTER_FLAGS} || true
+
+# 段间检查
+echo ""
+echo "[段1完成] 检查状态..."
+CTX_INFO=$(read_context "${MODEL}") || { echo "错误：段1未产出 context_snapshot.yaml，终止"; exit 1; }
+SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+SEG_ENV=$(echo "$CTX_INFO" | cut -d'|' -f2)
+SEG_LAST=$(echo "$CTX_INFO" | cut -d'|' -f3)
+
+if [ -z "$SEG_CTR" ]; then
+    echo "错误：段1未产出容器名，终止"
+    exit 1
+fi
+
+echo "  容器名: ${SEG_CTR}"
+echo "  环境类型: ${SEG_ENV}"
+echo "  最后完成步骤: ${SEG_LAST}"
+echo ""
+
+# ===== 段2: ④⑦⑤⑧ (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
+PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
+${COMMON_TOKENS}
+
+按 CLAUDE.md 工作流定义执行步骤④精度评测、步骤⑦精度算子调优（如需）、步骤⑤性能评测、步骤⑧性能算子调优（如需）。
+
+**执行前**：
+1. 读取容器内 /flagos-workspace/shared/context.yaml 确认当前状态
+2. 读取容器内 /flagos-workspace/config/execution_plan.md 中步骤④⑦⑤⑧段落
+3. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法
+
+**算子调优**：
+- 步骤④完成后如 accuracy_ok=false → 立即执行步骤⑦（⑦完成后再进入⑤）
+- 步骤⑤完成后如 performance_ok=false → 执行步骤⑧（elimination 逐删策略）
+- 调优后产出 V3 结果（flagos_optimized.json），更新 context.yaml
+
+**进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
+
+GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+完成后确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 段2: 精度评测+精度调优+性能评测+性能调优 ====="
+claude -p "${PROMPT_SEG2}" \
+    --permission-mode auto \
+    --output-format stream-json \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.seg2" \
+    --max-turns 150 \
+    2>&1 | tee -a "${LOG_FILE}" \
+         | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 4 ${FILTER_FLAGS} || true
+
+# 段间检查
+echo ""
+echo "[段2完成] 检查状态..."
+CTX_INFO=$(read_context "${MODEL}") || { echo "错误：段2未更新 context_snapshot.yaml"; }
+SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
+echo "  容器名: ${SEG_CTR}"
+echo ""
+
+# ===== 段3: ⑥ (打包发布) =====
+PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
+${COMMON_TOKENS}
+
+按 CLAUDE.md 工作流定义执行步骤⑥自动发布。
+
+**执行前**：读取容器内 /flagos-workspace/shared/context.yaml 确认 workflow 状态。
+如果 context.yaml 显示步骤④或⑤未完成（status 非 success），将对应的 workflow.accuracy_ok 或 workflow.performance_ok 标记为 false，然后继续发布（私有）。
+**进度输出**：步骤开始/完成时输出 [步骤⑥] 标记，关键命令后输出 ✓/✗ 结果摘要。
+
+发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+完成后将最终 context 回传到宿主机 /data/flagos-workspace/${MODEL}/config/context_final.yaml。
+
+全流程结束后输出完整的 FlagOS 迁移报告（含精度、性能、发布信息、耗时统计、问题记录摘要）。"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 段3: 打包发布 ====="
+claude -p "${PROMPT_SEG3}" \
+    --permission-mode auto \
+    --output-format stream-json \
+    --verbose \
+    --debug-file "${DEBUG_FILE}.seg3" \
+    --max-turns 40 \
+    2>&1 | tee -a "${LOG_FILE}" \
+         | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 6 ${FILTER_FLAGS} || true
+
+fi  # end of full/verify mode branch
 
 # ===== Claude 退出后自动故障诊断 =====
 # 从宿主机 context_snapshot 读取容器名（镜像模式下容器名由 Claude 动态创建）
@@ -532,6 +722,7 @@ if [ -n "${DIAG_CONTAINER}" ] && docker inspect --type=container "${DIAG_CONTAIN
         echo "  ✓ context_snapshot.yaml 已同步" || echo "  ⚠ context_snapshot.yaml 同步失败"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底同步完成"
 
+    if [ "$WORKFLOW_MODE" = "full" ]; then
     # ========== 兜底：Harbor 发布（如 Claude 未执行） ==========
     CONTEXT_SNAP="${HOST_BASE}/config/context_snapshot.yaml"
     if [ -f "${CONTEXT_SNAP}" ]; then
@@ -540,9 +731,9 @@ import yaml, sys
 try:
     with open('${CONTEXT_SNAP}') as f:
         ctx = yaml.safe_load(f)
-    tag = ctx.get('image', {}).get('harbor_tag', '')
+    tag = ctx.get('image', {}).get('registry_url', '') or ctx.get('image', {}).get('harbor_tag', '')
     model_name = ctx.get('model', {}).get('name', '')
-    # 简单校验：harbor_tag 非空，且包含当前模型关键词（排除其他模型的残留 tag）
+    # 简单校验：registry_url 非空，且包含当前模型关键词（排除其他模型的残留 tag）
     if tag and model_name:
         # 'tiiuae/Falcon-H1-0.5B-Base' -> 'falcon-h1-0.5b-base'
         key = model_name.split('/')[-1].lower().replace('-', '').replace('_', '').replace('.', '')
@@ -582,6 +773,20 @@ except Exception as e:
             --output "${COMPARE_CSV}" 2>&1 && \
             echo "  ✓ performance_compare.csv 已生成" || echo "  ⚠ 性能对比文件生成失败"
     fi
+
+    # ========== 兜底：V3 性能对比（如有 flagos_optimized.json） ==========
+    OPTIMIZED_PERF="${HOST_BASE}/results/flagos_optimized.json"
+    COMPARE_V3_CSV="${HOST_BASE}/results/performance_compare_v3.csv"
+    if [ -f "${NATIVE_PERF}" ] && [ -f "${OPTIMIZED_PERF}" ] && [ ! -f "${COMPARE_V3_CSV}" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底生成 V3 性能对比文件..."
+        python3 skills/flagos-performance-testing/tools/performance_compare.py \
+            --native "${NATIVE_PERF}" \
+            --flagos-full "${FLAGOS_PERF}" \
+            --flagos-optimized "${OPTIMIZED_PERF}" \
+            --output "${COMPARE_V3_CSV}" 2>&1 && \
+            echo "  ✓ performance_compare_v3.csv 已生成" || echo "  ⚠ V3 性能对比文件生成失败"
+    fi
+    fi  # end of full-mode-only fallbacks
 fi
 
 echo ""
