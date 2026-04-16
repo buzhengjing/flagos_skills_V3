@@ -145,7 +145,7 @@ else:
 **判定细节**：
 - `service_ok = true`：V1 和 V2 都能正常启动
 - `accuracy_ok = true`：V1/V2 精度偏差 ≤5%，或经 ≤3 轮优化后达标
-- `performance_ok = true`：V2/V1 每个并发级别 ≥80%，或经 ≤3 轮优化后达标
+- `performance_ok = true`：V2/V1 每个并发级别 ≥80%，或经 elimination 逐删优化后达标
 - 提交了 issue 但优化成功 → 仍算合格（qualified=true）
 - `skip_reason` 非空时（如 `"service_startup_failed"`）→ 跳过了3/4，直接私有发布
 

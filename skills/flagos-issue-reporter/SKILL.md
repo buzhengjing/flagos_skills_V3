@@ -23,9 +23,9 @@ provides:
 **目标仓库**：`flagos-ai/FlagGems`（以用户身份提交 issue）
 
 **认证方式**：`GITHUB_TOKEN` 环境变量（GitHub Personal Access Token，需 `public_repo` 权限）
-- 始终生成带仓库名+时间戳的 markdown 文件保存到本地（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
-- Token 已设置 → 保存 markdown + 自动通过 GitHub API 提交
-- Token 未设置 → 只保存 markdown 到宿主机工作目录，用户可手动提交
+- 默认只生成带类型标注的 markdown 文件保存到本地（`issue_{type}_{repo}_{YYYYMMDD_HHMMSS}.md`）
+- 显式传入 `--submit` 且 Token 已设置 → 保存 markdown + 自动通过 GitHub API 提交
+- 未传 `--submit` 或 Token 未设置 → 只保存 markdown 到工作目录，用户可手动提交
 
 ---
 

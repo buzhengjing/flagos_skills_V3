@@ -397,5 +397,6 @@ ISSUE_EOF"
 - context.yaml 已更新
 - 配置快照已保存到 `config/perf_config.yaml`
 - 对应 trace 文件已写入：
-  - `traces/06_quick_performance.json`（V1/V2/V3 性能测试 + 对比 + 算子优化记录）
+  - `traces/06_quick_performance.json`（V1/V2 性能测试 + 对比）
+  - `traces/07_performance_tuning.json`（算子优化记录，仅触发步骤7时）
 - `timing.steps.quick_performance` 已更新为本步骤的 `duration_seconds`
