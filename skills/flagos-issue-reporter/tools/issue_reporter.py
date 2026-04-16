@@ -19,6 +19,7 @@ Issue 类型:
     accuracy-degraded    精度调优筛出的问题算子
     performance-degraded 性能调优筛出的问题算子
     flagtree-error       FlagTree/Triton 框架报错
+    plugin-error         vllm-plugin-FL 框架报错
 
 Usage:
     python3 issue_reporter.py collect --type operator-crash --log-path crash.log --env-file env.json --json
@@ -133,6 +134,11 @@ ISSUE_TYPES = {
         "labels": ["bug"],
         "description": "FlagTree/Triton 框架报错",
     },
+    "plugin-error": {
+        "title_prefix": "Bug: vllm-plugin-FL error",
+        "labels": ["bug"],
+        "description": "vllm-plugin-FL 框架报错",
+    },
 }
 
 MAX_LOG_CHARS = 2000
@@ -206,6 +212,13 @@ def collect_issue_data(
         error_type = ft.get("error_type", "triton_error")
         error_messages = ft.get("error_messages", [])
         error_logs = ft.get("error_logs", "")
+
+    elif issue_type == "plugin-error" and log_path:
+        pe = _parse_plugin_error(log_path)
+        affected_ops = pe.get("related_components", [])
+        error_type = pe.get("error_type", "plugin_error")
+        error_messages = pe.get("error_messages", [])
+        error_logs = pe.get("error_logs", "")
 
     # 4. 加载 FlagGems 代码上下文
     flaggems_ctx = _load_flaggems_context(
@@ -550,6 +563,50 @@ def _parse_flagtree_error(log_path: str) -> Dict[str, Any]:
     }
 
 
+def _parse_plugin_error(log_path: str) -> Dict[str, Any]:
+    """解析 vllm-plugin-FL 相关错误"""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return {"related_components": [], "error_messages": [], "error_logs": ""}
+
+    plugin_patterns = [
+        re.compile(r"(?:vllm_plugin_fl|vllm-plugin-FL).*?(?:error|fail|exception)", re.IGNORECASE),
+        re.compile(r"(?:OpManager|op_manager).*?(?:error|fail|dispatch)", re.IGNORECASE),
+        re.compile(r"(?:ImportError|ModuleNotFoundError).*?(?:vllm_plugin|vllm_fl)", re.IGNORECASE),
+        re.compile(r"(?:vllm_fl)\.(?:ops|dispatch|register).*?(?:error|fail)", re.IGNORECASE),
+    ]
+
+    components = set()
+    error_messages = []
+    error_type = "plugin_error"
+
+    for pattern in plugin_patterns:
+        for match in pattern.finditer(content):
+            msg = match.group(0).strip()[:300]
+            if msg not in error_messages:
+                error_messages.append(msg)
+            if "opmanager" in msg.lower() or "dispatch" in msg.lower():
+                components.add("dispatch")
+                error_type = "dispatch_error"
+            if "import" in msg.lower():
+                components.add("import")
+                error_type = "import_error"
+            if "vllm_fl" in msg.lower():
+                components.add("vllm_fl")
+
+    if not components:
+        components.add("vllm-plugin-FL")
+
+    return {
+        "related_components": sorted(components),
+        "error_type": error_type,
+        "error_messages": error_messages[:5],
+        "error_logs": _read_log_tail(log_path, MAX_LOG_CHARS),
+    }
+
+
 def _read_log_tail(log_path: str, max_chars: int) -> str:
     """读取日志文件尾部"""
     try:
@@ -690,6 +747,10 @@ def _generate_description(issue_type, affected_ops, op_details, error_messages, 
         components = ", ".join(f"`{op}`" for op in affected_ops) if affected_ops else "triton/flagtree"
         return f"FlagTree/Triton framework error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
 
+    elif issue_type == "plugin-error":
+        components = ", ".join(f"`{op}`" for op in affected_ops) if affected_ops else "vllm-plugin-FL"
+        return f"vllm-plugin-FL error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
+
     return "Bug report."
 
 
@@ -732,6 +793,10 @@ def _generate_steps(issue_type, model, env):
     if issue_type in ("operator-crash", "flagtree-error"):
         steps.append("3. Start vLLM inference service with FlagGems enabled")
         steps.append("4. Observe operator runtime failures / framework errors")
+    elif issue_type == "plugin-error":
+        steps.append("3. Install vllm-plugin-FL (git clone + pip install --no-build-isolation)")
+        steps.append("4. Start vLLM inference service with plugin enabled")
+        steps.append("5. Observe plugin-related errors")
     elif issue_type == "accuracy-zero":
         steps.append("3. Start vLLM inference service with FlagGems enabled")
         steps.append("4. Run GPQA Diamond evaluation (198 questions)")
@@ -759,6 +824,8 @@ def _generate_expected(issue_type):
         return "All FlagGems operators should maintain performance at >=80% of native baseline at each concurrency level."
     elif issue_type == "flagtree-error":
         return "FlagTree/Triton should compile and execute kernels without errors."
+    elif issue_type == "plugin-error":
+        return "vllm-plugin-FL should load and dispatch operators without errors."
     return "Expected behavior."
 
 
@@ -785,6 +852,10 @@ def _generate_actual(issue_type, affected_ops, op_details, error_messages):
     elif issue_type == "flagtree-error":
         msgs = "\n".join(f"- {m}" for m in error_messages[:3]) if error_messages else "- (see error logs)"
         return f"FlagTree/Triton framework errors:\n{msgs}"
+
+    elif issue_type == "plugin-error":
+        msgs = "\n".join(f"- {m}" for m in error_messages[:3]) if error_messages else "- (see error logs)"
+        return f"vllm-plugin-FL errors:\n{msgs}"
 
     return "Unexpected behavior."
 
@@ -843,6 +914,11 @@ def _generate_directions(issue_type, env, affected_ops):
         directions.append("- Verify FlagTree version compatibility with Triton and PyTorch")
         directions.append("- Check LLVM/MLIR backend support for this platform")
         directions.append("- Try rebuilding FlagTree from source with platform-specific flags")
+
+    elif issue_type == "plugin-error":
+        directions.append("- Verify vllm-plugin-FL version compatibility with vLLM and FlagGems")
+        directions.append("- Check OpManager dispatch configuration and operator registration")
+        directions.append("- Try reinstalling plugin with --no-build-isolation flag")
 
     return "\n".join(directions)
 
