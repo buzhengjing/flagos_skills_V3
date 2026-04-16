@@ -1,6 +1,6 @@
 ---
 name: flagos-issue-reporter
-description: FlagGems/FlagTree 问题自动归因与 GitHub issue 提交，支持算子崩溃、精度/性能不佳、框架报错五种场景
+description: FlagGems/FlagTree/Plugin 问题自动归因与 GitHub issue 提交，支持算子崩溃、精度/性能不佳、框架报错六种场景
 version: 2.0.0
 triggers:
   - 提交 issue
@@ -23,14 +23,15 @@ provides:
 **目标仓库**：`flagos-ai/FlagGems`（以用户身份提交 issue）
 
 **认证方式**：`GITHUB_TOKEN` 环境变量（GitHub Personal Access Token，需 `public_repo` 权限）
-- Token 已设置 → 全自动提交（gh CLI 或 API）
-- Token 未设置 → 降级输出 markdown 文件，用户手动提交
+- 始终生成带仓库名+时间戳的 markdown 文件保存到本地（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
+- Token 已设置 → 保存 markdown + 自动通过 GitHub API 提交
+- Token 未设置 → 只保存 markdown 到宿主机工作目录，用户可手动提交
 
 ---
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -55,7 +56,7 @@ optimization:
   search_log: <来自 operator-replacement>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 issues:
@@ -68,15 +69,16 @@ issues:
 
 ---
 
-# 五种 Issue 类型
+# 六种 Issue 类型
 
-| type | 触发场景 | 标签 |
-|------|---------|------|
-| `operator-crash` | 算子导致服务崩溃（启动失败或推理中崩溃） | `bug` |
-| `accuracy-zero` | 精度结果为零或 < 5%（严重异常） | `bug` |
-| `accuracy-degraded` | 精度调优流程筛出的精度不佳算子 | `bug` |
-| `performance-degraded` | 性能调优流程筛出的性能不佳算子 | `bug` |
-| `flagtree-error` | FlagTree/Triton 框架报错 | `bug` |
+| type | 触发场景 | 标签 | 目标仓库 |
+|------|---------|------|---------|
+| `operator-crash` | 算子导致服务崩溃（启动失败或推理中崩溃） | `bug` | flagos-ai/FlagGems |
+| `accuracy-zero` | 精度结果为零或 < 5%（严重异常） | `bug` | flagos-ai/FlagGems |
+| `accuracy-degraded` | 精度调优流程筛出的精度不佳算子 | `bug` | flagos-ai/FlagGems |
+| `performance-degraded` | 性能调优流程筛出的性能不佳算子 | `bug` | flagos-ai/FlagGems |
+| `flagtree-error` | FlagTree/Triton 框架报错 | `bug` | flagos-ai/FlagGems |
+| `plugin-error` | vllm-plugin-FL 框架报错 | `bug` | flagos-ai/vllm-plugin-FL |
 
 ---
 
@@ -98,15 +100,15 @@ issues:
 
 # 触发规则（按工作流步骤）
 
-## 步骤② 启服务
+## 步骤③ 启服务
 
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|
 | FlagGems 模式启动崩溃 | `operator-crash` | 即时提交 |
 
-**处理流程**：保存日志 → 提交 issue（含 flaggems.enable 代码）→ 排除操作失误 → 标记 `workflow.service_ok: false` → 跳过③④到⑤发布（私有）
+**处理流程**：保存日志 → 提交 issue（含 flaggems.enable 代码）→ 排除操作失误 → 标记 `workflow.service_ok: false` → 跳过④⑤到⑥发布（私有）
 
-## 步骤③ 精度评测
+## 步骤④ 精度评测
 
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|
@@ -114,7 +116,7 @@ issues:
 | V1/V2 精度偏差 >5% | `accuracy-degraded` | 发现即提交，然后开始算子优化 |
 | 3 轮优化后仍不达标 | `accuracy-degraded` | 最终汇总提交（含所有禁用算子及原因） |
 
-## 步骤④ 性能评测
+## 步骤⑤ 性能评测
 
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|
@@ -163,6 +165,15 @@ python3 issue_reporter.py full \
     --repo flagos-ai/FlagGems \
     --output-dir /data/flagos-workspace/<model>/results/ \
     --json
+
+# plugin 报错（提交到 vllm-plugin-FL 仓库）
+python3 issue_reporter.py full \
+    --type plugin-error \
+    --log-path /data/flagos-workspace/<model>/logs/startup_flagos.log \
+    --context-yaml /data/flagos-workspace/<model>/shared/context.yaml \
+    --repo flagos-ai/vllm-plugin-FL \
+    --output-dir /data/flagos-workspace/<model>/results/ \
+    --json
 ```
 
 ## 分步执行
@@ -198,19 +209,20 @@ python3 issue_reporter.py submit \
     --json
 ```
 
-**提交方式**（自动降级）：
-1. `gh issue create`（若宿主机已 `gh auth login`）
-2. GitHub API（若 `GITHUB_TOKEN` 环境变量已设置）
-3. 输出 markdown 文件供手动提交（无认证时）
+**提交方式**：
+1. 始终保存 markdown 到本地（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
+2. 有 `GITHUB_TOKEN` → 自动通过 GitHub API 提交
+3. 无 token → 只保存 markdown，用户手动提交
 
 ---
 
 # 完成条件
 
 - 问题数据已收集（`issue_data.json`），包含 flaggems 代码上下文
-- Bug Report 已格式化（`issue_report.md`），包含 FlagGems Integration Code section
-- issue 已提交或 markdown 已保存供手动提交
-- context.yaml `issues.submitted` 已更新
+- Bug Report 已格式化并保存为带仓库名+时间戳的 markdown 文件（`issue_{repo}_{YYYYMMDD_HHMMSS}.md`）
+- markdown 文件包含元信息头（目标仓库、生成时间、issue 类型）
+- 有 `GITHUB_TOKEN` 时 issue 已通过 API 提交，无 token 时 markdown 已保存到宿主机工作目录
+- context.yaml `issues.submitted` 已更新（编排层负责）
 - 对应 trace 文件中记录了 issue 提交操作
 
 ---
@@ -219,11 +231,9 @@ python3 issue_reporter.py submit \
 
 | 问题 | 解决方案 |
 |------|----------|
-| gh CLI 未安装 | 自动降级到 GitHub API（需 `GITHUB_TOKEN`） |
-| gh 未登录 | 自动降级到 GitHub API（需 `GITHUB_TOKEN`） |
-| `GITHUB_TOKEN` 未设置 | 设置环境变量：`export GITHUB_TOKEN=ghp_xxx`（需 `public_repo` 权限） |
+| `GITHUB_TOKEN` 未设置 | markdown 已保存到本地，如需自动提交：`export GITHUB_TOKEN=ghp_xxx`（需 `public_repo` 权限） |
 | Token 无权限 | 重新生成 PAT：GitHub Settings → Developer settings → Fine-grained tokens → Issues Read/Write |
-| gh 和 Token 都没有 | 降级输出 markdown 文件到 `results/issue_report.md`，用户手动提交 |
+| API 提交失败 | markdown 已保存到本地，可手动提交到对应仓库 issues 页面 |
 | flaggems 代码路径未知 | 从 context.yaml `environment.flaggems_code_path` 读取，或用 `--flaggems-code-path` 指定 |
 | gems.txt 不存在 | 服务未启动或 FlagGems 未启用，issue 中标注 "gems.txt not found" |
 | 无法定位问题算子 | 手动在 `--disabled-ops` 参数中指定 |

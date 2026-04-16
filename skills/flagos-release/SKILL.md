@@ -61,7 +61,7 @@ tools/
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -80,7 +80,7 @@ workflow:
   skip_reason: <来自编排层>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 image:
@@ -227,9 +227,14 @@ output/
 
 **流程集成**：
 - context.yaml 已更新（`image.registry_url`、`image.upload_timestamp`、`release.modelscope_url`、`release.huggingface_url`）
-- `traces/05_release.json` 已写入（记录发布条件判定、commit/tag/push 命令、README 路径、ModelScope/HuggingFace URL）
+- `traces/06_release.json` 已写入（记录发布条件判定、commit/tag/push 命令、README 路径、ModelScope/HuggingFace URL）
 - `results/release_info.json` 已保存（qualified 状态、Harbor URL、ModelScope URL、HuggingFace URL）
 - `timing.steps.release` 已更新为本步骤的 `duration_seconds`
+
+**容器产出同步到宿主机**（必须在输出最终报告前完成）：
+- 容器内 `/flagos-workspace/{results,traces,logs}/` 已通过 `docker cp` 同步到宿主机 `/data/flagos-workspace/<model>/` 对应目录
+- `context.yaml` 已同步到宿主机 `config/context_snapshot.yaml`
+- 宿主机文件数量与容器内一致
 
 ---
 

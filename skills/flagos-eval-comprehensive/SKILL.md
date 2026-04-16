@@ -54,7 +54,7 @@ docker exec $CONTAINER bash -c "pgrep -f 'benchmark_runner\|vllm.*bench' && echo
 
 ## 上下文集成
 
-### 从 shared/context.yaml 读取
+### 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -79,7 +79,7 @@ inspection:
   flaggems_logic: <来自 pre-service-inspection>
 ```
 
-### 写入 shared/context.yaml
+### 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 eval:
@@ -550,6 +550,33 @@ eval:
   accuracy_aligned: true
   excluded_ops_accuracy: []  # 或 [softmax, layer_norm]
 ```
+
+## 模块 C 完成后的强制闭环（不可跳过）
+
+精度对比完成后，编排层**必须**按以下逻辑执行：
+
+```
+完成 V1 + V2 评测后:
+
+IF deviation > threshold (5%):
+    # 1. 写 issue log（强制）
+    追加写入 logs/issues_accuracy.log:
+      "[时间] V2 | 精度偏差超阈值"
+      "  详情: V1=XX%, V2=XX%, 偏差=XX% (阈值 5%)"
+
+    # 2. 设置状态
+    workflow.accuracy_ok = false
+
+    # 3. 触发步骤⑦精度算子调优（不终止流程）
+    #    ⑦完成后再继续到步骤⑤性能评测
+
+ELSE:
+    workflow.accuracy_ok = true
+
+→ accuracy_ok=false 时触发步骤⑦精度算子调优，⑦完成（或跳过）后继续步骤⑤性能评测
+```
+
+**禁止行为**：偏差 > 5% 时终止流程。必须写入 issue log、标记 `accuracy_ok=false`，然后继续后续步骤，最终走到发布（私有发布）。
 
 ---
 

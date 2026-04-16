@@ -16,10 +16,20 @@ import sys
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import requests
 import yaml
+
+# error_writer 集成（容器内: eval/ 目录，error_writer 在 scripts/ 目录）
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+try:
+    from error_writer import write_last_error, write_checkpoint
+except ImportError:
+    def write_last_error(*a, **kw): pass
+    def write_checkpoint(*a, **kw): pass
 
 
 # =============================================================================
@@ -546,6 +556,22 @@ def run_fast_gpqa(
         'total_duration_seconds': total_elapsed,
         'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
         'work_dir': work_dir,
+        '_meta': {
+            'model': '模型名称或路径',
+            'benchmark': '评测基准名称（固定 gpqa_diamond）',
+            'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
+            'score': 'GPQA Diamond 正确率百分比',
+            'total_questions': '评测题目总数（GPQA Diamond 固定 198 题）',
+            'eval_batch_size': '评测并发数（自动探测选择）',
+            'max_tokens': '单次生成最大 token 数',
+            'max_model_len': '模型支持的最大上下文长度',
+            'truncation_detected': '是否检测到输出被截断（true 时分数可能偏低）',
+            'temperature': '采样温度（0.0=贪心解码）',
+            'probe_time_seconds': '并发探测阶段耗时（秒）',
+            'eval_duration_seconds': '实际评测阶段耗时（秒）',
+            'total_duration_seconds': '总耗时（含探测，秒）',
+            'work_dir': 'evalscope 原始输出目录（含预测、报告、日志）',
+        },
     }
 
     # 写 JSON 报告
@@ -647,15 +673,28 @@ def main():
         sys.exit(1)
 
     # 运行
-    report = run_fast_gpqa(
-        model_name=model_name,
-        api_base=api_base,
-        api_key=api_key,
-        dataset_dir=dataset_dir,
-        dataset_hub=dataset_hub,
-    )
-
-    sys.exit(0 if report.get('score') is not None else 1)
+    try:
+        write_checkpoint("04_accuracy_eval", "精度评测", "running_fast_gpqa",
+                         action_detail=f"fast_gpqa.py --model-name {model_name} --api-base {api_base}")
+        report = run_fast_gpqa(
+            model_name=model_name,
+            api_base=api_base,
+            api_key=api_key,
+            dataset_dir=dataset_dir,
+            dataset_hub=dataset_hub,
+        )
+        sys.exit(0 if report.get('score') is not None else 1)
+    except Exception as e:
+        write_last_error(
+            tool="fast_gpqa.py",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            traceback_str=traceback.format_exc(),
+            context={"model": model_name, "api_base": api_base},
+        )
+        print(f"[FATAL] fast_gpqa.py 异常退出: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

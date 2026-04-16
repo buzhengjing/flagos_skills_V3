@@ -1,7 +1,7 @@
 ---
 name: flagos-performance-testing
-description: 三版性能基准测试（V1 Native / V2 Full FlagGems / V3 Optimized FlagGems），四档策略（quick/fast/comprehensive/fixed）、可选 final-burst、per-test-case 超时、标准 markdown 输出格式
-version: 7.1.0
+description: 两档性能基准测试（quick 只跑 4k_input_1k_output 并发 64 / comprehensive 全量用例全并发），标准 markdown 输出格式
+version: 8.0.0
 triggers:
   - 性能测试
   - benchmark
@@ -21,38 +21,16 @@ provides:
 
 # 性能测试 Skill
 
-支持三版自动化性能测试：V1 (Native) → V2 (Full FlagGems) → V3 (Optimized FlagGems)（如需优化），标准 markdown 三列表格输出。
+支持三版自动化性能测试：V1 (Native) → V2 (Full FlagGems) → V3 (Optimized FlagGems)（如需优化），标准 markdown 表格输出。
 
-**四档测试策略**（`--strategy` 参数）：
+**两档测试策略**（`--strategy` 参数）：
 
-| strategy | 含义 | 用例选择 | 并发行为 | 样本量 |
-|----------|------|----------|----------|--------|
-| `quick` | 烟雾测试 | 只跑 `4k_input_1k_output` + max | 预热 2 请求 + 所有 levels 到 256，不早停 + final-burst | `num_prompts=concurrency` |
-| `fast` | 饱和即停（默认） | 所有 enabled 用例 | 按 `early_stop` 配置决定 | `num_prompts=concurrency` |
-| `comprehensive` | 全跑 | 所有 enabled 用例 | 所有并发全跑，强制不早停 | `num_prompts=concurrency` |
-| `fixed` | 固定并发 | 只跑有 `fixed_concurrency` 的用例 | 只跑配置的固定并发级别 | `num_prompts=concurrency` |
+| strategy | 含义 | 用例选择 | 并发行为 |
+|----------|------|----------|----------|
+| `quick` | 快速验证（默认） | 只跑 `4k_input_1k_output` | 预热 2 请求 + 固定并发 64 |
+| `comprehensive` | 全跑 | 所有 enabled 用例 | 所有并发全跑（1~256） |
 
-**所有档统一 `num_prompts=concurrency`**，因此 quick 产出的 `4k_input_1k_output` 数据可直接复用，全量测试无需重跑该用例。
-
-**策略选择**：在流程开始前询问用户选择 strategy，一旦选定，整个流程的所有性能测试统一使用同一策略。
-
-**Fixed 策略**：用于快速测试特定场景，跳过并发搜索。在 `perf_config.yaml` 中为测试用例添加 `fixed_concurrency` 字段即可：
-
-```yaml
-- name: "1k_input_1k_output"
-  input_len: 1024
-  output_len: 1024
-  enabled: true
-  fixed_concurrency: 64  # fixed 策略时只跑并发 64
-
-- name: "32k_input_1k_output"
-  input_len: 32768
-  output_len: 1024
-  enabled: true
-  fixed_concurrency: 1   # fixed 策略时只跑并发 1
-```
-
-**Final Burst**：默认不跑。用户显式传入 `--final-burst` 才追加无限制并发大规模测试。一旦用户选择了 `--final-burst`，后续同流程的所有性能测试都加此 flag。
+**策略选择**：主流程步骤⑤自动使用 `quick`，独立调用全量测试使用 `comprehensive`。
 
 **三版结果文件**：
 - `native_performance.json` — V1 (Native，无 FlagGems)
@@ -60,10 +38,10 @@ provides:
 - `flagos_optimized.json` — V3 (Optimized FlagGems，≥80% 组合，如需优化才产出)
 
 **工具脚本**（已由 setup_workspace.sh 部署到容器）:
-- `benchmark_runner.py` — 性能测试（`--strategy quick/fast/comprehensive/fixed` + 可选 `--final-burst`）
-- `performance_compare.py` — 性能对比（`--format markdown` 标准三列表格输出）
+- `benchmark_runner.py` — 性能测试（`--strategy quick/comprehensive`）
+- `performance_compare.py` — 性能对比（`--format markdown` 标准表格输出）
 
-**对比规则（钉死）**：性能对比必须逐并发级别进行。每个 `(test_case, concurrency)` 组合独立计算 ratio，不选取"最优并发"做单点对比。达标条件：所有 test_case × 所有 concurrency 的 `min(output_ratio, total_ratio)` 均 ≥ 80%。
+**对比规则（钉死）**：性能对比逐并发级别进行。quick 模式下只有一个数据点（4k_input_1k_output × 64），comprehensive 模式下每个 `(test_case, concurrency)` 组合独立计算 ratio。达标条件：所有数据点的 `min(output_ratio, total_ratio)` 均 ≥ 80%。
 
 ---
 
@@ -83,8 +61,7 @@ docker exec $CONTAINER bash -c "pgrep -f 'eval_aime\|eval_erqa\|eval_monitor' &&
 **策略触发规则**：
 - 用户说"快速测试"/"走通流程"/"smoke test"/"验证流程"→ `--strategy quick`
 - 用户说"完整测试"/"全量"/"所有并发"→ `--strategy comprehensive`
-- 用户说"只测试特定场景"/"固定并发"/"1k-1k-64"→ `--strategy fixed`
-- 默认（或用户说"正常测试"/"标准"）→ `--strategy fast`
+- 默认（或用户说"正常测试"/"标准"）→ `--strategy quick`
 
 ---
 
@@ -134,7 +111,7 @@ except Exception as e:
 新工作流在步骤⑤（快速性能评测）中按固定顺序执行：
 1. **V1 Native** — 关闭 FlagGems 的基线性能
 2. **V2 FlagGems** — 启用 FlagGems 的性能（使用步骤④精度达标后的算子列表）
-3. **V3 Optimized FlagGems** — 仅在 V2 不达标时，通过算子优化找到每个用例每个并发级别均 ≥80% 的组合
+3. **V3 Optimized FlagGems** — 仅在 V2 不达标时，通过算子优化找到 ≥80% 的组合
 
 **算子列表必录**：只要 FlagGems 处于启用状态，必须记录算子列表到 ops_list.json，这是算子优化的基础。
 
@@ -148,48 +125,27 @@ except Exception as e:
 策略由流程阶段自动决定，不在此处单独询问：
 
 - **主流程步骤⑤**：自动使用 `--strategy quick`，无需询问用户
-- **独立调用全量性能测试**：使用 `fast`（推荐）或 `comprehensive`
+- **独立调用全量性能测试**：使用 `comprehensive`
 
 | 选项 | 说明 | 触发时机 |
 |------|------|----------|
-| `quick` | 只跑 4k_input_1k_output + max，快速验证 | 主流程步骤⑤自动使用 |
-| **`fast`**（推荐） | 所有用例，饱和即停 | 独立调用默认推荐 |
+| `quick`（默认） | 只跑 4k_input_1k_output 并发 64 | 主流程步骤⑤自动使用 |
 | `comprehensive` | 所有用例，所有并发全跑 | 用户要求"完整测试" |
-
-**Final Burst**：默认不跑。仅在独立调用全量测试、用户显式要求时启用。
 
 一旦选定，该阶段内所有性能测试统一使用同一策略。
 
 ## 步骤 1：同步配置
 
-从 `shared/context.yaml` 读取服务信息，写入 `/flagos-workspace/perf/config/perf_config.yaml`。
+从容器内 `/flagos-workspace/shared/context.yaml` 读取服务信息，写入 `/flagos-workspace/perf/config/perf_config.yaml`。
 
 同时将配置快照保存到 `config/` 目录：
 ```bash
 docker exec $CONTAINER cp /flagos-workspace/perf/config/perf_config.yaml /flagos-workspace/config/perf_config.yaml
 ```
 
-**per-test-case 超时配置**：在 perf_config.yaml 中为不同用例设置不同超时：
-
-```yaml
-test_matrix:
-  - name: 1k_input_1k_output
-    input_len: 1024
-    output_len: 1024
-    timeout: 600        # 默认 600s 足够
-  - name: 32k_input_1k_output
-    input_len: 32768
-    output_len: 1024
-    timeout: 1800       # 32k 输入需要更长时间
-  - name: 1k_input_4k_output
-    input_len: 1024
-    output_len: 4096
-    timeout: 900        # 长输出需要更多时间
-```
-
 ## 步骤 2：判断当前 FlagGems 状态
 
-从 `shared/context.yaml` 的 `flaggems_control.integration_type` 和 `inspection` 字段判断当前环境中 FlagGems 是否已启用。
+从容器内 `/flagos-workspace/shared/context.yaml` 的 `flaggems_control.integration_type` 和 `inspection` 字段判断当前环境中 FlagGems 是否已启用。
 
 判断依据（按优先级）：
 1. `flaggems_control.enable_method` 是否为 `auto`（plugin 自动启用）
@@ -212,7 +168,7 @@ test_matrix:
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config perf/config/perf_config.yaml \
-  --strategy fast \
+  --strategy quick \
   --output-name native_performance \
   --output-dir /flagos-workspace/results/ \
   --mode native"
@@ -242,7 +198,7 @@ print(f'已记录 {len(ops)} 个算子到 ops_list.json')
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config perf/config/perf_config.yaml \
-  --strategy fast \
+  --strategy quick \
   --output-name flagos_performance \
   --output-dir /flagos-workspace/results/ \
   --mode flagos"
@@ -250,7 +206,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 
 ## 步骤 7：性能对比（强制执行）
 
-**强制规则**：V1 和 V2 性能测试完成后，必须调用 `performance_compare.py` 生成全量并发级别对比。禁止跳过此步骤或手动计算单一并发级别的比值。
+**强制规则**：V1 和 V2 性能测试完成后，必须调用 `performance_compare.py` 生成对比。禁止跳过此步骤或手动计算比值。
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/performance_compare.py \
@@ -262,24 +218,48 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 ```
 
 **输出解读**：
-- 工具会输出包含所有并发级别的 markdown 表格，必须完整保留到报告中
-- 返回码 `0`：每个用例的每个并发级别均 ≥ 80%，V2 已达标，不存在 V3，跳到步骤 9
-- 返回码 `1`：有不达标的用例或并发级别，触发步骤 8
+- 工具会输出对比表格，必须完整保留到报告中
+- 返回码 `0`：达标（ratio ≥ 80%），V2 已达标，不存在 V3，跳到步骤 9
+- 返回码 `1`：不达标，触发步骤 8
 
-**禁止行为**：不得自行从 JSON 中只提取某一个并发级别的数据作为性能对比结果，必须使用 `performance_compare.py` 的全量输出。
+**禁止行为**：不得自行从 JSON 中提取数据手动计算 ratio，必须使用 `performance_compare.py` 的输出。
 
 ## 步骤 8：[自动] 触发算子优化
 
 前置条件：`ops_list.json` 已存在（步骤 5 中已记录）。
 
-调用 `flagos-operator-replacement` 算子搜索优化。优化过程中以 `gems.txt`（或 `flaggems_enable_oplist.txt`）中已替换的算子为唯一候选范围。自动继续（上限 3 轮，超限标记 `workflow.performance_ok: false` 进入下一步）。
+调用 `flagos-operator-replacement` 算子搜索优化。优化过程中以 `gems.txt`（或 `flaggems_enable_oplist.txt`）中已替换的算子为唯一候选范围。使用 elimination 逐删策略，轮次不限（由算子总数决定），达标即停；全部禁完仍不达标则标记 `workflow.performance_ok: false` 进入下一步。
+
+### 性能不达标时的强制闭环（不可跳过）
+
+ratio < 80% 时，编排层**必须**按以下逻辑执行：
+
+```
+IF ratio < 80%:
+    # 1. 写 issue log（强制）
+    追加写入 logs/issues_performance.log:
+      "[时间] V2 | 性能不达标"
+      "  详情: V2/V1 ratio=XX% (<80%)"
+
+    # 2. 设置状态
+    workflow.performance_ok = false
+
+    # 3. 继续到步骤⑥发布（不终止流程）
+
+ELSE:
+    workflow.performance_ok = true
+
+→ 继续步骤⑥ 发布
+```
+
+**禁止行为**：ratio < 80% 时终止流程。必须写入 issue log、标记 `performance_ok=false`，然后继续到发布步骤（`qualified=false` → 私有发布）。
 
 优化完成后重测：
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
   --config perf/config/perf_config.yaml \
-  --strategy fast \
+  --strategy quick \
   --output-name flagos_optimized \
   --output-dir /flagos-workspace/results/ \
   --mode flagos_optimized"
@@ -301,43 +281,24 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PA
 
 ## 步骤 10：写入 context.yaml
 
-**强制规则**：必须将全量并发级别的对比数据写入 context.yaml，不得只取单一并发级别。
-
 写入字段：
 
 ```yaml
 perf:
   strategy: quick          # 使用的测试策略
   test_case: 4k_input_1k_output
-  per_concurrency:         # 全量并发级别对比（必须包含所有级别）
-    - concurrency: "1"
-      v1_total_tps: 1911.2
-      v2_total_tps: 1270.2
-      ratio_pct: 66.5
-      pass: false
-    - concurrency: "2"
-      v1_total_tps: 3735.6
-      v2_total_tps: 2370.7
-      ratio_pct: 63.5
-      pass: false
-    # ... 所有并发级别
-  summary:
-    total_levels: 10       # 总并发级别数
-    pass_levels: 0         # 达标级别数
-    fail_levels: 10        # 未达标级别数
-    best_ratio_pct: 78.5   # 最佳比值
-    worst_ratio_pct: 25.0  # 最差比值
-    avg_ratio_pct: 56.8    # 平均比值
-    overall_pass: false     # 是否全部达标
-  # 保留最佳并发的摘要（向后兼容）
+  concurrency: 64
   v1_output_tps: 6598.2
   v1_total_tps: 32991.0
   v2_output_tps: 5178.5
   v2_total_tps: 25892.5
-  ratio_pct: 78.5          # 最佳并发的比值
+  output_ratio_pct: 78.5
+  total_ratio_pct: 78.5
+  ratio_pct: 78.5          # min(output_ratio, total_ratio)
+  pass: false              # ratio >= 80%?
 ```
 
-**禁止行为**：不得只写入单一并发级别的数据到 context.yaml，必须包含 `per_concurrency` 全量列表和 `summary` 统计。
+comprehensive 模式下包含 `per_concurrency` 全量列表和 `summary` 统计。
 
 ---
 
@@ -349,8 +310,8 @@ perf:
 性能测试结果
 ========================================
 模式: native / flagos_full / flagos_optimized
-测试用例: prefill1_decode512, 1k_input_1k_output, ...
-最佳并发: 64
+测试用例: 4k_input_1k_output
+并发: 64
 Output throughput: 1850 tok/s
 Total throughput: 5200 tok/s
 Native 基线: 6500 tok/s（首次 native 测试时不显示此行）
@@ -365,19 +326,19 @@ Native 基线: 6500 tok/s（首次 native 测试时不显示此行）
 
 ### 性能问题日志写入
 
-任一并发级别 V2/V1 < 80% 时，必须追加写入 `logs/issues_performance.log`：
+V2/V1 ratio < 80% 时，必须追加写入 `logs/issues_performance.log`：
 
 ```bash
 docker exec $CONTAINER bash -c "cat >> /flagos-workspace/logs/issues_performance.log << 'ISSUE_EOF'
 [$(date '+%Y-%m-%d %H:%M:%S')] <版本> | <问题摘要>
-  详情: <不达标的用例+并发级别, V1 TPS, V2 TPS, ratio>
+  详情: <4k_input_1k_output conc=64, V1 TPS, V2 TPS, ratio>
   操作: <措施，如 operator_search.py 第 N 轮优化>
   结果: <优化后 ratio，达标/不达标>
 ISSUE_EOF"
 ```
 
 记录场景：
-- V2/V1 性能对比中任一并发级别 < 80%（记录所有不达标的并发级别）
+- V2/V1 性能对比 ratio < 80%
 - 算子搜索优化每轮结果（禁用了哪些算子、优化后的 ratio）
 - 最终结论（V2 达标 / V3 达标 / 不达标）
 
@@ -388,32 +349,15 @@ ISSUE_EOF"
 | 参数 | 说明 |
 |------|------|
 | `--config` | 配置文件路径 |
-| `--strategy` | 测试策略：`quick`(烟雾测试) / `fast`(饱和即停,默认) / `comprehensive`(全跑不早停) |
-| `--final-burst` | 追加无限制并发大规模最终测试（默认不跑，显式 opt-in） |
-| `--skip-case` | 跳过指定用例（可多次使用），如 `--skip-case 4k_input_1k_output`。用于复用 quick 已跑的数据 |
+| `--strategy` | 测试策略：`quick`(只跑4k_input_1k_output并发64,默认) / `comprehensive`(全跑) |
 | `--quick` | (向后兼容别名) 等同于 `--strategy quick` |
-| `--concurrency-search` | (向后兼容别名) 等同于 `--strategy fast` |
 | `--output-name` | 输出文件名（不含扩展名） |
 | `--output-dir` | 输出目录 |
 | `--mode` | 测试模式标记 |
 | `--test-case` | 运行指定测试用例 |
 | `--dry-run` | 仅打印命令不执行 |
 
-**优先级**：`--strategy` > `--quick` > `--concurrency-search` > 默认 `fast`
-
-### 并发搜索停止条件（strategy=fast 时生效）
-
-1. **连续 2 级增长 < 3%**：吞吐趋于饱和
-2. **吞吐下降 > 5%**：已过拐点，继续加并发无意义
-3. **请求失败 > 0**：服务过载
-
-以上条件仅对 `early_stop: true` 的用例生效。`prefill1_decode512` 和 `1k_input_1k_output` 两个用例设置 `early_stop: false`，所有并发全跑，用于跨平台对比基准。quick 模式自动追加 `--final-burst`（max 测试）。
-
-搜索结果记录所有已测试并发级别的吞吐量，不区分是否提前停止。对比时逐并发级别计算 ratio，不选取"最优并发"。
-
-### per-test-case 超时
-
-从配置文件 `test_matrix[].timeout` 字段读取，默认 600s。长序列用例（如 32k 输入）可设置 1800s。
+**优先级**：`--strategy` > `--quick` > 默认 `quick`
 
 ## performance_compare.py 参数
 
@@ -436,10 +380,10 @@ ISSUE_EOF"
 - native_performance.json 已生成
 - flagos_performance.json 已生成
 - 对比结果已生成（performance_compare.csv）
-- 性能比率已判断（每个用例的每个并发级别均 ≥ 80%，或触发算子优化）
+- 性能比率已判断（ratio ≥ 80%，或触发算子优化）
 - 性能不达标时，`logs/issues_performance.log` 已追加写入问题记录
 - 如触发优化：flagos_optimized.json 已生成
-- 最终三版对比已生成（performance_compare_final.csv）
+- 最终对比已生成
 - context.yaml 已更新
 - 配置快照已保存到 `config/perf_config.yaml`
 - 对应 trace 文件已写入：

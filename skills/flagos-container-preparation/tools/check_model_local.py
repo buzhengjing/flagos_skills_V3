@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-check_model_local.py — 宿主机本地模型权重搜索、校验与自动下载
+check_model_local.py — 模型权重搜索、校验与自动下载（宿主机 + 容器内）
 
-在容器准备之前，先在宿主机搜索是否已有模型权重。
-如果未找到，自动从 ModelScope 下载到指定目录。
+支持三种运行模式:
+  host      — 宿主机搜索+宿主机下载（默认，向后兼容）
+  container — 宿主机编排入口：先在容器内搜索，再检查宿主机+挂载，未找到则容器内下载
+  internal  — 容器内执行（由 container 模式自动调用）
 
 用法:
+    # 宿主机模式（默认，与旧版完全一致）
     python3 check_model_local.py --model "Qwen/Qwen3-8B" --output-json
-    python3 check_model_local.py --model "https://modelscope.cn/models/Qwen/Qwen2.5-7B"
     python3 check_model_local.py --model "Qwen/Qwen3-8B" --download-dir /mnt/data/models
     python3 check_model_local.py --model "Qwen3-8B" --no-download --output-json
-    python3 check_model_local.py --model "Qwen/Qwen3-8B" --container my_container --output-json
+
+    # 容器模式（编排层在宿主机执行）
+    python3 check_model_local.py --model "Qwen/Qwen3-8B" --mode container --container my_container --output-json
+
+    # 容器内模式（container 模式自动调用，一般不手动使用）
+    python3 check_model_local.py --model "Qwen/Qwen3-8B" --mode internal --output-json
 
 退出码: 0=找到有效权重(本地或下载), 1=未找到, 2=参数错误
 """
@@ -23,6 +30,7 @@ import subprocess
 import sys
 
 DEFAULT_SEARCH_PATHS = ["/data", "/nfs", "/share", "/models", "/home"]
+CONTAINER_SEARCH_PATHS = ["/data", "/models", "/root", "/home", "/workspace", "/mnt", "/opt"]
 DEFAULT_MAX_DEPTH = 4
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv", ".cache", ".trash"}
 
@@ -31,6 +39,10 @@ EXCLUDE_BIN = re.compile(r"^(optimizer|training_args|scheduler)", re.IGNORECASE)
 
 # 单个权重文件最小合理大小（1 MB），低于此阈值视为下载中断的残文件
 MIN_WEIGHT_FILE_SIZE = 1 * 1024 * 1024
+
+# 容器内下载路径优先级：优先使用已挂载的宿主机卷，避免写入 overlay
+PREFERRED_MOUNT_PREFIXES = ["/data", "/mnt", "/nfs", "/share"]
+CONTAINER_DEFAULT_DOWNLOAD_DIR = "/data/models"
 
 
 def parse_model_identifier(model_input: str) -> dict:
@@ -426,17 +438,347 @@ def download_from_modelscope(model_id: str, download_path: str, container=None,
     return result
 
 
+# ---------------------------------------------------------------------------
+# Container mode helpers
+# ---------------------------------------------------------------------------
+
+def get_container_mounts(container_name: str) -> list:
+    """通过 docker inspect 获取容器的卷挂载信息。
+
+    Returns:
+        [{"source": "/host/path", "destination": "/container/path", "type": "bind|volume"}, ...]
+    """
+    cmd = [
+        "docker", "inspect", container_name,
+        "--format", "{{json .Mounts}}",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            print(f"  警告: docker inspect 失败: {proc.stderr.strip()}", file=sys.stderr)
+            return []
+        mounts_raw = json.loads(proc.stdout.strip())
+        return [
+            {
+                "source": m.get("Source", ""),
+                "destination": m.get("Destination", ""),
+                "type": m.get("Type", ""),
+            }
+            for m in mounts_raw
+        ]
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, Exception) as e:
+        print(f"  警告: 解析容器挂载信息失败: {e}", file=sys.stderr)
+        return []
+
+
+def find_host_path_in_container(host_path: str, mounts: list) -> str:
+    """检查宿主机路径是否通过挂载可在容器内访问。
+
+    Returns:
+        容器内路径（如 /data/models/Qwen3-8B），未找到返回空字符串。
+    """
+    host_path = os.path.normpath(host_path)
+    for mount in mounts:
+        src = os.path.normpath(mount["source"])
+        dst = mount["destination"]
+        if host_path == src or host_path.startswith(src + os.sep):
+            relative = os.path.relpath(host_path, src)
+            container_path = os.path.join(dst, relative) if relative != "." else dst
+            return container_path
+    return ""
+
+
+def choose_download_path(mounts: list, model_name: str) -> str:
+    """从容器挂载卷中选择最佳下载路径，避免写入 overlay。
+
+    优先级: /data > /mnt > /nfs > /share，选中后拼接 models/<model_name>。
+    无可用挂载卷时 fallback 到 /data/models/<model_name>。
+    """
+    for prefix in PREFERRED_MOUNT_PREFIXES:
+        for mount in mounts:
+            dst = mount["destination"]
+            if dst == prefix or dst.startswith(prefix + "/"):
+                return os.path.join(dst, "models", model_name)
+    return os.path.join(CONTAINER_DEFAULT_DOWNLOAD_DIR, model_name)
+
+
+def docker_exec_run(container_name: str, cmd_str: str, proxy: str = "",
+                    timeout: int = 30) -> subprocess.CompletedProcess:
+    """在容器内执行命令，自动添加 PATH 前缀和可选代理。"""
+    env_flags = []
+    if proxy:
+        env_flags.extend(["-e", f"http_proxy={proxy}", "-e", f"https_proxy={proxy}"])
+    full_cmd = ["docker", "exec"] + env_flags + [
+        container_name, "bash", "-c",
+        f"PATH=/opt/conda/bin:$PATH {cmd_str}",
+    ]
+    return subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def search_model_in_container(container_name: str, model_input: str,
+                              search_paths: list, max_depth: int) -> dict:
+    """在容器内搜索模型权重。
+
+    通过 docker cp 将本脚本复制到容器 /tmp/，以 --mode internal 运行。
+    """
+    # 复制自身到容器
+    script_path = os.path.abspath(__file__)
+    try:
+        cp_proc = subprocess.run(
+            ["docker", "cp", script_path, f"{container_name}:/tmp/check_model_local.py"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if cp_proc.returncode != 0:
+            return {"error": f"docker cp 失败: {cp_proc.stderr.strip()}"}
+    except Exception as e:
+        return {"error": f"docker cp 异常: {e}"}
+
+    # 在容器内执行搜索（不下载）
+    paths_arg = ",".join(search_paths)
+    cmd = (
+        f'python3 /tmp/check_model_local.py '
+        f'--model "{model_input}" '
+        f'--mode internal '
+        f'--search-paths "{paths_arg}" '
+        f'--max-depth {max_depth} '
+        f'--no-download --output-json'
+    )
+    try:
+        proc = docker_exec_run(container_name, cmd, timeout=120)
+        if proc.returncode not in (0, 1):
+            return {"error": f"容器内搜索失败 (exit {proc.returncode}): {proc.stderr.strip()}"}
+        # 解析 JSON 输出
+        return json.loads(proc.stdout.strip())
+    except json.JSONDecodeError:
+        return {"error": f"容器内搜索输出非法 JSON: {proc.stdout[:500]}"}
+    except subprocess.TimeoutExpired:
+        return {"error": "容器内搜索超时 (120s)"}
+    except Exception as e:
+        return {"error": f"容器内搜索异常: {e}"}
+
+
+def download_in_container(container_name: str, model_id: str, download_path: str,
+                          proxy: str = "") -> dict:
+    """在容器内通过 modelscope download 下载模型。"""
+    result = {"success": False, "path": download_path, "error": ""}
+
+    # 确保目标目录存在
+    try:
+        docker_exec_run(container_name, f"mkdir -p '{download_path}'", timeout=10)
+    except Exception:
+        pass
+
+    # 检查 modelscope CLI 是否可用
+    check = docker_exec_run(container_name, "which modelscope", timeout=10)
+    if check.returncode != 0:
+        print("  容器内未安装 modelscope CLI，尝试安装...")
+        install_cmd = "pip install modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com"
+        install_proc = docker_exec_run(container_name, install_cmd, proxy=proxy, timeout=600)
+        if install_proc.returncode != 0:
+            result["error"] = f"modelscope 安装失败: {install_proc.stderr[:300]}"
+            print(f"  ✗ {result['error']}", file=sys.stderr)
+            return result
+        print("  ✓ modelscope CLI 安装成功")
+
+    # 执行下载
+    dl_cmd = f"modelscope download --model '{model_id}' --local_dir '{download_path}'"
+    print(f"\n>>> 容器内未找到权重，开始从 ModelScope 下载: {model_id}")
+    print(f"    容器: {container_name}")
+    print(f"    目标路径: {download_path}")
+
+    try:
+        proc = docker_exec_run(container_name, dl_cmd, proxy=proxy, timeout=7200)
+        if proc.returncode == 0:
+            result["success"] = True
+            print(f"\n✓ 容器内下载完成: {download_path}")
+        else:
+            result["error"] = f"modelscope download 退出码 {proc.returncode}: {proc.stderr[:300]}"
+            print(f"\n✗ 容器内下载失败: {result['error']}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        result["error"] = "下载超时（2小时）"
+        print(f"\n✗ {result['error']}", file=sys.stderr)
+    except Exception as e:
+        result["error"] = str(e)
+        print(f"\n✗ 下载异常: {e}", file=sys.stderr)
+
+    return result
+
+
+def run_container_mode(args, parsed: dict) -> dict:
+    """容器模式：在容器内搜索模型，必要时在容器内下载。
+
+    流程:
+    1. 在容器内搜索
+    2. 在宿主机搜索 + 检查挂载关系
+    3. 如均未找到 → 容器内下载（优先挂载卷路径）
+    """
+    container = args.container
+    model_name = parsed["model_name"]
+
+    output = {
+        "model_input": args.model,
+        "parsed": parsed,
+        "mode": "container",
+        "container": container,
+        "container_search": {"found": False, "best_match": None, "candidates": []},
+        "host_search": {
+            "found": False, "best_match": None, "candidates": [],
+            "mounted_in_container": False, "container_mount_path": "",
+        },
+        "download": None,
+        "final_container_path": None,
+        "final_host_path": None,
+    }
+
+    # 获取容器挂载信息
+    mounts = get_container_mounts(container)
+    output["mounts"] = [
+        {"source": m["source"], "destination": m["destination"]}
+        for m in mounts
+    ]
+
+    # --- Step 1: 容器内搜索 ---
+    container_search_paths = CONTAINER_SEARCH_PATHS
+    if args.search_paths:
+        container_search_paths = [p.strip() for p in args.search_paths.split(",") if p.strip()]
+
+    print(f"[1/3] 在容器 {container} 内搜索模型 {model_name} ...")
+    container_result = search_model_in_container(
+        container, args.model, container_search_paths, args.max_depth,
+    )
+
+    if "error" in container_result:
+        print(f"  ✗ 容器内搜索失败: {container_result['error']}", file=sys.stderr)
+        output["container_search"]["error"] = container_result["error"]
+    else:
+        output["container_search"]["found"] = container_result.get("found", False)
+        output["container_search"]["best_match"] = container_result.get("best_match")
+        output["container_search"]["candidates"] = container_result.get("candidates", [])
+
+    if output["container_search"]["found"]:
+        container_path = output["container_search"]["best_match"]
+        print(f"  ✓ 容器内找到模型: {container_path}")
+        output["final_container_path"] = container_path
+        # 尝试推算宿主机路径
+        for mount in mounts:
+            dst = mount["destination"]
+            if container_path == dst or container_path.startswith(dst + "/"):
+                relative = os.path.relpath(container_path, dst)
+                host_path = os.path.join(mount["source"], relative) if relative != "." else mount["source"]
+                output["final_host_path"] = host_path
+                break
+        return output
+
+    # --- Step 2: 宿主机搜索 + 挂载检查 ---
+    host_search_paths = DEFAULT_SEARCH_PATHS
+    print(f"[2/3] 在宿主机搜索模型 {model_name} ...")
+    exact, contain, config = search_model_dirs(model_name, host_search_paths, args.max_depth)
+
+    host_candidates = []
+    for path in exact:
+        info = validate_model_dir(path)
+        host_candidates.append({"path": path, "match_type": "exact", **info})
+    for path in contain:
+        info = validate_model_dir(path)
+        host_candidates.append({"path": path, "match_type": "contains", **info})
+    for path in config:
+        info = validate_model_dir(path)
+        host_candidates.append({"path": path, "match_type": "config", **info})
+
+    MATCH_PRIORITY = {"exact": 0, "contains": 1, "config": 2}
+    valid_host = [c for c in host_candidates if c["valid"]]
+    host_best = None
+    if valid_host:
+        valid_host.sort(key=lambda c: (MATCH_PRIORITY.get(c["match_type"], 9), -c["total_size_gb"]))
+        host_best = valid_host[0]["path"]
+
+    output["host_search"]["candidates"] = host_candidates
+    output["host_search"]["found"] = host_best is not None
+    output["host_search"]["best_match"] = host_best
+
+    if host_best:
+        container_mount_path = find_host_path_in_container(host_best, mounts)
+        if container_mount_path:
+            print(f"  ✓ 宿主机找到模型: {host_best} → 容器内挂载于 {container_mount_path}")
+            output["host_search"]["mounted_in_container"] = True
+            output["host_search"]["container_mount_path"] = container_mount_path
+            output["final_container_path"] = container_mount_path
+            output["final_host_path"] = host_best
+            return output
+        else:
+            print(f"  ⚠ 宿主机找到模型: {host_best}，但未挂载到容器（无法直接使用）")
+            output["host_search"]["mounted_in_container"] = False
+            output["final_host_path"] = host_best
+    else:
+        print(f"  ✗ 宿主机也未找到模型")
+
+    # --- Step 3: 容器内下载 ---
+    if args.no_download:
+        print("  跳过下载（--no-download）")
+        return output
+
+    model_id = ""
+    if parsed["org"]:
+        model_id = f"{parsed['org']}/{parsed['model_name']}"
+    elif "/" in args.model and not args.model.startswith("http"):
+        model_id = args.model
+
+    if not model_id:
+        print(f"\n✗ 无法自动下载: 缺少组织名，请使用 org/model 格式（如 Qwen/Qwen3-8B）", file=sys.stderr)
+        output["download"] = {"success": False, "error": "缺少组织名，无法构建 ModelScope model ID"}
+        return output
+
+    download_path = choose_download_path(mounts, model_name)
+    print(f"[3/3] 在容器内下载模型到: {download_path} ...")
+
+    dl_result = download_in_container(container, model_id, download_path, proxy=args.proxy or "")
+    output["download"] = dl_result
+
+    if dl_result["success"]:
+        # 验证下载结果
+        verify_result = search_model_in_container(
+            container, args.model,
+            [os.path.dirname(download_path)], max_depth=2,
+        )
+        if not verify_result.get("error") and verify_result.get("found"):
+            output["final_container_path"] = verify_result["best_match"]
+            print(f"  ✓ 下载校验通过: {verify_result['best_match']}")
+        else:
+            output["final_container_path"] = download_path
+            print(f"  ⚠ 下载完成但校验未确认，使用下载路径: {download_path}", file=sys.stderr)
+
+        # 推算宿主机路径
+        final_cp = output["final_container_path"]
+        for mount in mounts:
+            dst = mount["destination"]
+            if final_cp and (final_cp == dst or final_cp.startswith(dst + "/")):
+                relative = os.path.relpath(final_cp, dst)
+                output["final_host_path"] = os.path.join(mount["source"], relative) if relative != "." else mount["source"]
+                break
+
+    return output
+
+
 def main():
-    parser = argparse.ArgumentParser(description="宿主机本地模型权重搜索与校验")
+    parser = argparse.ArgumentParser(description="模型权重搜索、校验与自动下载")
     parser.add_argument("--model", required=True, help="模型名 / ModelScope URL / HuggingFace URL")
+    parser.add_argument("--mode", choices=["host", "container", "internal"], default="host",
+                        help="运行模式: host=宿主机(默认), container=容器编排, internal=容器内执行")
+    parser.add_argument("--container", default=None, help="容器名称（--mode container 时必填）")
+    parser.add_argument("--proxy", default=None, help="下载代理地址（如 http://proxy:port）")
     parser.add_argument("--search-paths", default=None, help="搜索根目录，逗号分隔")
     parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH, help="搜索目录深度")
     parser.add_argument("--output-json", action="store_true", help="JSON 格式输出")
-    parser.add_argument("--download-dir", default=DEFAULT_DOWNLOAD_DIR, help="自动下载目标目录")
+    parser.add_argument("--download-dir", default=None, help="自动下载目标目录")
     parser.add_argument("--no-download", action="store_true", help="禁用自动下载，仅搜索本地")
     parser.add_argument("--container", default=None, help="容器名，提供时优先在容器内下载（需挂载目标目录）")
     parser.add_argument("--container-model-path", default=None, help="容器内模型下载路径（如 /data/models/Qwen3-8B）")
     args = parser.parse_args()
+
+    # 参数校验
+    if args.mode == "container" and not args.container:
+        print("Error: --mode container 需要 --container 参数", file=sys.stderr)
+        sys.exit(2)
 
     # 解析模型标识
     parsed = parse_model_identifier(args.model)
@@ -444,11 +786,35 @@ def main():
         print("Error: 无法解析模型名称", file=sys.stderr)
         sys.exit(2)
 
-    # 搜索路径
+    # ---- container 模式 ----
+    if args.mode == "container":
+        output = run_container_mode(args, parsed)
+        found = output.get("final_container_path") is not None
+
+        if args.output_json:
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        else:
+            print(f"\nModel: {parsed['model_name']} (mode: container, container: {args.container})")
+            if found:
+                print(f"✓ 容器内模型路径: {output['final_container_path']}")
+                if output.get("final_host_path"):
+                    print(f"  宿主机路径: {output['final_host_path']}")
+            else:
+                print("✗ 未找到有效模型权重")
+        sys.exit(0 if found else 1)
+
+    # ---- host / internal 模式（逻辑相同，仅默认路径不同）----
     if args.search_paths:
         search_paths = [p.strip() for p in args.search_paths.split(",") if p.strip()]
+    elif args.mode == "internal":
+        search_paths = CONTAINER_SEARCH_PATHS
     else:
         search_paths = DEFAULT_SEARCH_PATHS
+
+    if args.download_dir is None:
+        download_dir = CONTAINER_DEFAULT_DOWNLOAD_DIR if args.mode == "internal" else DEFAULT_DOWNLOAD_DIR
+    else:
+        download_dir = args.download_dir
 
     # 搜索
     exact_matches, contain_matches, config_matches = search_model_dirs(
@@ -492,6 +858,7 @@ def main():
     output = {
         "model_input": args.model,
         "parsed": parsed,
+        "mode": args.mode,
         "found": best_match is not None,
         "candidates": candidates,
         "best_match": best_match,
@@ -541,13 +908,12 @@ def main():
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         # 人类可读输出
-        print(f"Model: {parsed['model_name']} (org: {parsed['org'] or 'N/A'})")
+        print(f"Model: {parsed['model_name']} (org: {parsed['org'] or 'N/A'}, mode: {args.mode})")
         print(f"Input type: {parsed['input_type']}")
         print(f"Search paths: {', '.join(search_paths)}")
         print(f"Candidates found: {len(candidates)}")
         if best_match:
             print(f"\n✓ Best match: {best_match}")
-            # 从 candidates 中找到对应的 best_match 记录
             best_info = next((c for c in candidates if c["path"] == best_match), None)
             if best_info:
                 print(f"  Format: {best_info['weight_format']}, Files: {best_info['weight_count']}, Size: {best_info['total_size_gb']} GB")

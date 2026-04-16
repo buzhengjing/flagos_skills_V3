@@ -130,6 +130,25 @@ echo "=========================================="
 echo "ERROR: 服务启动超时（${TIMEOUT}s）"
 echo "=========================================="
 
+# 写入 _last_error.json
+python3 -c "
+import json, os
+from datetime import datetime
+log_dir = '/flagos-workspace/logs' if os.path.isdir('/flagos-workspace/logs') else '/tmp'
+record = {
+    'tool': 'wait_for_service.sh',
+    'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+    'exit_code': 1,
+    'error_type': 'service_timeout',
+    'error_message': '服务启动超时 (${TIMEOUT}s), 端口 ${PORT} 无响应',
+    'context': {'port': ${PORT}, 'host': '${HOST}', 'timeout': ${TIMEOUT}},
+}
+with open(os.path.join(log_dir, '_last_error.json'), 'w') as f:
+    json.dump(record, f, ensure_ascii=False, indent=2)
+with open(os.path.join(log_dir, '_error_history.jsonl'), 'a') as f:
+    f.write(json.dumps(record, ensure_ascii=False) + '\n')
+" 2>/dev/null || true
+
 # 检查进程是否还在
 echo ""
 echo "进程状态:"

@@ -41,7 +41,7 @@ provides:
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -54,7 +54,7 @@ gpu:
   vendor: <来自 container-preparation，FlagTree 安装时用于自动选择后端>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 component_install:

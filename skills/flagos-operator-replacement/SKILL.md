@@ -44,7 +44,7 @@ provides:
 
 # 上下文集成
 
-## 从 shared/context.yaml 读取
+## 从容器内 /flagos-workspace/shared/context.yaml 读取
 
 ```yaml
 container:
@@ -77,7 +77,7 @@ flaggems_control:
   disable_method: <来自 pre-service-inspection>
 ```
 
-## 写入 shared/context.yaml
+## 写入容器内 /flagos-workspace/shared/context.yaml
 
 ```yaml
 operator_replacement:
@@ -575,13 +575,24 @@ Plugin 场景：通过 VLLM_FL_FLAGOS_BLACKLIST 环境变量控制
 非 plugin 场景：通过 Layer 1-4 策略控制
 每轮重启后读取 txt 文件验证算子变化
 
-备选策略：--search-strategy group（分组二分搜索）或 linear（线性逐个搜索）
+备选策略：--search-strategy group（分组二分搜索）或 linear（线性逐个搜索）或 elimination（逐删策略）
 ```
 
 **为什么用渐进排除而非分组二分？**
 - 算子列表通常只有 20-30 个，分组二分轮次过多（最坏 ~22 轮）
 - 渐进排除最多 3 轮即可定位问题所在的风险等级
 - 达标即停，保留尽可能多的算子
+
+**逐删策略**（elimination）：
+
+```
+从 txt 算子列表中按顺序逐个累积禁用，每禁用一个就测试，达标即停。
+与 linear 的关键区别：linear 独立测试（禁用→测→恢复），elimination 累积禁用（禁用→测→保持禁用→禁下一个→测）。
+
+适用场景：精度/性能不达标时的暴力削减，不关心具体哪个算子有问题，只要达标即可。
+最坏情况：所有算子都禁用仍不达标 → 标记 failed。
+不支持反向搜索（--reverse），语义冲突。
+```
 
 ## 工作流程
 
@@ -665,6 +676,16 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
   --search-strategy group
 ```
 
+**备选：使用逐删策略**（累积禁用算子直到达标）：
+```bash
+${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
+  --ops-file /flagos-workspace/results/ops_list.json \
+  --native-throughput <native_perf.output_throughput> \
+  --native-benchmark /flagos-workspace/results/v1_benchmark.json \
+  --target-ratio 0.8 \
+  --search-strategy elimination
+```
+
 ### 步骤 O4 — 运行搜索循环
 
 **推荐方式：使用 operator_search.py 全自动搜索**（减少 Claude Code 思考开销）：
@@ -713,7 +734,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
 
 5. 更新优化器:
    ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py update \
-     --op-name <名称> --throughputs '{"1":800,"64":900,"256":850}' \
+     --op-name <名称> --throughputs '{"64":900}' \
      --native-throughput <native_perf.output_throughput>
 
 6. 检查状态，继续或结束
@@ -893,10 +914,11 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 - **累计替换报告已输出给用户**
 - operator_config.json 已保存
 - context.yaml 已更新
-- 算子调优记录写入对应步骤的 trace 文件中：
-  - 精度调优 → 记录在 `traces/04_quick_accuracy.json` 的 actions 中
-  - 性能调优 → 记录在 `traces/05_quick_performance.json` 的 actions 中
-- `timing.steps.operator_replacement` 已更新为本步骤的 `duration_seconds`
+- 算子调优记录写入独立的 trace 文件：
+  - 精度调优 → `traces/07_accuracy_tuning.json`
+  - 性能调优 → `traces/08_performance_tuning.json`
+- 精度调优耗时更新 `timing.steps.accuracy_tuning`
+- 性能调优耗时更新 `timing.steps.performance_tuning`
 
 ---
 

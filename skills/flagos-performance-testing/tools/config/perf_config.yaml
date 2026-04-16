@@ -22,20 +22,16 @@ test_matrix:
     input_len: 1
     output_len: 512
     enabled: true
-    early_stop: false     # 不早停，所有并发全跑；跨平台对比基准用例
 
   - name: "1k_input_1k_output"
     input_len: 1024
     output_len: 1024
     enabled: true
-    early_stop: false     # 不早停，所有并发全跑；跨平台对比基准用例
-    fixed_concurrency: 64 # --strategy fixed 时使用此并发
 
   - name: "4k_input_1k_output"
     input_len: 4096
     output_len: 1024
     enabled: true
-    early_stop: false     # 不早停，所有并发全跑；--quick 模式下只跑此用例 + max
 
   - name: "16k_input_1k_output"
     input_len: 16384
@@ -46,14 +42,12 @@ test_matrix:
     input_len: 32768
     output_len: 1024
     enabled: true
-    fixed_concurrency: 1  # --strategy fixed 时使用此并发
 
 # =============================================================================
 # Concurrency Test Configuration
 # =============================================================================
 concurrency:
   levels: [1, 2, 4, 8, 16, 32, 64, 128, 256]
-  final_num_prompts: 1000
 
 # =============================================================================
 # Benchmark Fixed Parameters

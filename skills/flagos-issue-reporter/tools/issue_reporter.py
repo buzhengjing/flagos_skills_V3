@@ -5,8 +5,13 @@ issue_reporter.py — FlagGems/FlagTree 问题自动收集、格式化与提交
 子命令:
     collect   从日志/结果文件收集问题信息 + 环境版本
     format    将 issue_data.json 格式化为 Bug Report markdown
-    submit    通过 gh CLI / GitHub API / 手动 降级提交 issue
+    submit    保存 markdown 到本地，有 GITHUB_TOKEN 时自动提交
     full      collect → format → submit 一步完成
+
+提交策略:
+    默认只生成带类型标注的 markdown 文件保存到本地
+    显式传入 --submit 且有 GITHUB_TOKEN 环境变量时才提交到 GitHub
+    文件命名: issue_{type}_{repo}_{timestamp}.md
 
 Issue 类型:
     operator-crash       算子导致服务崩溃
@@ -14,6 +19,7 @@ Issue 类型:
     accuracy-degraded    精度调优筛出的问题算子
     performance-degraded 性能调优筛出的问题算子
     flagtree-error       FlagTree/Triton 框架报错
+    plugin-error         vllm-plugin-FL 框架报错
 
 Usage:
     python3 issue_reporter.py collect --type operator-crash --log-path crash.log --env-file env.json --json
@@ -21,21 +27,38 @@ Usage:
     python3 issue_reporter.py submit --issue-file issue_report.md --repo flagos-ai/FlagGems --json
     python3 issue_reporter.py full --type operator-crash --log-path crash.log --env-file env.json --repo flagos-ai/FlagGems --json
 
-退出码: 0=成功, 1=收集无结果, 2=参数错误
+退出码: 0=成功（含 markdown 已保存）, 1=收集无结果或 API 提交失败, 2=参数错误
 """
 
 import argparse
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+_ENV_FILE = "/flagos-workspace/.env"
+
+
+def _load_env_file():
+    """从 /flagos-workspace/.env 加载 token，环境变量已有值的不覆盖"""
+    if not os.path.isfile(_ENV_FILE):
+        return
+    with open(_ENV_FILE, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key and not os.environ.get(key):
+                os.environ[key] = val
+
+
+_load_env_file()
 
 # 共享模块导入（兼容本地开发和容器内扁平部署）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -111,6 +134,11 @@ ISSUE_TYPES = {
         "labels": ["bug"],
         "description": "FlagTree/Triton 框架报错",
     },
+    "plugin-error": {
+        "title_prefix": "Bug: vllm-plugin-FL error",
+        "labels": ["bug"],
+        "description": "vllm-plugin-FL 框架报错",
+    },
 }
 
 MAX_LOG_CHARS = 2000
@@ -184,6 +212,13 @@ def collect_issue_data(
         error_type = ft.get("error_type", "triton_error")
         error_messages = ft.get("error_messages", [])
         error_logs = ft.get("error_logs", "")
+
+    elif issue_type == "plugin-error" and log_path:
+        pe = _parse_plugin_error(log_path)
+        affected_ops = pe.get("related_components", [])
+        error_type = pe.get("error_type", "plugin_error")
+        error_messages = pe.get("error_messages", [])
+        error_logs = pe.get("error_logs", "")
 
     # 4. 加载 FlagGems 代码上下文
     flaggems_ctx = _load_flaggems_context(
@@ -528,6 +563,50 @@ def _parse_flagtree_error(log_path: str) -> Dict[str, Any]:
     }
 
 
+def _parse_plugin_error(log_path: str) -> Dict[str, Any]:
+    """解析 vllm-plugin-FL 相关错误"""
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return {"related_components": [], "error_messages": [], "error_logs": ""}
+
+    plugin_patterns = [
+        re.compile(r"(?:vllm_plugin_fl|vllm-plugin-FL).*?(?:error|fail|exception)", re.IGNORECASE),
+        re.compile(r"(?:OpManager|op_manager).*?(?:error|fail|dispatch)", re.IGNORECASE),
+        re.compile(r"(?:ImportError|ModuleNotFoundError).*?(?:vllm_plugin|vllm_fl)", re.IGNORECASE),
+        re.compile(r"(?:vllm_fl)\.(?:ops|dispatch|register).*?(?:error|fail)", re.IGNORECASE),
+    ]
+
+    components = set()
+    error_messages = []
+    error_type = "plugin_error"
+
+    for pattern in plugin_patterns:
+        for match in pattern.finditer(content):
+            msg = match.group(0).strip()[:300]
+            if msg not in error_messages:
+                error_messages.append(msg)
+            if "opmanager" in msg.lower() or "dispatch" in msg.lower():
+                components.add("dispatch")
+                error_type = "dispatch_error"
+            if "import" in msg.lower():
+                components.add("import")
+                error_type = "import_error"
+            if "vllm_fl" in msg.lower():
+                components.add("vllm_fl")
+
+    if not components:
+        components.add("vllm-plugin-FL")
+
+    return {
+        "related_components": sorted(components),
+        "error_type": error_type,
+        "error_messages": error_messages[:5],
+        "error_logs": _read_log_tail(log_path, MAX_LOG_CHARS),
+    }
+
+
 def _read_log_tail(log_path: str, max_chars: int) -> str:
     """读取日志文件尾部"""
     try:
@@ -547,6 +626,7 @@ def _read_log_tail(log_path: str, max_chars: int) -> str:
 def format_issue(
     issue_data: Dict[str, Any],
     output_path: Optional[str] = None,
+    repo: str = "flagos-ai/FlagGems",
 ) -> str:
     """将 issue_data 格式化为 Bug Report markdown"""
 
@@ -582,7 +662,12 @@ def format_issue(
     directions = _generate_directions(issue_type, env, affected_ops)
 
     # Assemble markdown
-    md = f"""## Bug Report: {title}
+    header = (
+        f"<!-- Issue Target: https://github.com/{repo}/issues/new -->\n"
+        f"<!-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -->\n"
+        f"<!-- Type: {issue_type} -->\n\n"
+    )
+    md = header + f"""## Bug Report: {title}
 
 ### Description
 
@@ -662,6 +747,10 @@ def _generate_description(issue_type, affected_ops, op_details, error_messages, 
         components = ", ".join(f"`{op}`" for op in affected_ops) if affected_ops else "triton/flagtree"
         return f"FlagTree/Triton framework error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
 
+    elif issue_type == "plugin-error":
+        components = ", ".join(f"`{op}`" for op in affected_ops) if affected_ops else "vllm-plugin-FL"
+        return f"vllm-plugin-FL error encountered{model_str}. Related components: {components}.\n\n{error_messages[0] if error_messages else ''}"
+
     return "Bug report."
 
 
@@ -704,6 +793,10 @@ def _generate_steps(issue_type, model, env):
     if issue_type in ("operator-crash", "flagtree-error"):
         steps.append("3. Start vLLM inference service with FlagGems enabled")
         steps.append("4. Observe operator runtime failures / framework errors")
+    elif issue_type == "plugin-error":
+        steps.append("3. Install vllm-plugin-FL (git clone + pip install --no-build-isolation)")
+        steps.append("4. Start vLLM inference service with plugin enabled")
+        steps.append("5. Observe plugin-related errors")
     elif issue_type == "accuracy-zero":
         steps.append("3. Start vLLM inference service with FlagGems enabled")
         steps.append("4. Run GPQA Diamond evaluation (198 questions)")
@@ -731,6 +824,8 @@ def _generate_expected(issue_type):
         return "All FlagGems operators should maintain performance at >=80% of native baseline at each concurrency level."
     elif issue_type == "flagtree-error":
         return "FlagTree/Triton should compile and execute kernels without errors."
+    elif issue_type == "plugin-error":
+        return "vllm-plugin-FL should load and dispatch operators without errors."
     return "Expected behavior."
 
 
@@ -757,6 +852,10 @@ def _generate_actual(issue_type, affected_ops, op_details, error_messages):
     elif issue_type == "flagtree-error":
         msgs = "\n".join(f"- {m}" for m in error_messages[:3]) if error_messages else "- (see error logs)"
         return f"FlagTree/Triton framework errors:\n{msgs}"
+
+    elif issue_type == "plugin-error":
+        msgs = "\n".join(f"- {m}" for m in error_messages[:3]) if error_messages else "- (see error logs)"
+        return f"vllm-plugin-FL errors:\n{msgs}"
 
     return "Unexpected behavior."
 
@@ -816,6 +915,11 @@ def _generate_directions(issue_type, env, affected_ops):
         directions.append("- Check LLVM/MLIR backend support for this platform")
         directions.append("- Try rebuilding FlagTree from source with platform-specific flags")
 
+    elif issue_type == "plugin-error":
+        directions.append("- Verify vllm-plugin-FL version compatibility with vLLM and FlagGems")
+        directions.append("- Check OpManager dispatch configuration and operator registration")
+        directions.append("- Try reinstalling plugin with --no-build-isolation flag")
+
     return "\n".join(directions)
 
 
@@ -860,8 +964,11 @@ def submit_issue(
     title: Optional[str] = None,
     labels: Optional[List[str]] = None,
     dry_run: bool = False,
+    output_dir: Optional[str] = None,
+    issue_type: Optional[str] = None,
+    auto_submit: bool = False,
 ) -> Dict[str, Any]:
-    """三级降级提交 issue: gh CLI → GitHub API → 手动"""
+    """保存 issue markdown 到本地，仅在 auto_submit=True 且有 GITHUB_TOKEN 时提交"""
 
     # 读取 issue 内容
     try:
@@ -880,6 +987,25 @@ def submit_issue(
         if not title:
             title = "Bug Report"
 
+    # 保存带类型+仓库名+时间戳的 markdown 文件
+    repo_short = repo.replace("/", "_")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    type_tag = f"{issue_type}_" if issue_type else ""
+    filename = f"issue_{type_tag}{repo_short}_{timestamp}.md"
+    save_dir = output_dir or os.path.dirname(os.path.abspath(issue_file))
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, filename)
+
+    # 写入带元信息头的 markdown
+    header = (
+        f"<!-- Issue Target: https://github.com/{repo}/issues/new -->\n"
+        f"<!-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -->\n"
+        f"<!-- Title: {title} -->\n"
+        f"<!-- Type: {issue_type or 'unknown'} -->\n\n"
+    )
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write(header + body)
+
     if dry_run:
         return {
             "submitted": False,
@@ -888,70 +1014,49 @@ def submit_issue(
             "repo": repo,
             "labels": labels or [],
             "body_length": len(body),
-            "report_path": os.path.abspath(issue_file),
+            "report_path": save_path,
         }
 
-    # 策略 1: gh CLI
-    result = _submit_via_gh(issue_file, repo, title, labels)
-    if result.get("submitted"):
-        return result
+    # 仅在显式 --submit 时尝试提交 GitHub
+    if not auto_submit:
+        return {
+            "submitted": False,
+            "method": "local_only",
+            "report_path": save_path,
+            "message": (
+                f"Issue 报告已保存到 {save_path}\n"
+                f"如需提交到 GitHub，请加 --submit 参数\n"
+                f"或手动提交到 https://github.com/{repo}/issues/new"
+            ),
+        }
 
-    # 策略 2: GitHub API token
+    # auto_submit=True: 有 GITHUB_TOKEN 时提交
     token = os.environ.get("GITHUB_TOKEN", os.environ.get("GH_TOKEN", ""))
     if token:
-        result = _submit_via_api(body, repo, title, labels, token)
-        if result.get("submitted"):
-            return result
+        api_result = _submit_via_api(body, repo, title, labels, token)
+        if api_result.get("submitted"):
+            api_result["report_path"] = save_path
+            return api_result
+        # API 失败，markdown 已保存
+        return {
+            "submitted": False,
+            "method": "api_failed",
+            "error": api_result.get("error", ""),
+            "report_path": save_path,
+            "message": f"API 提交失败，Issue 报告已保存到 {save_path}",
+        }
 
-    # 策略 3: 手动
+    # auto_submit=True 但无 token
     return {
         "submitted": False,
-        "method": "manual",
-        "title": title,
-        "report_path": os.path.abspath(issue_file),
-        "instructions": (
-            f"Issue 文件已保存到 {os.path.abspath(issue_file)}\n"
-            f"请手动提交到 https://github.com/{repo}/issues/new\n"
-            f"或执行: gh auth login && gh issue create --repo {repo} "
-            f"--title \"{title}\" --body-file {issue_file}"
+        "method": "no_token",
+        "report_path": save_path,
+        "message": (
+            f"Issue 报告已保存到 {save_path}\n"
+            f"如需自动提交，请设置环境变量: export GITHUB_TOKEN=ghp_xxx\n"
+            f"或手动提交到 https://github.com/{repo}/issues/new"
         ),
     }
-
-
-def _submit_via_gh(issue_file: str, repo: str, title: str, labels: Optional[List[str]]) -> Dict[str, Any]:
-    """通过 gh CLI 提交"""
-    try:
-        # 检查 gh 是否可用且已登录
-        check = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=10)
-        if check.returncode != 0:
-            return {"submitted": False, "error": "gh 未登录"}
-
-        cmd = [
-            "gh", "issue", "create",
-            "--repo", repo,
-            "--title", title,
-            "--body-file", issue_file,
-        ]
-        if labels:
-            for label in labels:
-                cmd.extend(["--label", label])
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode == 0:
-            url = result.stdout.strip()
-            number = _extract_issue_number(url)
-            return {
-                "submitted": True,
-                "method": "gh_cli",
-                "issue_url": url,
-                "issue_number": number,
-                "report_path": os.path.abspath(issue_file),
-            }
-        else:
-            return {"submitted": False, "error": f"gh issue create 失败: {result.stderr.strip()}"}
-
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return {"submitted": False, "error": "gh CLI 不可用"}
 
 
 def _submit_via_api(body: str, repo: str, title: str, labels: Optional[List[str]], token: str) -> Dict[str, Any]:
@@ -1008,7 +1113,8 @@ def full_pipeline(args) -> Dict[str, Any]:
     output_dir = args.output_dir or "/flagos-workspace/results"
     os.makedirs(output_dir, exist_ok=True)
 
-    data_path = os.path.join(output_dir, "issue_data.json")
+    type_tag = args.type.replace("-", "_")
+    data_path = os.path.join(output_dir, f"issue_data_{type_tag}.json")
     data = collect_issue_data(
         issue_type=args.type,
         log_path=args.log_path,
@@ -1026,8 +1132,8 @@ def full_pipeline(args) -> Dict[str, Any]:
     )
 
     # format
-    report_path = os.path.join(output_dir, "issue_report.md")
-    format_issue(data, output_path=report_path)
+    report_path = os.path.join(output_dir, f"issue_report_{type_tag}.md")
+    format_issue(data, output_path=report_path, repo=args.repo)
 
     # submit
     result = submit_issue(
@@ -1036,10 +1142,12 @@ def full_pipeline(args) -> Dict[str, Any]:
         title=data.get("title"),
         labels=data.get("labels"),
         dry_run=args.dry_run,
+        output_dir=output_dir,
+        issue_type=args.type,
+        auto_submit=getattr(args, "submit", False),
     )
 
     result["collected_data"] = data_path
-    result["report_path"] = report_path
     return result
 
 
@@ -1075,6 +1183,7 @@ def main():
     fmt = subparsers.add_parser("format", help="格式化为 issue markdown")
     fmt.add_argument("--collected-file", required=True, help="issue_data.json 路径")
     fmt.add_argument("--output", default=None, help="输出 markdown 路径")
+    fmt.add_argument("--repo", default="flagos-ai/FlagGems", help="目标 GitHub 仓库（用于 markdown 元信息）")
     fmt.add_argument("--json", action="store_true", help="JSON 输出")
 
     # submit
@@ -1083,7 +1192,10 @@ def main():
     sub.add_argument("--repo", default="flagos-ai/FlagGems", help="目标 GitHub 仓库")
     sub.add_argument("--title", help="issue 标题（默认从 markdown 提取）")
     sub.add_argument("--labels", help="逗号分隔的标签")
+    sub.add_argument("--output-dir", default=None, help="markdown 保存目录")
     sub.add_argument("--dry-run", action="store_true", help="不实际提交")
+    sub.add_argument("--submit", action="store_true", help="显式提交到 GitHub（默认只生成 markdown）")
+    sub.add_argument("--issue-type", default=None, help="issue 类型（用于文件名标注）")
     sub.add_argument("--json", action="store_true", help="JSON 输出")
 
     # full
@@ -1103,6 +1215,7 @@ def main():
     fl.add_argument("--repo", default="flagos-ai/FlagGems", help="目标 GitHub 仓库")
     fl.add_argument("--output-dir", default=None, help="输出目录")
     fl.add_argument("--dry-run", action="store_true", help="不实际提交")
+    fl.add_argument("--submit", action="store_true", help="显式提交到 GitHub（默认只生成 markdown）")
     fl.add_argument("--json", action="store_true", help="JSON 输出")
 
     args = parser.parse_args()
@@ -1145,7 +1258,7 @@ def main():
     elif args.command == "format":
         with open(args.collected_file, "r") as f:
             data = json.load(f)
-        md = format_issue(data, output_path=args.output)
+        md = format_issue(data, output_path=args.output, repo=args.repo)
         if args.json:
             print(json.dumps({"markdown": md, "output_path": args.output}, ensure_ascii=False, indent=2))
         else:
@@ -1159,12 +1272,16 @@ def main():
             title=args.title,
             labels=labels,
             dry_run=args.dry_run,
+            output_dir=args.output_dir,
+            issue_type=getattr(args, "issue_type", None),
+            auto_submit=getattr(args, "submit", False),
         )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             _print_submit_report(result)
-        sys.exit(0 if result.get("submitted") else 1)
+        # local_only / dry_run 也算成功（markdown 已保存），仅 api_failed 算失败
+        sys.exit(0 if result.get("submitted") or result.get("method") in ("local_only", "dry_run") else 1)
 
     elif args.command == "full":
         result = full_pipeline(args)
@@ -1172,7 +1289,7 @@ def main():
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             _print_submit_report(result)
-        sys.exit(0 if result.get("submitted") else 1)
+        sys.exit(0 if result.get("submitted") or result.get("method") in ("local_only", "dry_run") else 1)
 
 
 def _print_collect_report(data):
@@ -1206,8 +1323,8 @@ def _print_submit_report(result):
     else:
         print(f"状态: 未提交")
         print(f"方式: {result.get('method', 'N/A')}")
-        if result.get("instructions"):
-            print(f"\n{result['instructions']}")
+        if result.get("message"):
+            print(f"\n{result['message']}")
         if result.get("error"):
             print(f"错误: {result['error']}")
     if result.get("report_path"):

@@ -12,7 +12,8 @@
 
 备选策略：
 - --search-strategy group: 分组二分搜索（按功能分 5 组，组内二分定位）
-- --search-strategy linear: 线性逐个搜索
+- --search-strategy linear: 线性逐个搜索（独立测试每个算子的影响）
+- --search-strategy elimination: 逐删策略（累积禁用算子直到达标）
 
 其他功能：
 - --runtime-ops: 只搜索运行时实际调用的算子
@@ -324,7 +325,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         plugin_mode: 是否为 plugin 场景（使用环境变量控制）
         oot_ops: 自定义 OOT 算子列表（默认使用 OOT_OPERATORS）
         reverse: 反向搜索（从全禁用逐步启用），适合大量注册算子但少量运行时调用的场景
-        search_strategy: 搜索策略 "progressive"（先验预筛+渐进排除）| "group"（分组二分）| "linear"
+        search_strategy: 搜索策略 "progressive"（先验预筛+渐进排除）| "group"（分组二分）| "linear" | "elimination"（逐删）
         native_benchmark: native benchmark JSON 文件路径（可选，用于提取双指标基线）
     """
     with open(ops_file, "r", encoding="utf-8") as f:
@@ -393,9 +394,23 @@ def init_optimization(ops_file: str, native_throughput: float,
             "cumulative_excluded": [],  # 当前累积排除的算子
         }
 
+    # Elimination 策略：逐个累积禁用直到达标
+    elimination_state = {}
+    if search_strategy == "elimination":
+        if reverse:
+            print("WARNING: elimination 策略不支持反向搜索，忽略 --reverse")
+            reverse = False
+        elimination_state = {
+            "phase": "testing",       # testing | done
+            "current_idx": 0,         # 当前测试到第几个算子
+            "cumulative_disabled": [], # 已累积禁用的算子
+        }
+
     # 确定 search_mode
     if search_strategy == "progressive":
         search_mode = "progressive"
+    elif search_strategy == "elimination":
+        search_mode = "elimination"
     elif search_strategy == "group" and group_search:
         search_mode = "group"
     else:
@@ -445,6 +460,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         "use_whitelist": _supports_whitelist(),
         "group_state": group_state,
         "progressive_state": progressive_state,
+        "elimination_state": elimination_state,
         "groups": groups,
         "current_step": 0,
         "current_op": "",
@@ -457,6 +473,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         "progressive": "先验预筛+渐进排除",
         "group": "分组二分",
         "linear": "线性",
+        "elimination": "逐删",
     }
     direction_label = "反向（全禁用→逐步启用）" if reverse else "正向（全启用→逐步禁用）"
     print(f"优化已初始化: {len(all_ops)} 个算子, 搜索范围 {len(search_ops)} 个")
@@ -845,6 +862,44 @@ def get_next_action_linear(state: Dict[str, Any], state_path: Optional[str] = No
     }
 
 
+def get_next_action_elimination(state, state_path=None):
+    """逐删策略：累积禁用算子直到达标"""
+    es = state.get("elimination_state", {})
+    search_ops = state.get("search_ops", state["all_ops"])
+    idx = es.get("current_idx", 0)
+    cumulative = list(es.get("cumulative_disabled", []))
+
+    if idx >= len(search_ops):
+        state["status"] = "failed"
+        state["completed_at"] = datetime.now().isoformat()
+        _compute_final_lists(state, state.get("disabled_ops", []))
+        save_state(state, state_path)
+        return {
+            "action": "failed",
+            "message": f"所有 {len(search_ops)} 个算子均已禁用，仍未达标",
+        }
+
+    current_op = search_ops[idx]
+    new_cumulative = cumulative + [current_op]
+
+    # 已有的 disabled_ops + 本轮累积禁用
+    test_disabled = sorted(set(state["disabled_ops"]) | set(new_cumulative))
+    test_enabled = sorted(set(search_ops) - set(new_cumulative))
+
+    step = state.get("current_step", 0)
+
+    return {
+        "action": "test_elimination",
+        "op": current_op,
+        "step": step + 1,
+        "total_steps": len(search_ops),
+        "cumulative_disabled": new_cumulative,
+        "test_enabled_ops": test_enabled,
+        "test_disabled_ops": test_disabled,
+        "message": f"累积禁用算子 '{current_op}' ({idx+1}/{len(search_ops)}, 已禁用 {len(cumulative)} 个)",
+    }
+
+
 def get_next_action(state_path: Optional[str] = None) -> Dict[str, Any]:
     """获取下一步操作指令（自动选择搜索模式和阶段）"""
     state = load_state(state_path)
@@ -869,6 +924,8 @@ def get_next_action(state_path: Optional[str] = None) -> Dict[str, Any]:
         save_state(state, state_path)
         if search_mode == "progressive":
             return get_next_action_progressive(state, state_path)
+        elif search_mode == "elimination":
+            return get_next_action_elimination(state, state_path)
         return get_next_action_group(state, state_path)
 
     # progressive / group / linear 阶段
@@ -881,6 +938,8 @@ def get_next_action(state_path: Optional[str] = None) -> Dict[str, Any]:
             action = get_next_action_group_reverse(state, state_path)
         else:
             action = get_next_action_group(state, state_path)
+    elif search_mode == "elimination":
+        action = get_next_action_elimination(state, state_path)
     else:
         action = get_next_action_linear(state, state_path)
 
@@ -1051,6 +1110,8 @@ def update_result(op_name: str, throughput: Optional[float] = None,
             _update_group_result_reverse(state, op_name, ratio, target_ratio, log_entry)
         else:
             _update_group_result(state, op_name, ratio, target_ratio, log_entry)
+    elif search_mode == "elimination":
+        _update_elimination_result(state, op_name, ratio, target_ratio, log_entry)
     else:
         _update_linear_result(state, op_name, ratio, target_ratio, log_entry)
 
@@ -1318,6 +1379,49 @@ def _update_linear_result(state: Dict[str, Any], op_name: str,
     state["current_step"] += 1
 
 
+def _update_elimination_result(state, op_name, ratio, target_ratio, log_entry):
+    """逐删策略结果更新：累积禁用，达标即停"""
+    es = state.get("elimination_state", {})
+    cumulative = list(es.get("cumulative_disabled", []))
+
+    # 无论达标与否，当前算子都加入累积禁用列表（逐删语义）
+    if op_name not in cumulative:
+        cumulative.append(op_name)
+    es["cumulative_disabled"] = cumulative
+
+    # 更新 enabled_ops / disabled_ops 反映累积禁用
+    if op_name in state["enabled_ops"]:
+        state["enabled_ops"].remove(op_name)
+    if op_name not in state["disabled_ops"]:
+        state["disabled_ops"].append(op_name)
+
+    if ratio >= target_ratio:
+        # 达标：停止搜索
+        log_entry["decision"] = "elimination_done"
+        log_entry["reason"] = f"累积禁用 {len(cumulative)} 个算子后达标 {ratio*100:.1f}% >= {target_ratio*100:.0f}%"
+        es["phase"] = "done"
+        state["status"] = "completed"
+        state["completed_at"] = datetime.now().isoformat()
+        _compute_final_lists(state, state.get("disabled_ops", []))
+        print(f"  [elimination] 达标! 累积禁用 {len(cumulative)} 个算子, ratio {ratio*100:.1f}% >= {target_ratio*100:.0f}%")
+    else:
+        # 不达标：继续禁用下一个
+        log_entry["decision"] = "elimination_continue"
+        log_entry["reason"] = f"累积禁用 {len(cumulative)} 个仍不达标 {ratio*100:.1f}% < {target_ratio*100:.0f}%"
+        es["current_idx"] = es.get("current_idx", 0) + 1
+        search_ops = state.get("search_ops", state["all_ops"])
+        if es["current_idx"] >= len(search_ops):
+            state["status"] = "failed"
+            state["completed_at"] = datetime.now().isoformat()
+            _compute_final_lists(state, state.get("disabled_ops", []))
+            print(f"  [elimination] 失败: 所有 {len(search_ops)} 个算子均已禁用，仍未达标")
+        else:
+            print(f"  [elimination] 继续: 已禁用 {len(cumulative)} 个, ratio {ratio*100:.1f}% < {target_ratio*100:.0f}%")
+
+    state["elimination_state"] = es
+    state["current_step"] += 1
+
+
 # =============================================================================
 # 算子名映射
 # =============================================================================
@@ -1445,6 +1549,18 @@ def generate_report(state_path: Optional[str] = None) -> str:
         report.append(f"  累计排除: {len(ps.get('cumulative_excluded', []))} 个算子")
         report.append("")
 
+    # 逐删策略结果
+    es = state.get("elimination_state", {})
+    if es and es.get("cumulative_disabled"):
+        report.append("逐删策略结果:")
+        cumulative = es["cumulative_disabled"]
+        report.append(f"  累积禁用: {len(cumulative)} 个算子")
+        report.append(f"  结果: {'达标' if es.get('phase') == 'done' else '未达标'}")
+        report.append(f"  禁用顺序:")
+        for i, op in enumerate(cumulative):
+            report.append(f"    {i+1}. {op}")
+        report.append("")
+
     if state["disabled_ops"]:
         report.append("禁用的算子:")
         for op in sorted(state["disabled_ops"]):
@@ -1488,8 +1604,8 @@ def main():
     init_parser.add_argument("--plugin-mode", action="store_true", help="Plugin 模式（使用环境变量控制，含 OOT 搜索）")
     init_parser.add_argument("--oot-ops", help="自定义 OOT 算子列表（逗号分隔，默认使用内置列表）")
     init_parser.add_argument("--reverse", action="store_true", help="反向搜索（从全禁用逐步启用，适合大量算子注册干扰 dispatch 的场景）")
-    init_parser.add_argument("--search-strategy", choices=["progressive", "group", "linear"],
-                             default="progressive", help="搜索策略: progressive(先验预筛+渐进排除) | group(分组二分) | linear(线性)")
+    init_parser.add_argument("--search-strategy", choices=["progressive", "group", "linear", "elimination"],
+                             default="progressive", help="搜索策略: progressive(先验预筛+渐进排除) | group(分组二分) | linear(线性) | elimination(逐删)")
     init_parser.add_argument("--native-benchmark", help="native benchmark JSON 文件路径（用于提取双指标基线）")
     init_parser.add_argument("--state-path", help="状态文件路径")
 

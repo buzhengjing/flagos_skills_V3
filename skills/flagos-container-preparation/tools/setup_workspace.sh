@@ -11,7 +11,7 @@
 set -euo pipefail
 
 CONTAINER="${1:?用法: $0 <container_name> [model_path]}"
-MODEL_PATH="${2:-}"
+MODEL_NAME="${2:-}"
 
 # 项目根目录（此脚本所在位置的上三级）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,7 +22,7 @@ echo "FlagOS 工作区初始化"
 echo "=========================================="
 echo "  容器: ${CONTAINER}"
 echo "  项目: ${PROJECT_ROOT}"
-[ -n "${MODEL_PATH}" ] && echo "  模型: ${MODEL_PATH}"
+[ -n "${MODEL_NAME}" ] && echo "  模型: ${MODEL_NAME}"
 echo ""
 
 # 0. 检测 /flagos-workspace 挂载状态
@@ -87,7 +87,7 @@ fi
 echo "[1/6] 检查并归档历史数据..."
 HAS_HISTORY=$(docker exec "${CONTAINER}" bash -c "
     found=0
-    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs; do
+    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs /flagos-workspace/config /flagos-workspace/output; do
         if [ -d \"\$d\" ] && [ \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
             found=1; break
         fi
@@ -101,7 +101,7 @@ if [ "${HAS_HISTORY}" = "1" ]; then
     docker exec "${CONTAINER}" bash -c "
         ARCHIVE_DIR=/flagos-workspace/archive/${ARCHIVE_TS}
         mkdir -p \"\${ARCHIVE_DIR}\"
-        for d in results traces logs; do
+        for d in results traces logs config output; do
             if [ -d /flagos-workspace/\$d ] && [ \"\$(ls -A /flagos-workspace/\$d 2>/dev/null)\" ]; then
                 mv /flagos-workspace/\$d \"\${ARCHIVE_DIR}/\$d\"
             fi
@@ -111,19 +111,36 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         fi
     "
     echo "  容器内归档完成: /flagos-workspace/archive/${ARCHIVE_TS}/"
+
+    # 归档后重置：清理残留状态，避免历史数据污染新一轮运行
+    echo "  清理残留状态..."
+    docker exec "${CONTAINER}" bash -c "
+        # 清理残留的算子列表文件
+        rm -f /tmp/flaggems_enable_oplist.txt
+        rm -f /root/gems.txt
+
+        # 停止可能残留的 vllm/sglang 服务进程
+        pkill -f 'vllm.entrypoints' 2>/dev/null || true
+        pkill -f 'sglang' 2>/dev/null || true
+    "
+    # 重置 context.yaml：从项目模板复制，确保与模板字段同步
+    docker cp "${PROJECT_ROOT}/shared/context.template.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
+    echo "  ✓ context.yaml 已重置（从模板复制）"
+    echo "  ✓ 残留算子列表已清理"
+    echo "  ✓ 残留服务进程已清理"
 else
     echo "  无历史数据，跳过归档"
 fi
 
 # 1.5. 创建宿主机工作目录
-if [ -n "${MODEL_PATH}" ]; then
+if [ -n "${MODEL_NAME}" ]; then
     echo "[1.5/6] 创建宿主机工作目录..."
 
     # 归档宿主机历史数据
-    HOST_BASE="/data/flagos-workspace/${MODEL_PATH}"
+    HOST_BASE="/data/flagos-workspace/${MODEL_NAME}"
     if [ -d "${HOST_BASE}" ]; then
         HOST_HAS_HISTORY=0
-        for d in results traces logs; do
+        for d in results traces logs config; do
             if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                 HOST_HAS_HISTORY=1; break
             fi
@@ -132,11 +149,23 @@ if [ -n "${MODEL_PATH}" ]; then
             HOST_ARCHIVE_TS=${ARCHIVE_TS:-$(date +%Y%m%d_%H%M%S)}
             HOST_ARCHIVE="${HOST_BASE}/archive/${HOST_ARCHIVE_TS}"
             mkdir -p "${HOST_ARCHIVE}"
-            for d in results traces logs; do
+            for d in results traces config; do
                 if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                     mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
                 fi
             done
+            # logs 目录不整体移动：run_pipeline.sh 在启动时已完成宿主机 logs 归档，
+            # 此时 logs/ 中只有当前会话的活跃文件（tee 正在写入），不能移动。
+            # 但归档 logs 中已有的非活跃文件（上一轮残留）
+            if [ -d "${HOST_BASE}/logs" ] && [ "$(ls -A "${HOST_BASE}/logs" 2>/dev/null)" ]; then
+                mkdir -p "${HOST_ARCHIVE}/logs"
+                find "${HOST_BASE}/logs" -maxdepth 1 -type f ! -name "*.log" -newer "${HOST_BASE}/logs" -prune -o -type f -print 2>/dev/null | while read -r f; do
+                    # 跳过正在被 tee 写入的当前会话日志（通过 fuser 检测）
+                    if ! fuser "$f" >/dev/null 2>&1; then
+                        mv "$f" "${HOST_ARCHIVE}/logs/" 2>/dev/null || true
+                    fi
+                done
+            fi
             echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
         fi
     fi
@@ -169,6 +198,8 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/toggle_flaggems.py:scripts/toggle_flaggems.py"
     # 服务就绪检测
     "skills/flagos-service-startup/tools/wait_for_service.sh:scripts/wait_for_service.sh"
+    # 服务启动（供 operator_search.py 调用）
+    "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
     # TP 推算
     "skills/flagos-service-startup/tools/calc_tp_size.py:scripts/calc_tp_size.py"
     # 性能测试
@@ -194,6 +225,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
+    # Plugin 安装
+    "skills/flagos-plugin-install/tools/install_plugin.py:scripts/install_plugin.py"
     # 问题自动提交
     "skills/flagos-issue-reporter/tools/issue_reporter.py:scripts/issue_reporter.py"
     # 日志分析
@@ -202,6 +235,10 @@ SCRIPT_MAP=(
     "skills/flagos-operator-replacement/tools/ops_constants.py:scripts/ops_constants.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
+    # 错误/检查点持久化
+    "shared/error_writer.py:scripts/error_writer.py"
+    # 故障诊断工具
+    "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do
@@ -235,14 +272,20 @@ fi
 
 echo "  共复制 ${SCRIPTS_COPIED} 个脚本"
 
-# 3.5. 确保 context.yaml 存在
-if ! docker exec "${CONTAINER}" test -f /flagos-workspace/shared/context.yaml 2>/dev/null; then
+# 3.5. 从模板初始化容器内 context.yaml（每个容器独立，避免多任务冲突）
+# 每次都从模板重新初始化，确保干净的初始状态
+TEMPLATE_FILE="${PROJECT_ROOT}/shared/context.template.yaml"
+if [ -f "${TEMPLATE_FILE}" ]; then
+    docker cp "${TEMPLATE_FILE}" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
+    echo "  ✓ shared/context.yaml (从 context.template.yaml 初始化)"
+else
+    # 兼容旧版：模板文件不存在时尝试旧路径
     if [ -f "${PROJECT_ROOT}/shared/context.yaml" ]; then
         docker cp "${PROJECT_ROOT}/shared/context.yaml" "${CONTAINER}:/flagos-workspace/shared/context.yaml"
-        echo "  ✓ shared/context.yaml (从模板创建)"
+        echo "  ⚠ shared/context.yaml (从旧 context.yaml 复制，请迁移到 context.template.yaml)"
     else
         docker exec "${CONTAINER}" bash -c "echo '# FlagOS context' > /flagos-workspace/shared/context.yaml"
-        echo "  ✓ shared/context.yaml (空文件)"
+        echo "  ⚠ shared/context.yaml (空文件，未找到模板)"
     fi
 fi
 
@@ -252,6 +295,22 @@ docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
+
+# 4.5. 写入 Token 到容器 .env（供脚本 fallback 读取）
+echo "[4.5/6] 写入 Token 到容器 .env..."
+ENV_LINES=""
+for VAR_NAME in GITHUB_TOKEN MODELSCOPE_TOKEN HF_TOKEN HARBOR_USER HARBOR_PASSWORD; do
+    VAR_VAL="${!VAR_NAME:-}"
+    if [ -n "${VAR_VAL}" ]; then
+        ENV_LINES="${ENV_LINES}${VAR_NAME}=${VAR_VAL}\n"
+    fi
+done
+if [ -n "${ENV_LINES}" ]; then
+    docker exec "${CONTAINER}" bash -c "printf '${ENV_LINES}' > /flagos-workspace/.env && chmod 600 /flagos-workspace/.env"
+    echo "  ✓ /flagos-workspace/.env 已写入 ($(echo -e "${ENV_LINES}" | grep -c '=') 个 token)"
+else
+    echo "  ⚠ 宿主机未设置任何 token 环境变量，跳过 .env 写入"
+fi
 
 # 5. 验证
 echo "[5/6] 验证部署..."
