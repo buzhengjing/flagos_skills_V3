@@ -180,9 +180,19 @@ docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/resu
 2. 自动发现算子列表：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py discover \
      --save-ops /flagos-workspace/results/ops_list.json"
+2.5. 收集 FlagGems 完整注册算子列表（确保不在 oplist 中的算子也被显式禁用）：
+   docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+   import json, flag_gems
+   flag_gems.enable()
+   ops = list(flag_gems.all_registered_ops()) if hasattr(flag_gems, 'all_registered_ops') else list(flag_gems.all_ops())
+   with open('/flagos-workspace/results/registered_ops.json', 'w') as f:
+       json.dump(sorted(ops), f, indent=2)
+   print(f'已记录 {len(ops)} 个注册算子')
+   \""
 3. 初始化优化器（elimination 逐删策略）：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py init \
      --ops-file /flagos-workspace/results/ops_list.json \
+     --registered-ops /flagos-workspace/results/registered_ops.json \
      --native-throughput <V1 TPS> \
      --native-benchmark /flagos-workspace/results/native_performance.json \
      --target-ratio 0.8 \
@@ -939,6 +949,7 @@ GPU: <gpu_count>x <gpu_type>
    - 每次 FlagGems 重新启动都会**重新生成**此文件，内容反映 blacklist 等配置生效后的实际结果
    - 如果启动模式为 native 但文件残留 → 是上次 flagos 的旧数据，不可作为当前算子列表
    - 所有后续操作（算子替换、搜索、性能对比、报告生成）中的"当前算子列表"均以此文件为准
+   - **不在此文件中的算子必须被显式关闭**。算子调优 init 阶段通过 `--registered-ops` 传入 FlagGems 完整注册算子列表，黑名单计算以注册表为基准，确保注册表中有但 oplist 中没有的算子也被加入 blacklist（无论 plugin 还是非 plugin 场景）
 9. **容器内 Python 必须用 conda 环境**。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=/opt/conda/bin:$PATH` 前缀，禁止依赖容器默认 `/usr/bin/python3`（系统 Python 缺少 torch/requests/yaml 等包）
 10. **宿主机 mkdir/ls 严禁使用花括号展开（这是硬性限制，违反必定失败）**。`mkdir -p /data/flagos-workspace/xxx/{a,b,c}` 和 `ls /path/{a,b}` 会被 sandbox 拦截导致整个命令失败。必须逐条执行，例如：`mkdir -p /data/flagos-workspace/xxx/a && mkdir -p /data/flagos-workspace/xxx/b && mkdir -p /data/flagos-workspace/xxx/c`，或通过 `setup_workspace.sh` 的第二参数统一创建宿主机目录。**注意**：容器内 `docker exec bash -c "mkdir -p {a,b,c}"` 不受此限制，花括号展开仅在宿主机 Bash 工具中被拦截
 11. **流程不可中途终止**。精度不达标、性能不达标都不是终止流程的理由。编排层必须：
@@ -966,8 +977,8 @@ GPU: <gpu_count>x <gpu_type>
 23. **elimination 策略不限轮次上限**（由算子总数决定），但每轮 benchmark 使用 quick 模式（4k_input_1k_output 并发 64）。达标即停，不继续优化
 24. **步骤5/7的 trace 文件独立**（`05_accuracy_tuning.json` / `07_performance_tuning.json`），不混入 `04_quick_accuracy.json` / `06_quick_performance.json`
 25. **Claude Code Bash 工具受沙箱限制，只能直接操作项目工作目录内的文件**。`/data/flagos-workspace/`、`/data/models/` 等外部路径的文件读写必须通过以下方式：
-    - **读取/写入容器内文件**：`docker exec $CONTAINER bash -c "..."`（容器内 `/flagos-workspace` = 宿主机 `/data/flagos-workspace`）
-    - **宿主机同步**：`docker cp $CONTAINER:/flagos-workspace/... /data/flagos-workspace/.../`
+    - **读取/写入容器内文件**：`docker exec $CONTAINER bash -c "..."`（容器内 `/flagos-workspace` = 宿主机 `/data/flagos-workspace/<model>`）
+    - **宿主机同步**：`docker cp $CONTAINER:/flagos-workspace/... /data/flagos-workspace/<model>/.../`
     - **宿主机目录创建**：由 `run_pipeline.sh` 和 `setup_workspace.sh` 预创建，Claude 不需要自行 mkdir
     - **禁止**：直接 `mkdir -p /data/...`、`ls /data/models/...`、`cat > /data/.../file` 等宿主机路径操作（会被沙箱拦截）
     - **唯一例外**：`docker cp` 命令本身在宿主机执行，但其目标路径已在权限白名单中

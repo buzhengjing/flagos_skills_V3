@@ -312,7 +312,8 @@ def init_optimization(ops_file: str, native_throughput: float,
                       reverse: bool = False,
                       search_strategy: str = "progressive",
                       native_benchmark: Optional[str] = None,
-                      state_path: Optional[str] = None) -> Dict[str, Any]:
+                      state_path: Optional[str] = None,
+                      registered_ops_file: Optional[str] = None) -> Dict[str, Any]:
     """
     初始化优化状态。
 
@@ -327,6 +328,7 @@ def init_optimization(ops_file: str, native_throughput: float,
         reverse: 反向搜索（从全禁用逐步启用），适合大量注册算子但少量运行时调用的场景
         search_strategy: 搜索策略 "progressive"（先验预筛+渐进排除）| "group"（分组二分）| "linear" | "elimination"（逐删）
         native_benchmark: native benchmark JSON 文件路径（可选，用于提取双指标基线）
+        registered_ops_file: FlagGems 完整注册算子列表 JSON（可选，用于黑名单模式确保覆盖所有算子）
     """
     with open(ops_file, "r", encoding="utf-8") as f:
         ops_data = json.load(f)
@@ -340,6 +342,24 @@ def init_optimization(ops_file: str, native_throughput: float,
         sys.exit(1)
 
     all_ops = sorted(all_ops)
+
+    # 收集完整注册表（用于黑名单模式确保不在 oplist 中的算子也被显式关闭）
+    registered_ops = all_ops  # 默认与 oplist 相同
+    if registered_ops_file:
+        try:
+            with open(registered_ops_file, "r", encoding="utf-8") as f:
+                reg_data = json.load(f)
+            if isinstance(reg_data, list):
+                registered_ops = sorted(reg_data)
+            elif isinstance(reg_data, dict):
+                registered_ops = sorted(reg_data.get("ops", reg_data.get("registered_ops", [])))
+            extra = set(registered_ops) - set(all_ops)
+            if extra:
+                print(f"完整注册表: {len(registered_ops)} 个算子（oplist: {len(all_ops)} 个，额外 {len(extra)} 个将被显式禁用）")
+            else:
+                print(f"完整注册表: {len(registered_ops)} 个算子（与 oplist 一致）")
+        except Exception as e:
+            print(f"WARNING: 无法加载注册表文件 {registered_ops_file}: {e}，使用 oplist 作为注册表")
 
     # 确定搜索范围
     search_ops = all_ops
@@ -440,6 +460,7 @@ def init_optimization(ops_file: str, native_throughput: float,
 
     state = {
         "all_ops": all_ops,
+        "registered_ops": registered_ops,
         "search_ops": search_ops,
         "enabled_ops": init_enabled,
         "disabled_ops": init_disabled,
@@ -971,10 +992,11 @@ def get_next_action(state_path: Optional[str] = None) -> Dict[str, Any]:
 # =============================================================================
 
 def _compute_full_blacklist(state: Dict[str, Any], search_disabled: List[str]) -> List[str]:
-    """计算完整 flagos 黑名单 = 搜索排除 + (all_ops - search_ops)"""
-    all_ops = set(state.get("all_ops", []))
+    """计算完整 flagos 黑名单 = 搜索排除 + 注册表中不在 search_ops 的算子"""
+    registered_ops = set(state.get("registered_ops", state.get("all_ops", [])))
     search_ops = set(state.get("search_ops", state.get("all_ops", [])))
-    unsearched = all_ops - search_ops  # 注册表中有但 txt 中没有的算子
+    # 注册表中有但不在搜索范围的算子 = 必须显式禁用
+    unsearched = registered_ops - search_ops
     return sorted(set(search_disabled) | unsearched)
 
 
@@ -1607,6 +1629,7 @@ def main():
     init_parser.add_argument("--search-strategy", choices=["progressive", "group", "linear", "elimination"],
                              default="progressive", help="搜索策略: progressive(先验预筛+渐进排除) | group(分组二分) | linear(线性) | elimination(逐删)")
     init_parser.add_argument("--native-benchmark", help="native benchmark JSON 文件路径（用于提取双指标基线）")
+    init_parser.add_argument("--registered-ops", help="FlagGems 完整注册算子列表 JSON（用于黑名单模式确保覆盖所有算子）")
     init_parser.add_argument("--state-path", help="状态文件路径")
 
     # next 子命令
@@ -1654,6 +1677,7 @@ def main():
             search_strategy=args.search_strategy,
             native_benchmark=args.native_benchmark,
             state_path=args.state_path,
+            registered_ops_file=args.registered_ops,
         )
 
     elif args.command == "next":
