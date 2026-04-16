@@ -87,7 +87,7 @@ fi
 echo "[1/6] 检查并归档历史数据..."
 HAS_HISTORY=$(docker exec "${CONTAINER}" bash -c "
     found=0
-    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs /flagos-workspace/config /flagos-workspace/output; do
+    for d in /flagos-workspace/results /flagos-workspace/traces /flagos-workspace/logs /flagos-workspace/config /flagos-workspace/output /flagos-workspace/reports /flagos-workspace/eval; do
         if [ -d \"\$d\" ] && [ \"\$(ls -A \"\$d\" 2>/dev/null)\" ]; then
             found=1; break
         fi
@@ -101,7 +101,7 @@ if [ "${HAS_HISTORY}" = "1" ]; then
     docker exec "${CONTAINER}" bash -c "
         ARCHIVE_DIR=/flagos-workspace/archive/${ARCHIVE_TS}
         mkdir -p \"\${ARCHIVE_DIR}\"
-        for d in results traces logs config output; do
+        for d in results traces logs config output reports eval; do
             if [ -d /flagos-workspace/\$d ] && [ \"\$(ls -A /flagos-workspace/\$d 2>/dev/null)\" ]; then
                 mv /flagos-workspace/\$d \"\${ARCHIVE_DIR}/\$d\"
             fi
@@ -149,7 +149,7 @@ if [ -n "${MODEL_NAME}" ]; then
             HOST_ARCHIVE_TS=${ARCHIVE_TS:-$(date +%Y%m%d_%H%M%S)}
             HOST_ARCHIVE="${HOST_BASE}/archive/${HOST_ARCHIVE_TS}"
             mkdir -p "${HOST_ARCHIVE}"
-            for d in results traces config; do
+            for d in results traces config reports eval; do
                 if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                     mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
                 fi
@@ -241,6 +241,8 @@ SCRIPT_MAP=(
     "shared/error_writer.py:scripts/error_writer.py"
     # 故障诊断工具
     "skills/flagos-log-analyzer/tools/diagnose_failure.py:scripts/diagnose_failure.py"
+    # 报告生成工具
+    "shared/generate_report.py:scripts/generate_report.py"
 )
 
 for entry in "${SCRIPT_MAP[@]}"; do
