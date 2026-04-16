@@ -40,6 +40,8 @@ provides:
 
 **核心设计**：FlagGems / vllm-plugin-FL 处于持续迭代中，本 skill 不硬编码任何特定 API，而是根据 `pre-service-inspection` 探测到的 `flaggems_capabilities` 自动选择最优操作方式，逐层降级保证稳定性。
 
+**强制约束**：不在 `flaggems_enable_oplist.txt` 中的算子必须被显式关闭，无论 plugin 还是非 plugin 场景。init 阶段通过 `--registered-ops` 传入 FlagGems 完整注册算子列表，黑名单计算时以注册表为基准，确保注册表中有但 oplist 中没有的算子也被加入 blacklist。
+
 ---
 
 # 上下文集成

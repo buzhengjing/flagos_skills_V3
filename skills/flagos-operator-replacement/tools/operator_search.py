@@ -216,18 +216,21 @@ def apply_operator_config(action: Dict[str, Any],
                           plugin_mode: bool = False,
                           capabilities: Optional[List[str]] = None,
                           gems_txt_path: Optional[str] = None,
-                          all_ops: Optional[List[str]] = None) -> Any:
+                          all_ops: Optional[List[str]] = None,
+                          registered_ops: Optional[List[str]] = None) -> Any:
     """
     应用算子配置。
 
     Plugin 场景：从 action 的 env_vars 构建内联环境变量字符串，返回 env_inline 字符串
     非 plugin 场景：通过 Layer 1-4 策略控制，返回 True/False
     all_ops: 全量算子列表，用于 Layer 1/3 黑名单模式补全 unsearched 算子
+    registered_ops: FlagGems 完整注册算子列表，用于黑名单模式确保覆盖所有算子
     """
     if plugin_mode:
         return _apply_plugin_config(action, apply_config_script)
     else:
-        return _apply_non_plugin_config(action, capabilities, gems_txt_path, all_ops=all_ops)
+        return _apply_non_plugin_config(action, capabilities, gems_txt_path,
+                                        all_ops=all_ops, registered_ops=registered_ops)
 
 
 def _apply_plugin_config(action: Dict[str, Any],
@@ -257,16 +260,17 @@ def _apply_plugin_config(action: Dict[str, Any],
 def _apply_non_plugin_config(action: Dict[str, Any],
                               capabilities: Optional[List[str]],
                               gems_txt_path: Optional[str],
-                              all_ops: Optional[List[str]] = None) -> bool:
+                              all_ops: Optional[List[str]] = None,
+                              registered_ops: Optional[List[str]] = None) -> bool:
     """非 plugin 场景：Layer 1-4 分层降级"""
     test_enabled = action.get("test_enabled_ops", [])
     test_disabled = action.get("test_disabled_ops", [])
     caps = capabilities or []
 
-    # Layer 1/3 使用黑名单模式，需要包含 unsearched 算子（all_ops - search_ops 中未搜索的）
-    # 通过 all_ops - test_enabled 反推完整禁用列表
-    if all_ops:
-        full_disabled = sorted(set(all_ops) - set(test_enabled))
+    # 用注册表（而非 oplist）计算完整禁用列表，确保不在 oplist 中的算子也被显式关闭
+    base_ops = registered_ops or all_ops
+    if base_ops:
+        full_disabled = sorted(set(base_ops) - set(test_enabled))
     else:
         full_disabled = test_disabled
 
@@ -604,6 +608,7 @@ def run_search_step(state_path: str, perf_config: str,
         capabilities=capabilities,
         gems_txt_path=gems_txt_path,
         all_ops=state.get("all_ops"),
+        registered_ops=state.get("registered_ops"),
     )
     step_timing["config_seconds"] = round(time.time() - t0, 1)
     # plugin 模式返回 env_inline 字符串或 None，非 plugin 返回 True/False
