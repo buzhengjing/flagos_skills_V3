@@ -223,6 +223,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
+    # Plugin 安装
+    "skills/flagos-plugin-install/tools/install_plugin.py:scripts/install_plugin.py"
     # 问题自动提交
     "skills/flagos-issue-reporter/tools/issue_reporter.py:scripts/issue_reporter.py"
     # 日志分析

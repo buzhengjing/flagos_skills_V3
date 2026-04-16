@@ -133,6 +133,17 @@ inspection:
   env_vars: {}              # flag 相关环境变量 (USE_FLAGGEMS, USE_FLAGOS 等)
 
 # ============================================================================
+# Plugin 安装信息 (由 plugin-install 写入)
+# ============================================================================
+plugin_install:
+  installed: false
+  version: ""
+  repo_url: ""
+  install_method: ""        # source | editable
+  success: false
+  timestamp: ""
+
+# ============================================================================
 # Plugin 控制信息 (由 pre-service-inspection 写入)
 # ============================================================================
 plugin_control:

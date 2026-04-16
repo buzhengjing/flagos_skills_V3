@@ -1,6 +1,6 @@
 ---
 name: flagos-issue-reporter
-description: FlagGems/FlagTree 问题自动归因与 GitHub issue 提交，支持算子崩溃、精度/性能不佳、框架报错五种场景
+description: FlagGems/FlagTree/Plugin 问题自动归因与 GitHub issue 提交，支持算子崩溃、精度/性能不佳、框架报错六种场景
 version: 2.0.0
 triggers:
   - 提交 issue
@@ -69,15 +69,16 @@ issues:
 
 ---
 
-# 五种 Issue 类型
+# 六种 Issue 类型
 
-| type | 触发场景 | 标签 |
-|------|---------|------|
-| `operator-crash` | 算子导致服务崩溃（启动失败或推理中崩溃） | `bug` |
-| `accuracy-zero` | 精度结果为零或 < 5%（严重异常） | `bug` |
-| `accuracy-degraded` | 精度调优流程筛出的精度不佳算子 | `bug` |
-| `performance-degraded` | 性能调优流程筛出的性能不佳算子 | `bug` |
-| `flagtree-error` | FlagTree/Triton 框架报错 | `bug` |
+| type | 触发场景 | 标签 | 目标仓库 |
+|------|---------|------|---------|
+| `operator-crash` | 算子导致服务崩溃（启动失败或推理中崩溃） | `bug` | flagos-ai/FlagGems |
+| `accuracy-zero` | 精度结果为零或 < 5%（严重异常） | `bug` | flagos-ai/FlagGems |
+| `accuracy-degraded` | 精度调优流程筛出的精度不佳算子 | `bug` | flagos-ai/FlagGems |
+| `performance-degraded` | 性能调优流程筛出的性能不佳算子 | `bug` | flagos-ai/FlagGems |
+| `flagtree-error` | FlagTree/Triton 框架报错 | `bug` | flagos-ai/FlagGems |
+| `plugin-error` | vllm-plugin-FL 框架报错 | `bug` | flagos-ai/vllm-plugin-FL |
 
 ---
 
@@ -162,6 +163,15 @@ python3 issue_reporter.py full \
     --flaggems-code-path <container内flaggems代码文件路径> \
     --gems-txt-path /root/gems.txt \
     --repo flagos-ai/FlagGems \
+    --output-dir /data/flagos-workspace/<model>/results/ \
+    --json
+
+# plugin 报错（提交到 vllm-plugin-FL 仓库）
+python3 issue_reporter.py full \
+    --type plugin-error \
+    --log-path /data/flagos-workspace/<model>/logs/startup_flagos.log \
+    --context-yaml /data/flagos-workspace/<model>/shared/context.yaml \
+    --repo flagos-ai/vllm-plugin-FL \
     --output-dir /data/flagos-workspace/<model>/results/ \
     --json
 ```
