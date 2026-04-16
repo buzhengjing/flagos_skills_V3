@@ -11,7 +11,7 @@ triggers:
   - 健康检查
 depends_on:
   - flagos-pre-service-inspection
-next_skill: flagos-performance-testing
+next_skill: flagos-eval-comprehensive
 provides:
   - service.cluster
   - service.external_ip

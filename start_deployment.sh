@@ -30,10 +30,11 @@ claude "
 1. container-preparation       → 容器准备（镜像/容器 + 本地权重检查 + 自动下载）
 2. pre-service-inspection      → 环境检测（判定 env_type + flaggems 控制方式）
 3. service-startup             → 启动服务（验证初始环境可用）
-4. eval-comprehensive          → 快速精度评测（V1 基线 → V2 精度 → 算子调优直到精度达标）
-5. performance-testing         → 快速性能评测（V1 基线 → V2 性能 → 算子调优直到性能达标）
-6. flagos-release (image)      → 打包镜像（commit → tag → push Harbor）
-7. flagos-release (publish)    → 上传权重发布（ModelScope + HuggingFace）
+4. eval-comprehensive          → 精度评测（V1 基线 → V2 精度 → 5% 阈值判定）
+5. operator-replacement        → [条件] 精度算子调优（偏差>5% 时分组排查，最多3轮）
+6. performance-testing         → 性能评测（V1 基线 → V2 性能 → 80% 阈值判定）
+7. operator-replacement        → [条件] 性能算子调优（ratio<80% 时逐个禁用直到达标）
+8. flagos-release              → 自动发布（打包 + 上传 → qualified 公开 / 不合格私有）
 → 报告整理收尾
 \`\`\`
 
@@ -41,7 +42,7 @@ claude "
 
 ## 自动化原则
 
-- 步骤1~5全自动执行，零交互
+- 步骤1~8全自动执行，零交互
 - 仅网络失败时需用户介入：
   - 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
   - 6/7打包发布凭证通过环境变量自动读取（Harbor 登录、MODELSCOPE_TOKEN、HF_TOKEN）

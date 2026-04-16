@@ -187,7 +187,7 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
      --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
      --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
      [--plugin-mode] \
-     --max-rounds 30"
+     --max-rounds 50"
    （elimination 策略逐个禁用，最坏情况 = 算子总数轮）
 5. 搜索完成后：应用最终配置 → 重启服务 → V3 验证 benchmark：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py \
@@ -892,10 +892,10 @@ GPU: <gpu_count>x <gpu_type>
   2环境检测:          XXm XXs
   3启服务:            XXm XXs
   4精度评测:          XXm XXs
-  7精度算子调优:      XXm XXs（如触发）
-  5性能评测:          XXm XXs
-  8性能算子调优:      XXm XXs（如触发）
-  6自动发布:          XXm XXs
+  5精度算子调优:      XXm XXs（如触发）
+  6性能评测:          XXm XXs
+  7性能算子调优:      XXm XXs（如触发）
+  8自动发布:          XXm XXs
 
 发布信息:
   Harbor 镜像: <full_harbor_tag>
