@@ -31,7 +31,7 @@ bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor
 | 上述不匹配，且 `docker inspect --type=container` 成功 | 容器模式 |
 | 以上均不匹配 | 镜像模式 |
 
-镜像模式下，步骤①会自动检测 GPU 厂商、选择对应 docker run 模板创建容器，容器名自动生成为 `<model_short_name>_flagos`。如同名容器已存在，追加时间戳 `_MMDD_HHMM` 创建新容器，禁止复用已有容器。
+镜像模式下，步骤1会自动检测 GPU 厂商、选择对应 docker run 模板创建容器，容器名自动生成为 `<model_short_name>_flagos`。如同名容器已存在，追加时间戳 `_MMDD_HHMM` 创建新容器，禁止复用已有容器。
 
 脚本自动使用 `--permission-mode auto` 配合 `settings.local.json` 白名单，全程无需手动确认（兼容 root 用户）。
 
@@ -94,11 +94,11 @@ claude --permission-mode auto
 3. 每个步骤开始前，Read execution_plan.md 中对应段落刷新记忆
 4. 每个步骤开始前，Read context.yaml 获取最新共享状态
 
-请严格按以下 6 步执行 FlagOS 全自动迁移流程。步骤①-⑤ 全自动执行，步骤间无需询问我。仅在⑥发布阶段如需 token 再来询问。
+请严格按以下 6 步执行 FlagOS 全自动迁移流程。步骤1-5 全自动执行，步骤间无需询问我。仅在6发布阶段如需 token 再来询问。
 
 **严格禁止**：不进行 V3 算子优化。精度或性能不达标时仅输出报告，不调用 operator_search.py / operator_optimizer.py / diagnose_ops.py 进行任何算子排查或优化。直接继续后续步骤。
 
-① 容器准备：
+1 容器准备：
    - 验证容器 {CONTAINER} 运行状态（docker inspect + docker start）
    - 搜索模型权重：python3 skills/flagos-container-preparation/tools/check_model_local.py --model "{MODEL}" --mode container --container {CONTAINER} --output-json
      - 容器内搜索 → 宿主机搜索+挂载检查 → 容器内自动下载（如需要）
@@ -107,7 +107,7 @@ claude --permission-mode auto
    - mkdir -p /data/flagos-logs/{MODEL}/ 创建全局 issue 日志目录
    - 写入 context.yaml + traces/01_container_preparation.json
 
-②-⑥ 同 run_pipeline.sh 中的步骤定义。
+2-6 同 run_pipeline.sh 中的步骤定义。
 ```
 
 ### 镜像模式
@@ -115,9 +115,9 @@ claude --permission-mode auto
 ```
 镜像: {IMAGE}，模型名: {MODEL}
 
-（同容器模式的规划阶段和步骤②-⑥，仅步骤①不同）
+（同容器模式的规划阶段和步骤2-6，仅步骤1不同）
 
-① 容器准备（从镜像创建）：
+1 容器准备（从镜像创建）：
    - 自动搜索宿主机模型权重（check_model_local.py --no-download --output-json）
    - 找到 → docker run 挂载该路径；未找到 → 容器创建后自动下载
    - 检测 GPU 厂商，选择 SKILL.md 中对应的 docker run 模板
@@ -128,7 +128,7 @@ claude --permission-mode auto
    - setup_workspace.sh 部署工具脚本
    - 写入 context.yaml（entry.type=new_container）+ traces
 
-②-⑥ 同容器模式。
+2-6 同容器模式。
 ```
 
 ---

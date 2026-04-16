@@ -388,12 +388,17 @@ def choose_download_path(mounts: list, model_name: str) -> str:
     """从容器挂载卷中选择最佳下载路径，避免写入 overlay。
 
     优先级: /data > /mnt > /nfs > /share，选中后拼接 models/<model_name>。
+    如果挂载点本身已经是模型专属目录（末段匹配模型名），直接使用，避免嵌套。
     无可用挂载卷时 fallback 到 /data/models/<model_name>。
     """
+    model_lower = model_name.lower()
     for prefix in PREFERRED_MOUNT_PREFIXES:
         for mount in mounts:
             dst = mount["destination"]
             if dst == prefix or dst.startswith(prefix + "/"):
+                # 挂载点末段已是模型名 → 直接用，避免 /data/models/X/models/X 嵌套
+                if os.path.basename(dst.rstrip("/")).lower() == model_lower:
+                    return dst
                 return os.path.join(dst, "models", model_name)
     return os.path.join(CONTAINER_DEFAULT_DOWNLOAD_DIR, model_name)
 
@@ -768,7 +773,11 @@ def main():
             model_id = args.model
 
         if model_id:
-            download_path = os.path.join(download_dir, parsed["model_name"])
+            # 避免嵌套：download_dir 末段已是模型名时直接用
+            if os.path.basename(download_dir.rstrip("/")).lower() == parsed["model_name"].lower():
+                download_path = download_dir
+            else:
+                download_path = os.path.join(download_dir, parsed["model_name"])
             dl_result = download_from_modelscope(model_id, download_path)
             output["download"] = dl_result
 

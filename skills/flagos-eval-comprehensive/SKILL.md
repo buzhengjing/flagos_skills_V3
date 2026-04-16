@@ -35,9 +35,9 @@ provides:
 
 | 模块 | 用途 | 场景 |
 |------|------|------|
-| **A — 本地快速评测** | GPQA Diamond 快速评测（fast_gpqa.py） | 步骤④快速精度评测（V1/V2） |
+| **A — 本地快速评测** | GPQA Diamond 快速评测（fast_gpqa.py） | 步骤4快速精度评测（V1/V2） |
 | **B — 远端 flageval 正式评测** | 远端 FlagRelease 平台，6 个数据集 | 独立调用（不参与主流程） |
-| **C — 精度对比（V1 vs V2）** | 对比两版评测结果，5% 阈值判定 | 步骤④中 V2 评测完成后自动执行 |
+| **C — 精度对比（V1 vs V2）** | 对比两版评测结果，5% 阈值判定 | 步骤4中 V2 评测完成后自动执行 |
 | **D — 错误处理与算子排查** | 服务端报错 → 算子替换 → 重启 → 重评 | 精度不达标或评测报错时 |
 
 ---
@@ -129,7 +129,7 @@ eval:
 - **自动适配所有模型**：自动检测 thinking model（Qwen3/QwQ/DeepSeek-R1/R2），设置对应的 temperature/filters
 - **自动 max_tokens**：查询 `/v1/models` 获取 `max_model_len`，thinking 模型 `max_tokens = max(max_model_len - 8192, 8192)` 不设上限 cap，标准模型 clamp 到 [4096, 32768]
 - **截断检测**：评测前发样题检查 `finish_reason`，如果为 `length` 自动翻倍 max_tokens（在 max_model_len 允许范围内）
-- **自动选并发**：三阶段探测 — ① 直接 API 调用测单条推理延迟（剥离框架开销）② 基于延迟 + thinking 特性估算候选并发 ③ 快速验证（每档 3 题并发测试，选吞吐最高且无错误的）
+- **自动选并发**：三阶段探测 — 1 直接 API 调用测单条推理延迟（剥离框架开销）2 基于延迟 + thinking 特性估算候选并发 3 快速验证（每档 3 题并发测试，选吞吐最高且无错误的）
 - **thinking 模型保守策略**：thinking 模型输出长度波动大，候选并发范围更保守（如延迟 ≤10s → [8,16,32]，而非 standard 的 [16,32,64]）
 
 ## 使用方式
@@ -217,9 +217,19 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
 
 ## 迁移流程中的用法
 
-步骤④（快速精度评测）使用模块 A + C + D，模块 B（远端 flageval 正式评测）为独立工作，不参与主流程。
+步骤4（快速精度评测）使用模块 A + C + D，模块 B（远端 flageval 正式评测）为独立工作，不参与主流程。
 
-**步骤④ — V1 (Native) 精度**（始终执行）：
+**步骤4 — V1 (Native) 精度**（始终执行）：
+
+1. 停止现有服务，释放 GPU 显存：
+```bash
+docker restart $CONTAINER
+sleep 5
+```
+
+2. 关闭 FlagGems（调用 service-startup skill 以 native 模式启动）
+
+3. 运行评测：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
@@ -227,13 +237,25 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
 docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_native.json
 ```
 
-**步骤④ — V2 (FlagGems) 精度**（始终执行）：
+4. **V1 评测完成后，必须停止服务释放 GPU**：
+```bash
+docker restart $CONTAINER
+sleep 5
+```
+
+**步骤4 — V2 (FlagGems) 精度**（始终执行）：
+
+1. 启用 FlagGems（调用 service-startup skill 以 flagos 模式启动）
+
+2. 运行评测：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 # 保存结果
 docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json
 ```
+
+**强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。
 
 **V2 评测完成后，自动进入模块 C（精度对比）。**
 
@@ -468,7 +490,7 @@ curl -X GET http://110.43.160.159:5050/evaluation_diffs \
 
 ## 触发时机
 
-步骤④（快速精度评测）中 V2 精度完成后，如果 V1 精度有结果，**自动执行对比**。
+步骤4（快速精度评测）中 V2 精度完成后，如果 V1 精度有结果，**自动执行对比**。
 
 ## 对比逻辑
 
@@ -547,13 +569,13 @@ IF deviation > threshold (5%):
     # 2. 设置状态
     workflow.accuracy_ok = false
 
-    # 3. 触发步骤⑦精度算子调优（不终止流程）
-    #    ⑦完成后再继续到步骤⑤性能评测
+    # 3. 触发步骤5精度算子调优（不终止流程）
+    #    5完成后再继续到步骤6性能评测
 
 ELSE:
     workflow.accuracy_ok = true
 
-→ accuracy_ok=false 时触发步骤⑦精度算子调优，⑦完成（或跳过）后继续步骤⑤性能评测
+→ accuracy_ok=false 时触发步骤5精度算子调优，5完成（或跳过）后继续步骤6性能评测
 ```
 
 **禁止行为**：偏差 > 5% 时终止流程。必须写入 issue log、标记 `accuracy_ok=false`，然后继续后续步骤，最终走到发布（私有发布）。
@@ -634,7 +656,7 @@ sleep 5
 
 **迭代控制**：
 - 每轮记录关闭了哪些算子
-- 最多迭代 3 轮，超限标记 `workflow.accuracy_ok: false` 进入步骤④
+- 最多迭代 3 轮，超限标记 `workflow.accuracy_ok: false` 进入步骤4
 - 每轮输出算子状态报告
 
 ### 精度问题日志写入

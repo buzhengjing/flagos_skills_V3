@@ -11,14 +11,14 @@ Usage:
     # 运行完整搜索循环（直到搜索完成或达到最大轮次）
     python operator_search.py run \
         --state-path /flagos-workspace/results/operator_config.json \
-        --perf-config /flagos-workspace/perf/config/perf_config.yaml \
+        --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
         --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
         --max-rounds 20
 
     # 只运行一轮搜索
     python operator_search.py step \
         --state-path /flagos-workspace/results/operator_config.json \
-        --perf-config /flagos-workspace/perf/config/perf_config.yaml \
+        --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
         --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh"
 
     # 查看当前状态
@@ -58,7 +58,7 @@ except ImportError:
 # =============================================================================
 
 DEFAULT_STATE_PATH = "/flagos-workspace/results/operator_config.json"
-DEFAULT_PERF_CONFIG = "/flagos-workspace/perf/config/perf_config.yaml"
+DEFAULT_PERF_CONFIG = "/flagos-workspace/scripts/config/perf_config.yaml"
 DEFAULT_TOGGLE_SCRIPT = "/flagos-workspace/scripts/toggle_flaggems.py"
 DEFAULT_BENCHMARK_SCRIPT = "/flagos-workspace/scripts/benchmark_runner.py"
 DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
@@ -67,6 +67,86 @@ DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
 SERVICE_STOP_CMD = "pkill -f 'vllm\\|sglang'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
+GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
+GPU_RELEASE_TIMEOUT = 30       # GPU 显存释放等待超时（秒）
+GPU_RELEASE_POLL_INTERVAL = 2  # 轮询间隔（秒）
+
+
+# =============================================================================
+# GPU 资源管理
+# =============================================================================
+
+def _parse_gpu_memory() -> List[Dict[str, float]]:
+    """解析 nvidia-smi 输出，返回每张 GPU 的显存信息"""
+    try:
+        result = subprocess.run(
+            "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
+            shell=True, capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return []
+        gpus = []
+        for line in result.stdout.strip().split('\n'):
+            parts = [p.strip() for p in line.split(',')]
+            if len(parts) >= 3:
+                try:
+                    gpus.append({
+                        "index": int(parts[0]),
+                        "used_mib": float(parts[1]),
+                        "total_mib": float(parts[2]),
+                        "free_ratio": 1.0 - float(parts[1]) / float(parts[2]) if float(parts[2]) > 0 else 0,
+                    })
+                except (ValueError, ZeroDivisionError):
+                    continue
+        return gpus
+    except Exception:
+        return []
+
+
+def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
+                            threshold: float = GPU_MEM_FREE_THRESHOLD) -> bool:
+    """
+    等待 GPU 显存释放。pkill 后进程退出需要时间释放显存。
+    返回 True 表示至少有 1 张 GPU 显存已释放，False 表示超时。
+    """
+    print(f"  等待 GPU 显存释放 (最多 {timeout}s)...")
+    elapsed = 0
+    while elapsed < timeout:
+        gpus = _parse_gpu_memory()
+        if not gpus:
+            print("  WARNING: 无法读取 GPU 信息，跳过显存检查")
+            return True
+        free_gpus = [g for g in gpus if g["free_ratio"] >= threshold]
+        if free_gpus:
+            print(f"  ✓ {len(free_gpus)} 张 GPU 显存已释放 "
+                  f"(如 GPU {free_gpus[0]['index']}: {free_gpus[0]['used_mib']:.0f}/{free_gpus[0]['total_mib']:.0f} MiB)")
+            return True
+        time.sleep(GPU_RELEASE_POLL_INTERVAL)
+        elapsed += GPU_RELEASE_POLL_INTERVAL
+    # 超时：打印当前状态
+    gpus = _parse_gpu_memory()
+    for g in gpus:
+        print(f"  GPU {g['index']}: {g['used_mib']:.0f}/{g['total_mib']:.0f} MiB ({g['free_ratio']*100:.1f}% free)")
+    return False
+
+
+def check_gpu_availability(required_gpus: int = 1,
+                           threshold: float = GPU_MEM_FREE_THRESHOLD) -> Dict[str, Any]:
+    """
+    检查是否有足够的空闲 GPU。
+    返回 {"available": bool, "free_gpus": [...], "message": str}
+    """
+    gpus = _parse_gpu_memory()
+    if not gpus:
+        return {"available": True, "free_gpus": [], "message": "无法读取 GPU 信息，假设可用"}
+    free_gpus = [g["index"] for g in gpus if g["free_ratio"] >= threshold]
+    available = len(free_gpus) >= required_gpus
+    return {
+        "available": available,
+        "free_gpus": free_gpus,
+        "total_gpus": len(gpus),
+        "message": f"{len(free_gpus)}/{len(gpus)} GPU 空闲" + ("" if available else f"，需要 {required_gpus} 张"),
+    }
 
 
 # =============================================================================
@@ -135,17 +215,19 @@ def apply_operator_config(action: Dict[str, Any],
                           apply_config_script: str = DEFAULT_APPLY_CONFIG_SCRIPT,
                           plugin_mode: bool = False,
                           capabilities: Optional[List[str]] = None,
-                          gems_txt_path: Optional[str] = None) -> Any:
+                          gems_txt_path: Optional[str] = None,
+                          all_ops: Optional[List[str]] = None) -> Any:
     """
     应用算子配置。
 
     Plugin 场景：从 action 的 env_vars 构建内联环境变量字符串，返回 env_inline 字符串
     非 plugin 场景：通过 Layer 1-4 策略控制，返回 True/False
+    all_ops: 全量算子列表，用于 Layer 1/3 黑名单模式补全 unsearched 算子
     """
     if plugin_mode:
         return _apply_plugin_config(action, apply_config_script)
     else:
-        return _apply_non_plugin_config(action, capabilities, gems_txt_path)
+        return _apply_non_plugin_config(action, capabilities, gems_txt_path, all_ops=all_ops)
 
 
 def _apply_plugin_config(action: Dict[str, Any],
@@ -174,18 +256,26 @@ def _apply_plugin_config(action: Dict[str, Any],
 
 def _apply_non_plugin_config(action: Dict[str, Any],
                               capabilities: Optional[List[str]],
-                              gems_txt_path: Optional[str]) -> bool:
+                              gems_txt_path: Optional[str],
+                              all_ops: Optional[List[str]] = None) -> bool:
     """非 plugin 场景：Layer 1-4 分层降级"""
     test_enabled = action.get("test_enabled_ops", [])
     test_disabled = action.get("test_disabled_ops", [])
     caps = capabilities or []
 
+    # Layer 1/3 使用黑名单模式，需要包含 unsearched 算子（all_ops - search_ops 中未搜索的）
+    # 通过 all_ops - test_enabled 反推完整禁用列表
+    if all_ops:
+        full_disabled = sorted(set(all_ops) - set(test_enabled))
+    else:
+        full_disabled = test_disabled
+
     if "yaml_config" in caps:
-        return _apply_yaml_exclude(test_disabled)
+        return _apply_yaml_exclude(full_disabled)
     elif "only_enable" in caps:
         return _apply_only_enable(test_enabled)
     elif "enable_unused" in caps:
-        return _apply_enable_unused(test_disabled)
+        return _apply_enable_unused(full_disabled)
     else:
         # Layer 4 兜底：写 txt 文件
         return _apply_txt_fallback(test_enabled, gems_txt_path)
@@ -268,7 +358,16 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     # 停止
     print("  停止服务...")
     run_cmd(stop_cmd, check=False)
-    time.sleep(5)
+    time.sleep(3)
+
+    # 等待 GPU 显存释放
+    if not wait_gpu_memory_release():
+        print("  WARNING: GPU 显存未完全释放，尝试强制清理...")
+        # 二次 pkill + 等待
+        run_cmd("pkill -9 -f 'vllm\\|sglang' 2>/dev/null", check=False)
+        time.sleep(5)
+        if not wait_gpu_memory_release(timeout=15):
+            print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
     # 启动（plugin 场景使用内联环境变量前缀）
     if env_inline:
@@ -497,12 +596,14 @@ def run_search_step(state_path: str, perf_config: str,
 
     # 2. 应用算子配置
     t0 = time.time()
+    state = load_json(state_path)
     config_result = apply_operator_config(
         action,
         apply_config_script=apply_config_script,
         plugin_mode=plugin_mode,
         capabilities=capabilities,
         gems_txt_path=gems_txt_path,
+        all_ops=state.get("all_ops"),
     )
     step_timing["config_seconds"] = round(time.time() - t0, 1)
     # plugin 模式返回 env_inline 字符串或 None，非 plugin 返回 True/False
@@ -621,6 +722,28 @@ def run_full_search(state_path: str, perf_config: str,
         print(f"\n{'=' * 60}")
         print(f"第 {round_num}/{max_rounds} 轮")
         print(f"{'=' * 60}")
+
+        # 每轮开始前检查 GPU 可用性
+        gpu_check = check_gpu_availability(required_gpus=1)
+        if not gpu_check["available"]:
+            print(f"  ⚠ GPU 不足: {gpu_check['message']}，等待 10s 后重试...")
+            time.sleep(10)
+            gpu_check = check_gpu_availability(required_gpus=1)
+            if not gpu_check["available"]:
+                # 尝试清理残留进程
+                print("  尝试清理残留推理进程...")
+                run_cmd("pkill -9 -f 'vllm\\|sglang' 2>/dev/null", check=False)
+                time.sleep(10)
+                gpu_check = check_gpu_availability(required_gpus=1)
+                if not gpu_check["available"]:
+                    print(f"  FATAL: GPU 资源不可用 ({gpu_check['message']})，搜索中止")
+                    search_log.append({
+                        "action": "error",
+                        "message": f"GPU 资源不可用: {gpu_check['message']}",
+                        "round": round_num,
+                    })
+                    break
+            print(f"  ✓ GPU 恢复可用: {gpu_check['message']}")
 
         result = run_search_step(
             state_path, perf_config, service_startup_cmd,

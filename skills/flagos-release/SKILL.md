@@ -147,7 +147,7 @@ else:
 - `accuracy_ok = true`：V1/V2 精度偏差 ≤5%，或经 ≤3 轮优化后达标
 - `performance_ok = true`：V2/V1 每个并发级别 ≥80%，或经 ≤3 轮优化后达标
 - 提交了 issue 但优化成功 → 仍算合格（qualified=true）
-- `skip_reason` 非空时（如 `"service_startup_failed"`）→ 跳过了③④，直接私有发布
+- `skip_reason` 非空时（如 `"service_startup_failed"`）→ 跳过了3/4，直接私有发布
 
 ### 发布（Publish）
 
@@ -227,7 +227,7 @@ output/
 
 **流程集成**：
 - context.yaml 已更新（`image.registry_url`、`image.upload_timestamp`、`release.modelscope_url`、`release.huggingface_url`）
-- `traces/06_release.json` 已写入（记录发布条件判定、commit/tag/push 命令、README 路径、ModelScope/HuggingFace URL）
+- `traces/08_release.json` 已写入（记录发布条件判定、commit/tag/push 命令、README 路径、ModelScope/HuggingFace URL）
 - `results/release_info.json` 已保存（qualified 状态、Harbor URL、ModelScope URL、HuggingFace URL）
 - `timing.steps.release` 已更新为本步骤的 `duration_seconds`
 

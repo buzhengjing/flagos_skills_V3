@@ -35,14 +35,14 @@ provides:
 支持 default/native/flagos 三种模式，基于 `flaggems_control` 探测结果动态决定启停方式。
 
 **启动模式**：
-- **default** — 不修改任何 FlagGems 状态，以容器现有配置原样启动。用于步骤③验证初始环境可用性。
+- **default** — 不修改任何 FlagGems 状态，以容器现有配置原样启动。用于步骤3验证初始环境可用性。
 - **native** — 关闭 FlagGems，纯原生环境。对应 V1 版本。
 - **flagos** — 启用全量 FlagGems。对应 V2 版本。
 
 **工具脚本**（已由 setup_workspace.sh 部署到容器）:
 - `calc_tp_size.py` — TP 自动推算（根据模型大小和 GPU 显存）
 - `toggle_flaggems.py` — FlagGems 开关切换（替代 sed）
-- `wait_for_service.sh` — 服务就绪检测（指数退避）
+- `wait_for_service.sh` — 服务就绪检测（动态超时 + 日志监控 + 早期失败检测）
 
 ---
 
@@ -52,9 +52,9 @@ provides:
 
 ```
 容器内: /flagos-workspace/logs/ ← 服务日志（按模式命名）
-  startup_default.log  — 步骤③ 初始服务启动
-  startup_native.log   — 步骤④⑤ 中关闭 FlagGems 的 native 模式
-  startup_flagos.log   — 步骤④⑤ 中开启 FlagGems 的 flagos 模式
+  startup_default.log  — 步骤3 初始服务启动
+  startup_native.log   — 步骤4/5 中关闭 FlagGems 的 native 模式
+  startup_flagos.log   — 步骤4/5 中开启 FlagGems 的 flagos 模式
 宿主机: /data/flagos-workspace/<model_name>/logs/ ← 实时同步
 ```
 
@@ -127,7 +127,7 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; 
 根据 `environment.env_type` 和启动模式决定 FlagGems 开关方式：
 
 **Default 模式**（不修改任何状态）：
-不调用 `toggle_flaggems.py`，直接跳到步骤 3。用于步骤③验证初始环境可用性。所有 env_type 通用。
+不调用 `toggle_flaggems.py`，直接跳到步骤 3。用于步骤3验证初始环境可用性。所有 env_type 通用。
 
 ---
 
@@ -387,17 +387,57 @@ docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\
 - 业务环境变量（`VLLM_USE_MODELSCOPE` 等）按需在 docker exec 中追加，不写入模板
 - `--max-model-len` 使用 context.yaml 中 `service.max_model_len` 的值（由步骤 2.6 决策）
 
-## 步骤 4 — 等待服务就绪
+## 步骤 4 — 等待服务就绪（动态超时）
+
+脚本支持两种模式：
+- **动态模式**（传 `--log-path`）：监控启动日志，检测进度信号和失败信号，动态调整等待时间
+- **兼容模式**（不传 `--log-path`）：`--timeout` 作为绝对超时，行为与旧版一致
+
+**参数说明**：
+
+| 参数 | 含义 | 默认值 |
+|------|------|--------|
+| `--timeout` | 动态模式：无活动超时（日志无新输出多久算卡住）；兼容模式：绝对超时 | 120s |
+| `--max-timeout` | 绝对上限（安全兜底，无论如何不超过） | 1800s |
+| `--log-path` | 启动日志路径，传入则启用动态模式 | 空 |
+| `--mode` | 启动模式提示（`default`/`native`/`flagos`） | `default` |
 
 ```bash
 # Native 模式 / Default 模式
-docker exec $CONTAINER bash -c "/flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 300"
+docker exec $CONTAINER bash -c "/flagos-workspace/scripts/wait_for_service.sh \
+    --port $PORT --model-name '$MODEL_NAME' \
+    --timeout 120 --max-timeout 900 \
+    --log-path /flagos-workspace/logs/startup_<mode>.log \
+    --mode <mode>"
 
-# FlagGems 模式（CUDA graph 编译慢，需更长超时）
-docker exec $CONTAINER bash -c "/flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 600"
+# FlagGems 模式（CUDA graph + Triton 编译需要更长耐心）
+docker exec $CONTAINER bash -c "/flagos-workspace/scripts/wait_for_service.sh \
+    --port $PORT --model-name '$MODEL_NAME' \
+    --timeout 180 --max-timeout 1800 \
+    --log-path /flagos-workspace/logs/startup_flagos.log \
+    --mode flagos"
 ```
 
-自动轮询（2s→4s→5s 快速收敛，最大间隔 5s），超时自动分析日志。
+**动态监控行为**：
+- 自动轮询（2s→4s→5s 快速收敛，最大间隔 5s）
+- 检测启动阶段：权重加载 → CUDA graph 编译 → FlagGems 算子注册 → Triton 内核编译 → 端口绑定
+- 日志持续增长 = 服务在正常启动中，自动延长等待（直到 `--max-timeout`）
+- 检测到 OOM / CUDA error / 进程崩溃 → 立即退出，不等超时
+- 日志停止增长超过 `--timeout` → 判定为停滞，退出
+
+**进度输出示例**：
+```
+[30s] 阶段: 加载模型权重...
+[85s] 阶段: 权重加载完成
+[90s] 阶段: CUDA graph 编译中...
+[320s] 阶段: CUDA graph 编译中... (35s 无新日志)
+[450s] 服务就绪！耗时 450s
+```
+
+**早期失败检测**：
+```
+[12s] ✗ 检测到致命错误: CUDA out of memory
+```
 
 **启动后校验**：检查 `wait_for_service.sh` 输出的 `max_model_len`：
 - 如果是 thinking model 且 `max_model_len < 32768` → 警告，建议重启并加大 `--max-model-len`
@@ -501,10 +541,10 @@ fi
 
 ## 步骤 8 — 写入 context.yaml
 
-写入 `environment` 字段（步骤③ default 模式时）：
+写入 `environment` 字段（步骤3 default 模式时）：
 ```yaml
 environment:
-  initial_env_verified: true    # 步骤③通过后设为 true
+  initial_env_verified: true    # 步骤3通过后设为 true
   has_plugin: <from inspection>
 ```
 
@@ -549,8 +589,8 @@ ISSUE_EOF"
 - gems.txt 已检查（flagos 模式）
 - context.yaml 已更新
 - 对应 trace 文件已写入：
-  - 步骤③初始启动 → `traces/03_service_startup.json`
-  - 步骤④⑤中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/05_quick_performance.json` 的 actions 中
+  - 步骤3初始启动 → `traces/03_service_startup.json`
+  - 步骤4/6中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/06_quick_performance.json` 的 actions 中
 - 启动失败时，`logs/issues_startup.log` 已追加写入问题记录
 - `timing.steps.service_startup` 已更新为本步骤的 `duration_seconds`
 
@@ -564,6 +604,9 @@ ISSUE_EOF"
 | API 无响应 | 端口被占用 | 检查 `lsof -i:$PORT` |
 | FlagGems 未生效 | toggle_flaggems.py 未正确切换 | 运行 `--action status` 检查 |
 | gems.txt 未生成 | FlagGems 未启用 | 确认 toggle 状态 |
-| 服务启动超时 | wait_for_service.sh 会自动诊断 | 查看超时输出的日志分析 |
+| 服务启动超时（无活动） | 日志停止增长，进程可能卡死 | 检查 GPU 状态（`nvidia-smi`），考虑增大 `--timeout` |
+| 服务启动超时（绝对上限） | 大模型加载 + CUDA graph 编译超过 max-timeout | 增大 `--max-timeout`（默认 1800s） |
+| 进程崩溃提前检测 | OOM/CUDA error/Segfault，动态模式自动检测 | 查看 `_last_error.json` 中的 `fatal_signal` 和 `fatal_line` |
+| 日志活跃但长时间未就绪 | CUDA graph 编译或 Triton 内核编译耗时长 | 正常现象，动态模式会自动延长等待 |
 | Thinking model 评测分数异常低 | max_model_len 过小，推理链被截断 | 重启服务，加大 `--max-model-len` 至 32768+ |
 | OOM: max_model_len 过大 | KV cache 显存预分配超限 | 降低 max-model-len（thinking model 最低 16384） |

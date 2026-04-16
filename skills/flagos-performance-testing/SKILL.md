@@ -30,7 +30,7 @@ provides:
 | `quick` | 快速验证（默认） | 只跑 `4k_input_1k_output` | 预热 2 请求 + 固定并发 64 |
 | `comprehensive` | 全跑 | 所有 enabled 用例 | 所有并发全跑（1~256） |
 
-**策略选择**：主流程步骤⑤自动使用 `quick`，独立调用全量测试使用 `comprehensive`。
+**策略选择**：主流程步骤6自动使用 `quick`，独立调用全量测试使用 `comprehensive`。
 
 **三版结果文件**：
 - `native_performance.json` — V1 (Native，无 FlagGems)
@@ -108,9 +108,9 @@ except Exception as e:
 
 ## 核心原则：三版测试 + 按需优化
 
-新工作流在步骤⑤（快速性能评测）中按固定顺序执行：
+新工作流在步骤6（快速性能评测）中按固定顺序执行：
 1. **V1 Native** — 关闭 FlagGems 的基线性能
-2. **V2 FlagGems** — 启用 FlagGems 的性能（使用步骤④精度达标后的算子列表）
+2. **V2 FlagGems** — 启用 FlagGems 的性能（使用步骤4精度达标后的算子列表）
 3. **V3 Optimized FlagGems** — 仅在 V2 不达标时，通过算子优化找到 ≥80% 的组合
 
 **算子列表必录**：只要 FlagGems 处于启用状态，必须记录算子列表到 ops_list.json，这是算子优化的基础。
@@ -124,23 +124,23 @@ except Exception as e:
 
 策略由流程阶段自动决定，不在此处单独询问：
 
-- **主流程步骤⑤**：自动使用 `--strategy quick`，无需询问用户
+- **主流程步骤6**：自动使用 `--strategy quick`，无需询问用户
 - **独立调用全量性能测试**：使用 `comprehensive`
 
 | 选项 | 说明 | 触发时机 |
 |------|------|----------|
-| `quick`（默认） | 只跑 4k_input_1k_output 并发 64 | 主流程步骤⑤自动使用 |
+| `quick`（默认） | 只跑 4k_input_1k_output 并发 64 | 主流程步骤6自动使用 |
 | `comprehensive` | 所有用例，所有并发全跑 | 用户要求"完整测试" |
 
 一旦选定，该阶段内所有性能测试统一使用同一策略。
 
 ## 步骤 1：同步配置
 
-从容器内 `/flagos-workspace/shared/context.yaml` 读取服务信息，写入 `/flagos-workspace/perf/config/perf_config.yaml`。
+从容器内 `/flagos-workspace/shared/context.yaml` 读取服务信息，写入 `/flagos-workspace/scripts/config/perf_config.yaml`。
 
 同时将配置快照保存到 `config/` 目录：
 ```bash
-docker exec $CONTAINER cp /flagos-workspace/perf/config/perf_config.yaml /flagos-workspace/config/perf_config.yaml
+docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /flagos-workspace/config/perf_config.yaml
 ```
 
 ## 步骤 2：判断当前 FlagGems 状态
@@ -167,16 +167,26 @@ docker exec $CONTAINER cp /flagos-workspace/perf/config/perf_config.yaml /flagos
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
-  --config perf/config/perf_config.yaml \
+  --config scripts/config/perf_config.yaml \
   --strategy quick \
   --output-name native_performance \
   --output-dir /flagos-workspace/results/ \
   --mode native"
 ```
 
+**V1 测试完成后，必须停止服务释放 GPU**：
+```bash
+docker restart $CONTAINER
+sleep 5
+```
+
 ## 步骤 4：启用 FlagGems，切换到 FlagOS 模式
 
+**前置条件**：V1 服务已停止（步骤3末尾的 `docker restart`）。
+
 通过 `toggle_flaggems.py` 启用 FlagGems，重启服务。
+
+**强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。
 
 ## 步骤 5：记录算子列表（强制）
 
@@ -197,7 +207,7 @@ print(f'已记录 {len(ops)} 个算子到 ops_list.json')
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
-  --config perf/config/perf_config.yaml \
+  --config scripts/config/perf_config.yaml \
   --strategy quick \
   --output-name flagos_performance \
   --output-dir /flagos-workspace/results/ \
@@ -244,12 +254,12 @@ IF ratio < 80%:
     # 2. 设置状态
     workflow.performance_ok = false
 
-    # 3. 继续到步骤⑥发布（不终止流程）
+    # 3. 继续到步骤8发布（不终止流程）
 
 ELSE:
     workflow.performance_ok = true
 
-→ 继续步骤⑥ 发布
+→ 继续步骤8 发布
 ```
 
 **禁止行为**：ratio < 80% 时终止流程。必须写入 issue log、标记 `performance_ok=false`，然后继续到发布步骤（`qualified=false` → 私有发布）。
@@ -258,7 +268,7 @@ ELSE:
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \
-  --config perf/config/perf_config.yaml \
+  --config scripts/config/perf_config.yaml \
   --strategy quick \
   --output-name flagos_optimized \
   --output-dir /flagos-workspace/results/ \
@@ -387,5 +397,5 @@ ISSUE_EOF"
 - context.yaml 已更新
 - 配置快照已保存到 `config/perf_config.yaml`
 - 对应 trace 文件已写入：
-  - `traces/05_quick_performance.json`（V1/V2/V3 性能测试 + 对比 + 算子优化记录）
+  - `traces/06_quick_performance.json`（V1/V2/V3 性能测试 + 对比 + 算子优化记录）
 - `timing.steps.quick_performance` 已更新为本步骤的 `duration_seconds`

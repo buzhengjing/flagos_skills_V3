@@ -51,15 +51,15 @@
 ### 新模型迁移发布
 
 ```
-① 下载模型+容器准备   镜像/容器就绪 + 权重检查 + 环境检测 + 工具部署
+1 下载模型+容器准备   镜像/容器就绪 + 权重检查 + 环境检测 + 工具部署
         ↓
-② 启服务             V1(native) + V2(flagos) 启动验证 → 异常自动 issue
+2 启服务             V1(native) + V2(flagos) 启动验证 → 异常自动 issue
         ↓
-③ 精度评测           V1/V2 GPQA Diamond 对比 → 异常自动 issue + ≤3 轮算子优化
+3 精度评测           V1/V2 GPQA Diamond 对比 → 异常自动 issue + ≤3 轮算子优化
         ↓
-④ 性能评测           V1/V2 4k1k benchmark 对比 → 异常自动 issue + ≤3 轮算子优化
+4 性能评测           V1/V2 4k1k benchmark 对比 → 异常自动 issue + ≤3 轮算子优化
         ↓
-⑤ 自动发布           打包 + 上传 → qualified 公开 / 不合格私有
+5 自动发布           打包 + 上传 → qualified 公开 / 不合格私有
         ↓
 → 报告整理收尾
 ```
@@ -69,9 +69,9 @@
 - `flagos_performance.json` — V2 (FlagGems)
 - `flagos_optimized.json` — V3 (Optimized FlagGems，仅 V2 不达标时产出)
 
-**自动化**：步骤①~⑤全自动执行，零交互。仅网络失败时需用户介入：
+**自动化**：步骤1~5全自动执行，零交互。仅网络失败时需用户介入：
 - 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
-- ⑤发布凭证通过环境变量自动读取（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）
+- 5发布凭证通过环境变量自动读取（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）
 
 **发布条件判定**：`qualified = service_ok AND accuracy_ok AND performance_ok`
 - qualified → 公开发布；不合格 → 私有发布
@@ -86,19 +86,19 @@
 │                     主流程 (顺序执行)                                 │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
-│  ① 下载模型+容器准备         镜像/容器就绪 + 环境检测 + 工具部署       │
+│  1 下载模型+容器准备         镜像/容器就绪 + 环境检测 + 工具部署       │
 │     (container-preparation + pre-service-inspection)                │
 │         ↓                                                           │
-│  ② 启服务                    V1/V2 启动验证 → 异常自动 issue          │
+│  2 启服务                    V1/V2 启动验证 → 异常自动 issue          │
 │     (service-startup)                                               │
 │         ↓                                                           │
-│  ③ 精度评测                  V1/V2 GPQA 对比 → issue + ≤3 轮优化     │
+│  3 精度评测                  V1/V2 GPQA 对比 → issue + ≤3 轮优化     │
 │     (eval-comprehensive)                                            │
 │         ↓                                                           │
-│  ④ 性能评测                  V1/V2 benchmark 对比 → issue + ≤3 轮优化│
+│  4 性能评测                  V1/V2 benchmark 对比 → issue + ≤3 轮优化│
 │     (performance-testing)                                           │
 │         ↓                                                           │
-│  ⑤ 自动发布                  条件判定 → 打包 + 上传（公开/私有）       │
+│  5 自动发布                  条件判定 → 打包 + 上传（公开/私有）       │
 │     (flagos-release)                                                │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
@@ -115,7 +115,7 @@
 
 ## Skills 详细说明
 
-### ① flagos-container-preparation + flagos-pre-service-inspection (下载模型+容器准备)
+### 1 flagos-container-preparation + flagos-pre-service-inspection (下载模型+容器准备)
 
 | 属性 | 说明 |
 |------|------|
@@ -133,37 +133,37 @@
 
 ---
 
-### ② flagos-service-startup (启服务)
+### 2 flagos-service-startup (启服务)
 
 | 属性 | 说明 |
 |------|------|
 | **功能** | V1(native) + V2(flagos) 启动验证、健康检查、异常自动提交 issue |
-| **依赖** | 步骤① |
+| **依赖** | 步骤1 |
 | **触发词** | `service startup`, `start service`, `启动服务`, `health check` |
 
 **启动模式**：default / native（关闭 FlagGems）/ flagos（启用 FlagGems）
-**异常处理**：FlagGems 模式启动失败 → 提交 `operator-crash` issue → 标记 `workflow.service_ok: false` → 跳过③④直接到⑤
+**异常处理**：FlagGems 模式启动失败 → 提交 `operator-crash` issue → 标记 `workflow.service_ok: false` → 跳过3/4直接到5
 
 ---
 
-### ③ flagos-eval-comprehensive (精度评测)
+### 3 flagos-eval-comprehensive (精度评测)
 
 | 属性 | 说明 |
 |------|------|
 | **功能** | V1/V2 GPQA Diamond 精度对比（5% 阈值）+ 异常自动 issue + ≤3 轮算子优化 |
-| **依赖** | 步骤② |
+| **依赖** | 步骤2 |
 | **触发词** | `精度评测`, `GPQA`, `fast gpqa`, `comprehensive eval`, `远端评测`, `FlagRelease`, `flageval` |
 
 **异常处理**：精度偏差 >5% → 提交 `accuracy-degraded` issue → 算子优化（≤3 轮）→ 超限标记 `workflow.accuracy_ok: false`
 
 ---
 
-### ④ flagos-performance-testing (性能评测)
+### 4 flagos-performance-testing (性能评测)
 
 | 属性 | 说明 |
 |------|------|
 | **功能** | V1/V2 4k1k benchmark 对比 + 异常自动 issue + ≤3 轮算子优化 |
-| **依赖** | 步骤③ |
+| **依赖** | 步骤3 |
 | **触发词** | `性能测试`, `benchmark`, `vllm bench`, `吞吐量测试` |
 
 **异常处理**：V2/V1 任一并发级别 <80% → 提交 `performance-degraded` issue → 算子优化（≤3 轮）→ 超限标记 `workflow.performance_ok: false`
@@ -174,12 +174,12 @@
 
 ---
 
-### ⑤ flagos-release (自动发布)
+### 5 flagos-release (自动发布)
 
 | 属性 | 说明 |
 |------|------|
 | **功能** | 发布条件判定（qualified → 公开 / 不合格 → 私有）+ Docker 镜像 commit/tag/push Harbor + README 生成 + ModelScope/HuggingFace 上传 |
-| **依赖** | 步骤④ |
+| **依赖** | 步骤4 |
 | **触发词** | `发布`, `镜像上传`, `镜像打包`, `模型发布`, `release`, `publish` |
 
 **条件判定**：`qualified = service_ok AND accuracy_ok AND performance_ok` → 公开发布；否则私有发布
@@ -248,7 +248,7 @@
 
 1. 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
 
-**注意**：⑤发布所需凭证（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）均通过环境变量自动读取，无需人工提供。
+**注意**：5发布所需凭证（Harbor 登录、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`）均通过环境变量自动读取，无需人工提供。
 
 ---
 
@@ -256,7 +256,7 @@
 
 ```
 ┌──────────────────────────────┐
-│ container-preparation (①)    │──写入──┐
+│ container-preparation (1)    │──写入──┐
 │ + pre-service-inspection     │        │
 │ (容器准备 + 环境检测)         │        │
 └──────────────────────────────┘        ↓
@@ -266,21 +266,21 @@
                                 └─────────────────┘
                                         ↑
 ┌──────────────────────────────┐        │
-│ service-startup (②)         │──追加──┤
+│ service-startup (2)         │──追加──┤
 │ → V1/V2 启动验证             │        │
 │ → 异常 → issue-reporter      │        │
 └──────────────────────────────┘        │
          │                              ↑
          ↓                              │
 ┌──────────────────────────────┐        │
-│ eval-comprehensive (③)       │──追加──┤
+│ eval-comprehensive (3)       │──追加──┤
 │ → V1/V2 精度对比             │        │
 │ → 异常 → issue + ≤3 轮优化   │        │
 └──────────────────────────────┘        │
          │                              ↑
          ↓                              │
 ┌──────────────────────────────┐        │
-│ performance-testing (④)      │──追加──┘
+│ performance-testing (4)      │──追加──┘
 │ → V1/V2 性能对比             │
 │ → 异常 → issue + ≤3 轮优化   │
 │ → performance_compare.csv    │
@@ -288,7 +288,7 @@
          │
          ↓
 ┌──────────────────────────────┐
-│ flagos-release (⑤)           │
+│ flagos-release (5)           │
 │ → 条件判定 qualified?        │
 │ → 打包 + 上传（公开/私有）    │
 └──────────────────────────────┘
@@ -324,7 +324,7 @@
 | 文件 | 容器内路径 | 用途 |
 |------|-----------|------|
 | `context.yaml` | `/flagos-workspace/shared/context.yaml` | Skill 间共享上下文 |
-| `perf_config.yaml` | `/flagos-workspace/perf/config/perf_config.yaml` | 性能测试配置 |
+| `perf_config.yaml` | `/flagos-workspace/scripts/config/perf_config.yaml` | 性能测试配置 |
 | `operator_config.json` | `/flagos-workspace/results/operator_config.json` | 算子优化状态 |
 | `skills/*/SKILL.md` | 项目目录内 | Skill 定义文件 |
 

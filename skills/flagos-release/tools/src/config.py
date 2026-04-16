@@ -52,7 +52,7 @@ class PublishConfig:
     # 权重文件上传
     upload_weights: bool = True
     weights_dir: str = ""
-    # 自动读取评测结果目录（步骤④⑤产出），填入 README
+    # 自动读取评测结果目录（步骤4/5产出），填入 README
     results_dir: str = ""
     # 仓库可见性
     private: bool = True

@@ -52,12 +52,12 @@ claude --permission-mode auto
 ### 1.3 六步全自动流程
 
 ```
-① 容器准备  → 容器/镜像就绪 + 模型权重搜索/下载 + 工具脚本部署
-② 环境检测  → inspect_env.py 场景分类 + FlagGems 集成分析
-③ 启服务    → V1(native) + V2(flagos) 启动验证
-④ 精度评测  → V1/V2 GPQA Diamond 对比（偏差阈值 5%）
-⑤ 性能评测  → V1/V2 4k1k benchmark 对比（每并发级别 ≥ 80%）
-⑥ 自动发布  → Harbor + ModelScope + HuggingFace（qualified 判定公开/私有）
+1 容器准备  → 容器/镜像就绪 + 模型权重搜索/下载 + 工具脚本部署
+2 环境检测  → inspect_env.py 场景分类 + FlagGems 集成分析
+3 启服务    → V1(native) + V2(flagos) 启动验证
+4 精度评测  → V1/V2 GPQA Diamond 对比（偏差阈值 5%）
+5 性能评测  → V1/V2 4k1k benchmark 对比（每并发级别 ≥ 80%）
+6 自动发布  → Harbor + ModelScope + HuggingFace（qualified 判定公开/私有）
 ```
 
 **关键规则**：
@@ -90,8 +90,10 @@ claude --permission-mode auto
 │   ├── 02_environment_inspection.json
 │   ├── 03_service_startup.json
 │   ├── 04_quick_accuracy.json
-│   ├── 05_quick_performance.json
-│   └── 06_release.json
+│   ├── 05_accuracy_tuning.json
+│   ├── 06_quick_performance.json
+│   ├── 07_performance_tuning.json
+│   └── 08_release.json
 │
 ├── logs/                             # 运行日志
 │   ├── pipeline.log                     # 全流程执行记录（tail -f 可跟踪）
@@ -134,7 +136,7 @@ claude --permission-mode auto
 
 | 维度 | 调优前（CLAUDE.md.bak） | 调优后（CLAUDE.md + prompts/） |
 |------|------------------------|-------------------------------|
-| 流程步骤 | ①-⑧（8 步） | ①-⑥（6 步） |
+| 流程步骤 | 1-8（8 步） | 1-6（6 步） |
 | 版本定义 | V1/V2/V3 | V1/V2 |
 | 启动方式 | 手动拼 claude 命令或粘贴 prompt | `run_pipeline.sh` 一键启动 |
 | 终端输出 | 全量 stream-json 事件流 | 精简过滤，~200 行关键进度 |
@@ -145,11 +147,11 @@ claude --permission-mode auto
 
 ### 2.1 流程简化：去除 V3 算子优化
 
-调优前步骤④精度不达标时，会自动调用 `diagnose_ops.py` 进行分组排查 → 禁用问题算子 → 循环重测；步骤⑤性能不达标时，会调用 `operator_search.py` 最多进行 5 轮搜索优化。这个算子优化循环是流程中最不可控的部分，单次可能耗时数小时且结果不确定。
+调优前步骤4精度不达标时，会自动调用 `diagnose_ops.py` 进行分组排查 → 禁用问题算子 → 循环重测；步骤6性能不达标时，会调用 `operator_search.py` 最多进行 5 轮搜索优化。这个算子优化循环是流程中最不可控的部分，单次可能耗时数小时且结果不确定。
 
 调优后去除了整个 V3 优化循环。不达标时仅记录 issue、标记 `workflow.xxx_ok=false`，继续后续步骤，最终以 `qualified=false` 私有发布。流程耗时可预期，失败模式清晰。
 
-同时，⑥打包和⑦上传合并为统一的⑥自动发布（`main.py --from-context`），⑧可选正式评测被移除。
+同时，6打包和7上传合并为统一的6自动发布（`main.py --from-context`），8可选正式评测被移除。
 
 ### 2.2 一键启动脚本 `run_pipeline.sh`
 
@@ -167,7 +169,7 @@ claude --permission-mode auto
 调优前 Claude 的终端输出是全量 stream-json 事件流，包含大量自言自语（"Let me..."）、探测命令（ls/find/cat）、JSON 结构体，人无法实时跟踪进度。
 
 调优后 `stream_filter.py`：
-- 精简模式（默认）：~200 行，只显示 `[步骤①]` 标记、✓/✗ 结果、关键命令
+- 精简模式（默认）：~200 行，只显示 `[步骤1]` 标记、✓/✗ 结果、关键命令
 - 终端顶部实时显示 6 步进度状态（⬜→🔵→✅/❌）
 - ANSI 颜色：步骤蓝色、成功绿色、失败红色，管道时自动关闭
 - `--verbose` 恢复全量输出用于调试
@@ -177,8 +179,8 @@ claude --permission-mode auto
 调优前没有面向人的流程执行记录。调优后由 `stream_filter.py` 自动生成：
 
 ```
-[2026-04-09 15:11:13] [步骤①] 容器准备 — 开始
-[2026-04-09 15:12:22] [步骤①] 容器准备 — 完成 (1m 9s)
+[2026-04-09 15:11:13] [步骤1] 容器准备 — 开始
+[2026-04-09 15:12:22] [步骤1] 容器准备 — 完成 (1m 9s)
   结果: 容器 nv_gems_tree 就绪, 8x H20-3e, 工具脚本已部署
 ```
 
@@ -215,7 +217,7 @@ claude --permission-mode auto
 [2026-03-20 16:30:05] V2 | 精度偏差超阈值
   详情: V1=68.2%, V2=61.5%, 偏差=6.7% (阈值 5%)
   操作: 提交 accuracy-degraded issue, 标记 workflow.accuracy_ok=false
-  结果: 继续进入⑤性能评测
+  结果: 继续进入5性能评测
 ```
 
 ### 2.7 中断自动诊断 `diagnose_failure.py`
@@ -269,7 +271,7 @@ workflow_ledger:
 
 ### 2.11 发布流程统一化
 
-调优前 ⑥打包（docker commit/tag/push）和 ⑦上传（ModelScope/HuggingFace）分两步，docker push 等需要用户确认，可能需要补充 token。
+调优前 6打包（docker commit/tag/push）和 7上传（ModelScope/HuggingFace）分两步，docker push 等需要用户确认，可能需要补充 token。
 
 调优后统一为一条命令：
 ```bash
