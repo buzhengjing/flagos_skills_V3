@@ -578,7 +578,8 @@ pending → in_progress → success | failed | skipped
 - **trace JSON**是单步详情：记录每个操作的命令、参数、输出
 - **timing.steps**是纯计时：台账的 `duration_seconds` 与之对应
 - **pipeline.log**由 `stream_filter.py` 从 Claude 输出自动提取，编排层无需手动写入
-- 四者互补，不替代。遇到步骤完成时**台账、trace、timing 三个都要更新**
+- 四者互补，不替代。遇到步骤完成时**台账、trace、timing、report 四个都要更新**
+- **report**：每个步骤完成后调用 `generate_report.py` 生成/更新报告（`results/report.md` + `results/report.json`），后续步骤在前面基础上自动丰富内容
 
 ---
 
@@ -842,6 +843,8 @@ ISSUE_EOF"
 
 **交付物清单**：
 - `results/` — 性能/精度结果文件
+- `results/report.md` — 迁移报告（每步更新，可随时查看当前进度）
+- `results/report.json` — 迁移报告 JSON 格式（程序消费）
 - `traces/` — 全流程执行留痕
 - `logs/` — 运行日志（含 `pipeline.log` 全流程执行记录）
 - `config/context_snapshot.yaml` — 流程结束时的完整 context 快照
@@ -879,7 +882,18 @@ fi
 
 同步完成后验证宿主机文件存在。非挂载模式下还需验证文件数量与容器内一致。如果某个 Skill 中途失败需要人工介入，也应先执行此同步，避免已产出的数据丢失。
 
-**报告同时保存两份**：容器 `/root/flagos_report/` + 宿主机 `/data/flagos-workspace/<model>/results/`
+**报告生成**：每个步骤完成后（台账、trace、timing 更新之后），调用 `generate_report.py` 生成/更新报告：
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
+  --output /flagos-workspace/results/report.md"
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
+  --json --output /flagos-workspace/results/report.json"
+```
+
+报告随步骤推进自动丰富内容：步骤1后仅含基本信息，步骤4后增加精度数据，步骤8后为完整最终报告。
+
+**报告格式参考**（`generate_report.py` 已按此格式输出）：
 
 ```
 FlagOS 迁移报告

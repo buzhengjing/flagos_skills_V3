@@ -135,7 +135,7 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 docker run -itd --name=${CONTAINER_NAME} \
     --gpus=all --network=host \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
-    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
     ${IMAGE}
 ```
 
@@ -161,7 +161,7 @@ docker run -d --name ${CONTAINER_NAME} \
     -v /usr/local/sbin:/usr/local/sbin \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
-    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
     -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
     ${IMAGE} sleep infinity
 ```
@@ -177,7 +177,7 @@ docker run -d --name ${CONTAINER_NAME} \
     -e MTHREADS_VISIBLE_DEVICES=all \
     -e MTHREADS_DRIVER_CAPABILITIES=all \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
-    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
     ${IMAGE} sleep infinity
 ```
 
@@ -191,7 +191,7 @@ docker run -d --name ${CONTAINER_NAME} \
     --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     --device=/dev/dri --device=/dev/mxcd \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
-    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
     ${IMAGE} sleep infinity
 ```
 
@@ -202,14 +202,14 @@ docker run -d --name ${CONTAINER_NAME} \
     --net=host --pid=host --ipc=host --privileged \
     -v /usr/bin/cnmon:/usr/bin/cnmon \
     -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} \
-    -v ${WORKSPACE_PATH:-/data/flagos-workspace}:/flagos-workspace \
+    -v ${WORKSPACE_PATH:-/data/flagos-workspace/${MODEL_NAME}}:/flagos-workspace \
     -v /data:/data \
     ${IMAGE} sleep infinity
 ```
 
 **模板规则**：
 - 业务环境变量（`USE_FLAGGEMS`、`VLLM_USE_V1` 等）不写入模板，由后续 skill 按需添加
-- 所有模板统一挂载 `/flagos-workspace`
+- 所有模板统一挂载 `/flagos-workspace`（宿主机路径为 `/data/flagos-workspace/${MODEL_NAME}`，按模型隔离）
 - 生成命令后自动执行，无需用户确认
 
 ## 入口 3 — ModelScope / HuggingFace URL
@@ -258,7 +258,7 @@ gpu:
   type: "<GPU 型号>"
   count: <数量>
 workspace:
-  host_path: "<宿主机路径，如 /data/flagos-workspace>"
+  host_path: "<宿主机路径，如 /data/flagos-workspace/Qwen3-8B>"
   container_path: "/flagos-workspace"
   mount_mode: "<mounted|symlink|internal>"
 ```

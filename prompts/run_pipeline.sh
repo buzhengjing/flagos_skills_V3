@@ -210,6 +210,12 @@ COMMON_PLAN_STEPS=$(cat <<PLAN_STEPS_EOF
     docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
   fi
 这是硬性要求，不可省略、不可延迟到段末尾。每个步骤结束时都必须执行一次。
+
+**强制规则：每个步骤完成后生成/更新报告**
+台账、trace、timing 更新并同步 context_snapshot.yaml 之后，立即调用：
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --json --output /flagos-workspace/results/report.json"
+报告随步骤推进自动丰富，无需手动拼接。
 PLAN_STEPS_EOF
 )
 
@@ -231,7 +237,7 @@ if $IMAGE_MODE; then
    - ${MODEL_NOTE}
    - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
    - **NVIDIA 模板（严格执行，仅替换变量值，禁止增删参数）**：
-     docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace:/flagos-workspace ${IMAGE}
+     docker run -itd --name=\${CONTAINER_NAME} --gpus=all --network=host -v ${MODEL_PATH}:${CONTAINER_MODEL_PATH} -v /data/flagos-workspace/${MODEL}:/flagos-workspace ${IMAGE}
    - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败则 docker inspect 借鉴已有容器挂载配置重试一次 → 仍失败则终止
    - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
    - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
@@ -346,7 +352,7 @@ echo ""
 HOST_BASE="/data/flagos-workspace/${MODEL}"
 if [ -d "${HOST_BASE}" ]; then
     HOST_HAS_HISTORY=0
-    for d in results traces logs config; do
+    for d in results traces logs config reports eval; do
         if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
             HOST_HAS_HISTORY=1; break
         fi
@@ -355,7 +361,7 @@ if [ -d "${HOST_BASE}" ]; then
         ARCHIVE_TS="$(date +%Y%m%d_%H%M%S)"
         HOST_ARCHIVE="${HOST_BASE}/archive/${ARCHIVE_TS}"
         mkdir -p "${HOST_ARCHIVE}"
-        for d in results traces logs config; do
+        for d in results traces logs config reports eval; do
             if [ -d "${HOST_BASE}/${d}" ] && [ "$(ls -A "${HOST_BASE}/${d}" 2>/dev/null)" ]; then
                 mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
             fi
