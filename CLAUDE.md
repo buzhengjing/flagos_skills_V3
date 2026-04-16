@@ -102,6 +102,11 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
   → 跳过4/6 → 直接到8发布（私有）
 ```
 
+**算子列表 txt 持久化**：步骤3 flagos 模式首次启动成功后，保存初始全开算子列表：
+```bash
+docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/initial_oplist.txt
+```
+
 ### 步骤4 精度评测详情
 
 精度评测+精度调优全部完成后才进入性能测试。
@@ -158,6 +163,8 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
 6. 调优结果写入 context.yaml 的 eval.excluded_ops_accuracy 和 optimization 字段
 7. 写入 traces/05_accuracy_tuning.json
 8. 如有问题算子被禁用，调用 issue_reporter.py --type accuracy-degraded 生成 issue 文件（默认不提交，需 --submit 显式提交）
+9. 精度调优完成后，保存当前算子列表 txt 副本：
+   docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt
 ```
 
 **注意**：精度调优禁用的算子会传递给后续步骤6，6在此算子集上采集性能基线。7在6的基础上继续禁用性能问题算子。
@@ -209,6 +216,8 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
 8. 更新 context.yaml 的 optimization 和 operator_replacement 字段
 9. 写入 traces/07_performance_tuning.json
 10. 如有问题算子被禁用，调用 issue_reporter.py --type performance-degraded 生成 issue 文件（默认不提交，需 --submit 显式提交）
+11. 性能调优完成后，保存最终算子列表 txt 副本：
+    docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt
 ```
 
 ### 步骤8 自动发布（flagos-release skill）
@@ -365,6 +374,9 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 │   ├── flagos_performance.json              # V2 性能
 │   ├── performance_compare.csv              # 性能对比（performance_compare.py 生成）
 │   ├── ops_list.json
+│   ├── initial_oplist.txt                   # 初始全开算子列表（步骤3 flagos 首次启动后）
+│   ├── accuracy_tuned_oplist.txt            # 精度调优后算子列表（步骤5完成后，如触发）
+│   ├── final_oplist.txt                     # 最终算子列表（步骤7完成后，如触发）
 │   ├── gpqa_native.json                     # V1 精度摘要 (GPQA Diamond)
 │   ├── gpqa_flagos.json                     # V2 精度摘要 (GPQA Diamond)
 │   ├── gpqa_native_detail.json              # V1 精度详情（evalscope 原始报告）

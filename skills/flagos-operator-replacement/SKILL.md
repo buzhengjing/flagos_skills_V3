@@ -919,6 +919,9 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
   - 性能调优 → `traces/07_performance_tuning.json`
 - 精度调优耗时更新 `timing.steps.accuracy_tuning`
 - 性能调优耗时更新 `timing.steps.performance_tuning`
+- **算子列表 txt 备份**（调优完成、服务重启验证通过后保存）：
+  - 精度调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
+  - 性能调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
 
 ---
 
