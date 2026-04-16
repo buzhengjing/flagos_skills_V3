@@ -497,6 +497,9 @@ fi
 # 以 oplist 文件为准，同步保存到 results/ops_list.json
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py discover \
   --save-ops /flagos-workspace/results/ops_list.json"
+
+# 保存初始全开算子列表的 txt 副本到 results/（供事后查看和对比）
+docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/initial_oplist.txt
 ```
 
 **关键原则**：

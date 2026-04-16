@@ -292,6 +292,10 @@ optimization:
   oot_blacklist: []           # OOT 层需禁用的算子
   flagos_blacklist: []        # torch 底层需禁用的算子
   operator_config_path: ""    # operator_config.json 路径
+  oplist_snapshots:            # 算子列表 txt 快照路径
+    initial: ""                  # results/initial_oplist.txt（步骤3 flagos 首次启动后）
+    accuracy_tuned: ""           # results/accuracy_tuned_oplist.txt（步骤5完成后，如触发）
+    final: ""                    # results/final_oplist.txt（步骤7完成后，如触发）
   search_log: []              # 搜索历史记录
 
 # ============================================================================
