@@ -56,12 +56,12 @@ ERROR_PATTERNS = [
 ]
 
 STEP_NAMES = {
-    "01_container_preparation": ("①", "容器准备"),
-    "02_environment_inspection": ("②", "环境检查"),
-    "03_service_startup": ("③", "启服务"),
-    "04_accuracy_eval": ("④", "精度评测"),
-    "05_perf_eval": ("⑤", "性能评测"),
-    "06_package_release": ("⑥", "发布"),
+    "01_container_preparation": ("1", "容器准备"),
+    "02_environment_inspection": ("2", "环境检查"),
+    "03_service_startup": ("3", "启服务"),
+    "04_accuracy_eval": ("4", "精度评测"),
+    "05_perf_eval": ("5", "性能评测"),
+    "06_package_release": ("6", "发布"),
 }
 
 

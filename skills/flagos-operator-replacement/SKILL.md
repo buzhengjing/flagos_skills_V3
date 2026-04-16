@@ -694,7 +694,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_optimizer.py init \
 ```bash
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --state-path /flagos-workspace/results/operator_config.json \
-  --perf-config /flagos-workspace/perf/config/perf_config.yaml \
+  --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
   --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
   --plugin-mode \
   --max-rounds 3
@@ -704,7 +704,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
 ```bash
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
   --state-path /flagos-workspace/results/operator_config.json \
-  --perf-config /flagos-workspace/perf/config/perf_config.yaml \
+  --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
   --service-startup-cmd "bash /flagos-workspace/scripts/start_service.sh" \
   --capabilities "yaml_config,only_enable" \
   --gems-txt-path ${GEMS_TXT_PATH} \
@@ -729,7 +729,7 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/operator_search.py run \
 
 4. 运行快速 benchmark:
    ${CMD_PREFIX} python3 /flagos-workspace/scripts/benchmark_runner.py \
-     --config /flagos-workspace/perf/config/perf_config.yaml \
+     --config /flagos-workspace/scripts/config/perf_config.yaml \
      --quick --output-name optimize_step_N --output-dir /flagos-workspace/results/
 
 5. 更新优化器:
@@ -830,7 +830,7 @@ MetaX C500 + Qwen3-8B：309 个注册算子仅 26 个运行时执行，全量 Fl
 
 - 渐进排除搜索：最多 3 轮（high → medium → low）
 - 线性搜索：遍历搜索范围内所有算子一轮
-- **主工作流中上限 3 轮**：步骤③精度/步骤④性能的算子优化均限 3 轮，超限标记不合格进入下一步
+- **主工作流中上限 3 轮**：步骤3精度/步骤4性能的算子优化均限 3 轮，超限标记不合格进入下一步
 - 每轮保存进度，支持断点续搜
 
 ---
@@ -915,8 +915,8 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 - operator_config.json 已保存
 - context.yaml 已更新
 - 算子调优记录写入独立的 trace 文件：
-  - 精度调优 → `traces/07_accuracy_tuning.json`
-  - 性能调优 → `traces/08_performance_tuning.json`
+  - 精度调优 → `traces/05_accuracy_tuning.json`
+  - 性能调优 → `traces/07_performance_tuning.json`
 - 精度调优耗时更新 `timing.steps.accuracy_tuning`
 - 性能调优耗时更新 `timing.steps.performance_tuning`
 

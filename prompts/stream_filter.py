@@ -24,8 +24,14 @@ from datetime import datetime
 # pipeline.log 匹配规则（不受 --verbose 影响，始终按规则写入）
 # ============================================================================
 
-# 步骤标记: [步骤①] ~ [步骤⑧] 或 [步骤1] ~ [步骤8]（⑦⑧为条件触发的算子调优步骤）
-RE_STEP = re.compile(r'\[步骤[①②③④⑤⑥⑦⑧1-8]\]')
+# 步骤标记: [步骤1] ~ [步骤8]（5/7为条件触发的算子调优步骤，不触发时显示已完成）
+RE_STEP = re.compile(r'\[步骤[1-8]\]')
+
+# 段完成标记: [段1] ... / [段2] ... / [段3] ...
+RE_SEG_DONE = re.compile(r'\[段[123]\].*(?:完成|结束|已同步)')
+
+# 段边框标记: ╔ ╚ ║ ┌ └ │ 开头的行（段分隔框）
+RE_SEG_BORDER = re.compile(r'^\s*[╔╚║┌└│]')
 
 # 关键结果行: ✓ / ✗ / ⚠ 开头（去掉前导空格后）
 RE_RESULT = re.compile(r'^\s*[✓✗⚠]')
@@ -154,30 +160,27 @@ class Colors:
 # 进度条
 # ============================================================================
 
-# 步骤定义：id, 显示名, 圆数字
+# 步骤定义：id, 显示名, 进度条标签
 PIPELINE_STEPS = [
-    ('①', '容器准备'),
-    ('②', '环境检测'),
-    ('③', '服务启动'),
-    ('④', '精度评测'),
-    ('⑦', '精度算子调优'),
-    ('⑤', '性能评测'),
-    ('⑧', '性能算子调优'),
-    ('⑥', '打包发布'),
+    ('1', '容器准备',   '[1]'),
+    ('2', '环境检测',   '[2]'),
+    ('3', '服务启动',   '[3]'),
+    ('4', '精度评测',   '[4]'),
+    ('5', '精度调优',   '[5]'),
+    ('6', '性能评测',   '[6]'),
+    ('7', '性能调优',   '[7]'),
+    ('8', '打包发布',   '[8]'),
 ]
 
-# 匹配 [步骤①] 开始 / 完成 / 失败 / 跳过
-RE_STEP_START = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*(?:开始|启动)')
-RE_STEP_DONE = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*(?:完成|结束)')
-RE_STEP_FAIL = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*失败')
-RE_STEP_SKIP = re.compile(r'\[步骤([①②③④⑤⑥⑦⑧1-8])\].*跳过')
-
-# 数字到圆数字映射
-NUM_TO_CIRCLE = {'1': '①', '2': '②', '3': '③', '4': '④', '5': '⑤', '6': '⑥', '7': '⑦', '8': '⑧'}
+# 匹配 [步骤1] 开始 / 完成 / 失败 / 跳过
+RE_STEP_START = re.compile(r'\[步骤([1-8])\].*(?:开始|启动)')
+RE_STEP_DONE = re.compile(r'\[步骤([1-8])\].*(?:完成|结束)')
+RE_STEP_FAIL = re.compile(r'\[步骤([1-8])\].*失败')
+RE_STEP_SKIP = re.compile(r'\[步骤([1-8])\].*跳过')
 
 
 class ProgressBar:
-    """8 步进度条，实时刷新在终端（⑦⑧为条件触发的算子调优步骤）"""
+    """8 步进度条，实时刷新在终端（5/7为条件触发的算子调优步骤，不触发时显示已完成）"""
 
     # 状态符号
     SYM_PENDING = '○'
@@ -202,8 +205,7 @@ class ProgressBar:
 
     def _normalize(self, step_id: str) -> int:
         """步骤标识 → 索引 (0-based)"""
-        step_id = NUM_TO_CIRCLE.get(step_id, step_id)
-        for i, (sid, _) in enumerate(PIPELINE_STEPS):
+        for i, (sid, _, _label) in enumerate(PIPELINE_STEPS):
             if sid == step_id:
                 return i
         return -1
@@ -274,7 +276,7 @@ class ProgressBar:
         return f'{s}s'
 
     def render(self):
-        """渲染进度条到终端"""
+        """渲染一行紧凑进度到终端（不覆盖，每次状态变化追加一行）"""
         if not self.enabled:
             return
 
@@ -283,48 +285,64 @@ class ProgressBar:
         done_count = sum(1 for s in self.states if s in ('done', 'fail', 'skip'))
         total = len(PIPELINE_STEPS)
 
-        for i, (sid, name) in enumerate(PIPELINE_STEPS):
+        for i, (sid, name, label) in enumerate(PIPELINE_STEPS):
             state = self.states[i]
             dur = self.step_durations[i]
-            dur_str = f' {self._format_duration(dur)}' if dur else ''
+            dur_str = f'({self._format_duration(dur)})' if dur else ''
 
             if state == 'done':
-                parts.append(c.green(f'{self.SYM_DONE} {sid}{name}{dur_str}'))
+                parts.append(c.green(f'{self.SYM_DONE}{label}{dur_str}'))
             elif state == 'fail':
-                parts.append(c.red(f'{self.SYM_FAIL} {sid}{name}{dur_str}'))
+                parts.append(c.red(f'{self.SYM_FAIL}{label}{dur_str}'))
             elif state == 'skip':
-                parts.append(c.yellow(f'{self.SYM_SKIP} {sid}{name}{dur_str}'))
+                parts.append(c.yellow(f'{self.SYM_SKIP}{label}{dur_str}'))
             elif state == 'running':
                 elapsed = ''
                 if self.step_start_times[i]:
-                    elapsed = f' {self._format_duration(time.time() - self.step_start_times[i])}'
-                parts.append(c.yellow(f'{self.SYM_RUNNING} {sid}{name}{elapsed}'))
+                    elapsed = f'({self._format_duration(time.time() - self.step_start_times[i])})'
+                parts.append(c.yellow(f'{self.SYM_RUNNING}{label}{elapsed}'))
             else:
-                parts.append(c.gray(f'{self.SYM_PENDING} {sid}{name}'))
+                parts.append(c.gray(f'{self.SYM_PENDING}{label}'))
 
-        # 总进度
         pct = int(done_count / total * 100)
-        bar_width = 20
-        filled = int(bar_width * done_count / total)
-        bar = '█' * filled + '░' * (bar_width - filled)
         elapsed_total = ''
         if self.workflow_start:
-            elapsed_total = f' 总耗时 {self._format_duration(time.time() - self.workflow_start)}'
+            elapsed_total = f' 总{self._format_duration(time.time() - self.workflow_start)}'
 
-        progress_line = f'  [{bar}] {pct}%{elapsed_total}'
-        step_line = '  ' + ' → '.join(parts)
+        line = f'  ⏱ {" ".join(parts)}  {pct}%{elapsed_total}'
 
-        output = f'\n{step_line}\n{progress_line}'
+        # 只在内容变化时输出（避免重复行）
+        # 比较时去掉 ANSI 颜色码和动态耗时，只比较状态结构
+        state_key = tuple(self.states)
+        if not hasattr(self, '_last_state_key') or state_key != self._last_state_key:
+            print(line, flush=True)
+            self._last_state_key = state_key
+            self.last_render = line
 
-        # 用 \r + 清屏方式刷新（避免重复打印）
-        # 先清除上次输出的行数
-        if self.last_render:
-            line_count = self.last_render.count('\n') + 1
-            sys.stdout.write(f'\033[{line_count}A\033[J')
-
-        sys.stdout.write(output + '\n')
-        sys.stdout.flush()
-        self.last_render = output
+    def render_summary(self):
+        """渲染各步骤耗时汇总（段结束时调用）"""
+        if not self.enabled:
+            return
+        if not any(d is not None for d in self.step_durations):
+            return
+        c = self.colors
+        print('', flush=True)
+        print('各步骤耗时:', flush=True)
+        for i, (sid, name, _label) in enumerate(PIPELINE_STEPS):
+            state = self.states[i]
+            dur = self.step_durations[i]
+            if state == 'pending':
+                continue
+            dur_str = self._format_duration(dur) if dur else '-'
+            sym = {'done': '✓', 'fail': '✗', 'skip': '⚠'}.get(state, '●')
+            line = f'  {sym} 步骤{sid} {name}: {dur_str}'
+            if state == 'done':
+                line = c.green(line)
+            elif state == 'fail':
+                line = c.red(line)
+            elif state == 'skip':
+                line = c.yellow(line)
+            print(line, flush=True)
 
 
 # ============================================================================
@@ -337,6 +355,10 @@ def should_log(line: str) -> bool:
     if not stripped:
         return False
     if RE_STEP.search(stripped):
+        return True
+    if RE_SEG_DONE.search(stripped):
+        return True
+    if RE_SEG_BORDER.match(stripped):
         return True
     if RE_RESULT.match(stripped):
         return True
@@ -353,6 +375,9 @@ def should_display_line(line: str) -> bool:
     # 过滤空白和纯点号
     if not stripped or stripped in ('.', '..', '...'):
         return False
+    # 段边框行 → 始终显示
+    if RE_SEG_BORDER.match(stripped):
+        return True
     # 英文填充语 → 先判定过滤（优先于信号词，避免含 V1/V2 的填充语漏过）
     if RE_FILLER.match(stripped):
         return False
@@ -366,7 +391,8 @@ def should_display_line(line: str) -> bool:
     if stripped.startswith('|'):
         return True
     # 纯英文句子（无中文字符）→ 大概率是 Claude 自言自语
-    if re.match(r'^[A-Z]', stripped) and not re.search(r'[\u4e00-\u9fff]', stripped):
+    # 匹配大写字母或数字开头（如 "8x H20 visible..."）
+    if re.match(r'^[A-Z0-9]', stripped) and not re.search(r'[\u4e00-\u9fff]', stripped):
         return False
     # 其余保留（中文内容、报告等）
     return True
@@ -397,6 +423,9 @@ def add_timestamp(line: str) -> str:
     stripped = line.strip()
     if RE_HAS_TIMESTAMP.match(stripped):
         return stripped
+    # 段边框行不加时间戳（保持对齐）
+    if RE_SEG_BORDER.match(stripped):
+        return stripped
     if line.startswith('  ') and not RE_STEP.search(line):
         return stripped
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -408,6 +437,9 @@ def colorize_line(line: str, colors: Colors) -> str:
     stripped = line.strip()
     if not stripped:
         return line
+    # 段边框（╔╚║┌└│）→ 醒目蓝色粗体
+    if RE_SEG_BORDER.match(stripped):
+        return colors.blue_bold(line)
     # 步骤标记
     if RE_STEP.search(stripped):
         return colors.blue_bold(line)
@@ -559,6 +591,7 @@ def main():
     parser.add_argument('--no-color', action='store_true', help='关闭 ANSI 颜色')
     parser.add_argument('--start-step', type=int, default=1,
                         help='分段执行时的起始步骤编号（1-8），之前的步骤标记为已完成')
+    parser.add_argument('--cost-file', help='写入本段费用和耗时的文件路径（供 run_pipeline.sh 汇总）')
     args = parser.parse_args()
 
     verbose = args.verbose
@@ -568,7 +601,7 @@ def main():
     logger = PipelineLogger(args.pipeline_log)
     logger.open()
 
-    progress = ProgressBar(colors, enabled=use_color and not verbose, start_step=args.start_step)
+    progress = ProgressBar(colors, enabled=not verbose, start_step=args.start_step)
 
     # 跟踪上一个 tool_use 是否应该显示结果（精简模式用）
     last_tool_visible = False
@@ -638,6 +671,18 @@ def main():
                         if name == "Bash":
                             cmd = inp.get('command', '')[:200]
 
+                            # 兜底：检测到步骤1相关命令但进度条仍 pending → 自动标记开始
+                            STEP1_CMD_HINTS = ['nvidia-smi', 'docker inspect', 'docker run', 'setup_workspace', 'check_model_local']
+                            if any(kw in cmd for kw in STEP1_CMD_HINTS) and progress.states[0] == 'pending':
+                                step1_start = '[步骤1] 容器准备 — 开始'
+                                if not verbose:
+                                    out('━' * 50, colors)
+                                    out(step1_start, colors)
+                                    out('━' * 50, colors)
+                                progress.on_step_start('1')
+                                if logger.log_file:
+                                    logger.write_line(add_timestamp(step1_start))
+
                             # pipeline.log 记录关键命令
                             if args.pipeline_log and logger.log_file:
                                 if any(kw in cmd for kw in LOG_COMMANDS):
@@ -705,6 +750,9 @@ def main():
                             progress.step_durations[i] = time.time() - progress.step_start_times[i]
                 progress.render()
 
+                # 输出各步骤耗时汇总
+                progress.render_summary()
+
                 dur = event.get("duration_ms", 0) or 0
                 cost = event.get("total_cost_usd", 0) or 0
                 minutes = int(dur // 60000)
@@ -712,6 +760,14 @@ def main():
                 out(f"\n{'━' * 50}", colors)
                 out(f"完成 — 耗时 {minutes}m {seconds}s, 费用 ${cost:.2f}", colors)
                 logger.write_footer(duration_ms=dur, cost_usd=cost)
+
+                # 写入费用文件供 run_pipeline.sh 汇总
+                if args.cost_file:
+                    try:
+                        with open(args.cost_file, 'w') as cf:
+                            cf.write(f"{cost:.4f}\n")
+                    except Exception:
+                        pass
 
     finally:
         logger.close()

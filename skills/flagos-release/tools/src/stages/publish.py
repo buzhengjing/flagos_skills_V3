@@ -361,11 +361,26 @@ class PublishStage(BaseStage):
             return None
 
     def _ensure_harbor_login(self, harbor_path: str) -> bool:
-        """确保已登录 Harbor，未登录则通过环境变量自动登录"""
+        """确保已登录 Harbor，环境变量存在时强制重新登录"""
         # 从 harbor_path 提取 registry 地址（如 harbor.baai.ac.cn）
         registry = harbor_path.split("/")[0]
 
-        # 检查是否已登录
+        # 环境变量优先：有凭证就强制重新登录，避免复用旧凭证导致权限不匹配
+        user = os.environ.get("HARBOR_USER", "")
+        password = os.environ.get("HARBOR_PASSWORD", "")
+        if user and password:
+            print(f"  正在登录 Harbor: {registry} (使用环境变量凭证) ...")
+            cmd = f'echo "{password}" | docker login --username={user} --password-stdin https://{registry}/'
+            success, stdout, stderr = self.run_command(
+                cmd=cmd,
+                step_name="Harbor 登录",
+                timeout=30,
+            )
+            if not success:
+                print(f"  x Harbor 登录失败，请检查 HARBOR_USER / HARBOR_PASSWORD")
+            return success
+
+        # 无环境变量，检查是否已有登录凭证
         import json as _json
         docker_config_path = os.path.expanduser("~/.docker/config.json")
         if os.path.exists(docker_config_path):
@@ -374,35 +389,19 @@ class PublishStage(BaseStage):
                     docker_config = _json.load(f)
                 auths = docker_config.get("auths", {})
                 if registry in auths or f"https://{registry}" in auths or f"https://{registry}/" in auths:
-                    print(f"  Harbor 已登录: {registry}")
+                    print(f"  Harbor 已登录: {registry} (使用已有凭证)")
                     return True
             except Exception:
                 pass
 
-        # 未登录，从环境变量获取凭证
-        user = os.environ.get("HARBOR_USER", "")
-        password = os.environ.get("HARBOR_PASSWORD", "")
-        if not user or not password:
-            print(f"  x Harbor 未登录且环境变量 HARBOR_USER / HARBOR_PASSWORD 未设置")
-            print(f"    请设置环境变量或手动执行: docker login https://{registry}/")
-            self.steps.append(StepResult(
-                step_name="Harbor 登录",
-                status=StepStatus.FAILED,
-                error="HARBOR_USER / HARBOR_PASSWORD 未设置",
-            ))
-            return False
-
-        # 使用 stdin 方式登录
-        print(f"  正在登录 Harbor: {registry} ...")
-        cmd = f'echo "{password}" | docker login --username={user} --password-stdin https://{registry}/'
-        success, stdout, stderr = self.run_command(
-            cmd=cmd,
+        print(f"  x Harbor 未登录且环境变量 HARBOR_USER / HARBOR_PASSWORD 未设置")
+        print(f"    请设置环境变量或手动执行: docker login https://{registry}/")
+        self.steps.append(StepResult(
             step_name="Harbor 登录",
-            timeout=30,
-        )
-        if not success:
-            print(f"  x Harbor 登录失败，请检查 HARBOR_USER / HARBOR_PASSWORD")
-        return success
+            status=StepStatus.FAILED,
+            error="HARBOR_USER / HARBOR_PASSWORD 未设置",
+        ))
+        return False
 
     def _push_to_harbor(self) -> bool:
         """推送镜像到 Harbor"""
@@ -1094,6 +1093,11 @@ class PublishStage(BaseStage):
         print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
         print(f"  目标仓库: {repo_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
+
+        # 默认使用 hf-mirror 镜像站，避免国内网络直连 huggingface.co 不可达
+        if not os.environ.get("HF_ENDPOINT"):
+            os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+            print(f"  HF_ENDPOINT 未设置，使用镜像站: https://hf-mirror.com")
 
         try:
             from huggingface_hub import HfApi, login

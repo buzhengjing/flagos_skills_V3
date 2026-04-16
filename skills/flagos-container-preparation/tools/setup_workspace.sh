@@ -218,11 +218,13 @@ SCRIPT_MAP=(
     "skills/flagos-component-install/tools/install_component.py:scripts/install_component.py"
     # FlagTree 安装脚本
     "skills/flagos-component-install/tools/install_flagtree.sh:scripts/install_flagtree.sh"
-    # GPQA Diamond 快速精度评测
+    # GPQA Diamond 快速精度评测（eval/ 兼容 SKILL.md 引用，scripts/ 供编排层统一调用）
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:eval/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"
     # 精度对比
     "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
+    "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:scripts/fast_gpqa.py"
+    "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:scripts/fast_gpqa_config.yaml"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
     # Plugin 安装
@@ -263,11 +265,12 @@ for eval_script in "${PROJECT_ROOT}"/skills/flagos-eval-comprehensive/tools/eval
     fi
 done
 
-# 性能测试配置目录
+# 性能测试配置 → scripts/config/（benchmark_runner.py 默认路径）
 if [ -d "${PROJECT_ROOT}/skills/flagos-performance-testing/config" ]; then
+    docker exec "${CONTAINER}" mkdir -p /flagos-workspace/scripts/config
     docker cp "${PROJECT_ROOT}/skills/flagos-performance-testing/config/." \
-        "${CONTAINER}:/flagos-workspace/perf/config/"
-    echo "  ✓ perf/config/"
+        "${CONTAINER}:/flagos-workspace/scripts/config/"
+    echo "  ✓ scripts/config/ (perf_config)"
 fi
 
 echo "  共复制 ${SCRIPTS_COPIED} 个脚本"

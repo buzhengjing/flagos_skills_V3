@@ -157,7 +157,7 @@ echo "============================================================"
 echo ""
 
 # ========== 构造 Prompt ==========
-# 公共部分：tokens、执行模式、进度输出要求、步骤②-⑥
+# 公共部分：tokens、执行模式、进度输出要求、步骤2-6
 COMMON_TOKENS=$(cat <<TOKENS_EOF
 
 **容器内 Token**（已通过 setup_workspace.sh 写入容器 /flagos-workspace/.env，脚本自动加载；docker exec -e 仍建议保留作为双保险）：
@@ -186,22 +186,35 @@ PLAN_EOF
 )
 
 COMMON_PLAN_STEPS=$(cat <<PLAN_STEPS_EOF
-2. 生成 execution_plan.md，写入 /data/flagos-workspace/${MODEL}/config/execution_plan.md
+2. 生成 execution_plan.md，通过 docker exec 写入容器内 /flagos-workspace/${MODEL}/config/execution_plan.md
+   （挂载卷自动同步到宿主机 /data/flagos-workspace/${MODEL}/config/execution_plan.md，无需额外操作）
    - 包含每步的完整命令（变量已替换为实际值：容器名、模型名、端口等）
    - 包含每步的输入/输出文件路径
    - 包含每步的 context.yaml 读写字段清单
    - 包含每步的校验检查项
-3. 每个步骤开始前，Read execution_plan.md 中对应段落刷新记忆
+3. 每个步骤开始前，通过 docker exec cat 读取容器内 execution_plan.md 对应段落刷新记忆
 4. 每个步骤开始前，通过 docker exec 读取容器内 /flagos-workspace/shared/context.yaml 获取最新状态
 
+**重要：所有 /flagos-workspace 下的文件操作必须通过 docker exec 在容器内执行。Claude Code 的 Bash 沙箱禁止直接操作 /data/ 路径。**
+
 全自动执行，步骤间无需询问。
-**算子调优**：精度偏差>5%或性能ratio<80%时，按 CLAUDE.md 步骤⑦⑧自动触发算子调优。
-**进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。按 CLAUDE.md 流水线执行日志规范输出。
+**算子调优**：精度偏差>5%或性能ratio<80%时，按 CLAUDE.md 步骤5/7自动触发算子调优。
+**进度输出（硬性要求）**：每个步骤的第一条命令执行之前，必须先输出 \`[步骤X] <步骤名> — 开始\` 标记行（步骤1也不例外——规划完成后、执行第一条命令之前，必须先输出 \`[步骤1] 容器准备 — 开始\`）。步骤完成时输出 \`[步骤X] <步骤名> — 完成 (耗时)\`。关键命令后输出 ✓/✗ 结果摘要。按 CLAUDE.md 流水线执行日志规范输出。
+
+**强制规则：每个步骤完成后立即同步 context_snapshot.yaml**
+每完成一个步骤（1/2/3/4/5/6/7/8），在写入 trace 和更新容器内 context.yaml 之后，必须立即执行以下同步命令：
+  MOUNT_MODE=\$(docker exec \${CONTAINER} cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+  if [ "\$MOUNT_MODE" = "mounted" ] || [ "\$MOUNT_MODE" = "symlink" ]; then
+    cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+  else
+    docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+  fi
+这是硬性要求，不可省略、不可延迟到段末尾。每个步骤结束时都必须执行一次。
 PLAN_STEPS_EOF
 )
 
 
-# ========== 根据模式构造步骤① ==========
+# ========== 根据模式构造步骤1 ==========
 if $IMAGE_MODE; then
     if $MODEL_FOUND_ON_HOST; then
         MODEL_NOTE="宿主机模型路径已自动检测: ${MODEL_PATH}"
@@ -210,11 +223,11 @@ if $IMAGE_MODE; then
         MODEL_NOTE="宿主机未找到模型 ${MODEL}，已预创建挂载目录: ${MODEL_PATH}"
         DOWNLOAD_NOTE="
    - 容器创建后，在容器内搜索+下载模型（下载到已挂载的 ${CONTAINER_MODEL_PATH}）：
-     python3 skills/flagos-container-preparation/tools/check_model_local.py --model \"${MODEL}\" --mode container --container \${CONTAINER} --container-model-path ${CONTAINER_MODEL_PATH} --output-json
+     python3 skills/flagos-container-preparation/tools/check_model_local.py --model \"${MODEL}\" --mode container --container \${CONTAINER} --output-json
      从输出 JSON 中提取 final_container_path 和 final_host_path，记录到容器内 /flagos-workspace/shared/context.yaml"
     fi
     STEP1=$(cat <<STEP1_EOF
-① 容器准备（从镜像创建）：
+1. 容器准备（从镜像创建）：
    - ${MODEL_NOTE}
    - 检测 GPU 厂商（nvidia-smi / npu-smi 等），选择 SKILL.md 中对应的 docker run 模板
    - **NVIDIA 模板（严格执行，仅替换变量值，禁止增删参数）**：
@@ -234,11 +247,27 @@ ${COMMON_PLAN_STEPS}
 
 ${STEP1}
 
-步骤②③ 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
-完成步骤③后，确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。"
+步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+
+**步骤3 Issue 强制规则**：
+- FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
+  docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
+    --type operator-crash --log-path /flagos-workspace/logs/startup_flagos.log \\
+    --context-yaml /flagos-workspace/shared/context.yaml --repo flagos-ai/FlagGems \\
+    --output-dir /flagos-workspace/results/ --json\"
+- 生成的 issue 文件路径写入 context.yaml 的 issues.submitted[]
+- 追加写入 logs/issues_startup.log（格式见 CLAUDE.md 问题日志规范）
+
+完成步骤3后，通过 docker cp 同步 context 到宿主机：
+  docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+（如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
+
+**⚠ 段边界（硬性约束）**：本段只执行步骤1/2/3，步骤3完成并同步 context_snapshot.yaml 后必须立即停止。
+禁止进入步骤4或任何后续步骤。步骤4由下一段独立会话执行。
+完成标志：输出 \"[段1] 步骤1/2/3全部完成，context 已同步\" 后停止所有操作。"
 else
     STEP1=$(cat <<STEP1_EOF
-① 下载模型+容器准备：
+1. 下载模型+容器准备：
    - 验证容器 ${CONTAINER} 运行状态（docker inspect + docker start）
    - 搜索模型权重：python3 skills/flagos-container-preparation/tools/check_model_local.py --model "${MODEL}" --mode container --container ${CONTAINER} --output-json
      - 先在容器内搜索（/data, /models, /root, /home, /workspace, /mnt, /opt）
@@ -256,8 +285,24 @@ ${COMMON_PLAN_STEPS}
 
 ${STEP1}
 
-步骤②③ 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
-完成步骤③后，确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。"
+步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+
+**步骤3 Issue 强制规则**：
+- FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
+  docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} ${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
+    --type operator-crash --log-path /flagos-workspace/logs/startup_flagos.log \\
+    --context-yaml /flagos-workspace/shared/context.yaml --repo flagos-ai/FlagGems \\
+    --output-dir /flagos-workspace/results/ --json\"
+- 生成的 issue 文件路径写入 context.yaml 的 issues.submitted[]
+- 追加写入 logs/issues_startup.log（格式见 CLAUDE.md 问题日志规范）
+
+完成步骤3后，通过 docker cp 同步 context 到宿主机：
+  docker cp ${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+（如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
+
+**⚠ 段边界（硬性约束）**：本段只执行步骤1/2/3，步骤3完成并同步 context_snapshot.yaml 后必须立即停止。
+禁止进入步骤4或任何后续步骤。步骤4由下一段独立会话执行。
+完成标志：输出 \"[段1] 步骤1/2/3全部完成，context 已同步\" 后停止所有操作。"
 fi
 
 # ========== 部署权限白名单 ==========
@@ -340,6 +385,8 @@ echo ""
 
 # 禁用实验性 beta 功能，避免第三方代理不支持 context_management 返回 400
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+# 禁用非核心 haiku 调用（session title 等），第三方代理通常无 haiku 权限会 403
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # ===== 段间状态传递函数 =====
 read_context() {
@@ -365,21 +412,95 @@ print(f'{ctr}|{env}|{last}')
 " 2>/dev/null
 }
 
-# ===== 段1: ①②③ (容器准备 + 环境检测 + 服务启动) =====
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 段1: 容器准备+环境检测+服务启动 ====="
+# ===== GPU 服务清理（脚本退出时自动执行） =====
+cleanup_gpu_services() {
+    local ctr=""
+    # 按优先级查找容器名：DIAG_CONTAINER > SEG_CTR > CONTAINER
+    for candidate in "${DIAG_CONTAINER:-}" "${SEG_CTR:-}" "${CONTAINER:-}"; do
+        if [ -n "${candidate}" ] && docker inspect --type=container "${candidate}" &>/dev/null; then
+            ctr="${candidate}"
+            break
+        fi
+    done
+    # fallback: 从宿主机 context_snapshot.yaml 读取
+    if [ -z "${ctr}" ]; then
+        local ctx_file="/data/flagos-workspace/${MODEL:-unknown}/config/context_snapshot.yaml"
+        if [ -f "${ctx_file}" ]; then
+            ctr=$(python3 -c "
+import yaml
+try:
+    with open('${ctx_file}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('container',{}).get('name',''))
+except: pass
+" 2>/dev/null) || ctr=""
+        fi
+    fi
+    # 执行清理
+    if [ -n "${ctr}" ] && docker inspect --type=container "${ctr}" &>/dev/null; then
+        echo ""
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 清理 GPU 资源：停止容器 ${ctr} 内的推理服务..."
+        docker exec "${ctr}" bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; sleep 2" 2>/dev/null && \
+            echo "  ✓ 推理服务已停止，GPU 显存已释放" || \
+            echo "  ⚠ 未发现运行中的推理服务（可能已停止）"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
+    fi
+}
+trap cleanup_gpu_services EXIT
+
+# ===== 全流程计时 =====
+PIPELINE_START_TS=$(date +%s)
+
+# ===== 段1: 1/2/3 (容器准备 + 环境检测 + 服务启动) =====
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  段1/3  容器准备 + 环境检测 + 服务启动  (步骤 1→2→3)       ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+SEG1_START_TS=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段1 开始"
 claude -p "${PROMPT_SEG1}" \
     --permission-mode auto \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg1" \
-    --max-turns 60 \
+    --max-turns 80 \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" ${FILTER_FLAGS} || true
 
 # 段间检查
+SEG1_END_TS=$(date +%s)
+SEG1_ELAPSED=$(( SEG1_END_TS - SEG1_START_TS ))
+SEG1_MIN=$(( SEG1_ELAPSED / 60 ))
+SEG1_SEC=$(( SEG1_ELAPSED % 60 ))
 echo ""
-echo "[段1完成] 检查状态..."
+echo "┌──────────────────────────────────────────────────────────────┐"
+echo "│  段1 完成 — 耗时 ${SEG1_MIN}m ${SEG1_SEC}s                                     │"
+echo "└──────────────────────────────────────────────────────────────┘"
+
+# 兜底：如果 Claude 未同步 context，尝试从容器/挂载卷恢复
+CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+if [ ! -f "${CTX_FILE}" ]; then
+    echo "  ⚠ context_snapshot.yaml 缺失，尝试兜底同步..."
+    # 尝试从挂载卷直接 cp
+    SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+    if [ -f "${SHARED_CTX}" ]; then
+        mkdir -p "$(dirname "${CTX_FILE}")"
+        cp "${SHARED_CTX}" "${CTX_FILE}"
+        echo "  ✓ 从挂载卷恢复 context_snapshot.yaml"
+    else
+        # 尝试 docker cp（从 pipeline.log 提取容器名）
+        FALLBACK_CTR=$(grep -oP '(?<=容器 )\S+(?= 就绪)' "${PIPELINE_LOG}" 2>/dev/null | tail -1)
+        if [ -n "${FALLBACK_CTR}" ] && docker inspect --type=container "${FALLBACK_CTR}" &>/dev/null; then
+            mkdir -p "$(dirname "${CTX_FILE}")"
+            docker cp "${FALLBACK_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null && \
+                echo "  ✓ 从容器 ${FALLBACK_CTR} 恢复 context_snapshot.yaml" || \
+                echo "  ✗ 兜底同步失败"
+        fi
+    fi
+fi
+
 CTX_INFO=$(read_context "${MODEL}") || { echo "错误：段1未产出 context_snapshot.yaml，终止"; exit 1; }
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 SEG_ENV=$(echo "$CTX_INFO" | cut -d'|' -f2)
@@ -395,28 +516,76 @@ echo "  环境类型: ${SEG_ENV}"
 echo "  最后完成步骤: ${SEG_LAST}"
 echo ""
 
-# ===== 段2: ④⑦⑤⑧ (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
+# ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
 PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
 ${COMMON_TOKENS}
 
-按 CLAUDE.md 工作流定义执行步骤④精度评测、步骤⑦精度算子调优（如需）、步骤⑤性能评测、步骤⑧性能算子调优（如需）。
+按 CLAUDE.md 工作流定义执行步骤4精度评测、步骤5精度算子调优（如需）、步骤6性能评测、步骤7性能算子调优（如需）。
+
+**步骤编号（严格遵守，输出 [步骤X] 时必须使用以下编号）**：
+- [步骤4] 精度评测（GPQA Diamond）
+- [步骤5] 精度算子调优（条件触发：accuracy_ok=false 时执行）
+- [步骤6] 性能评测（benchmark）
+- [步骤7] 性能算子调优（条件触发：performance_ok=false 时执行）
 
 **执行前**：
 1. 读取容器内 /flagos-workspace/shared/context.yaml 确认当前状态
-2. 读取容器内 /flagos-workspace/config/execution_plan.md 中步骤④⑦⑤⑧段落
+2. 读取容器内 /flagos-workspace/config/execution_plan.md 中步骤4/5/6/7段落
 3. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法
 
 **算子调优**：
-- 步骤④完成后如 accuracy_ok=false → 立即执行步骤⑦（⑦完成后再进入⑤）
-- 步骤⑤完成后如 performance_ok=false → 执行步骤⑧（elimination 逐删策略）
+- 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）
+- 步骤6完成后如 performance_ok=false → 执行步骤7（elimination 逐删策略）
 - 调优后产出 V3 结果（flagos_optimized.json），更新 context.yaml
+
+**算子调优硬性约束**：
+- 步骤7性能算子调优**必须**通过容器内 operator_search.py run 执行完整自动化循环
+- **禁止**手动拼 toggle_flaggems.py + benchmark_runner.py 循环，**禁止**手动分组禁用算子
+- 调用方式：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/operator_search.py run \\
+    --state-path /flagos-workspace/results/operator_config.json \\
+    --perf-config /flagos-workspace/scripts/config/perf_config.yaml \\
+    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \\
+    --max-rounds 50\"
+- operator_search.py 已封装 next→配置→重启→benchmark→update 全流程，含 GPU 显存释放验证和可用性前置检查
+- 步骤5精度算子调优同理，必须通过 diagnose_ops.py 的自动化流程执行
 
 **进度输出**：步骤开始/完成时输出 [步骤X] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
+**Issue 强制规则**（达到条件必须生成 issue 文件）：
 GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
-完成后确保 context_snapshot.yaml 已同步到宿主机 /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml。"
+1. 步骤4/6 评测中服务崩溃 → 调用 issue_reporter.py full --type operator-crash + 追加 logs/issues_startup.log
+2. 步骤4 精度偏差 >5% → 必须按顺序完成三步：
+   ① 标记 workflow.accuracy_ok=false
+   ② 调用 issue_reporter.py full --type accuracy-degraded（写入 results/issue_accuracy-degraded_*.md）
+   ③ 追加写入 logs/issues_accuracy.log
+3. 步骤5 精度调优禁用了算子 → 调用 issue_reporter.py full --type accuracy-degraded（含禁用算子列表和原因）
+4. 步骤6 任一并发级别 V2/V1 < 80% → 必须按顺序完成三步：
+   ① 标记 workflow.performance_ok=false
+   ② 调用 issue_reporter.py full --type performance-degraded（写入 results/issue_performance-degraded_*.md）
+   ③ 追加写入 logs/issues_performance.log
+5. 步骤7 性能调优禁用了算子 → 调用 issue_reporter.py full --type performance-degraded（含禁用算子列表和原因）
+- 所有 issue 文件路径写入 context.yaml 的 issues.submitted[]
+- issue_reporter.py 调用模板：
+  docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
+    --type <issue类型> --context-yaml /flagos-workspace/shared/context.yaml \\
+    --repo flagos-ai/FlagGems --output-dir /flagos-workspace/results/ --json\"
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 段2: 精度评测+精度调优+性能评测+性能调优 ====="
+完成后通过 docker cp 同步 context 到宿主机：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+（如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
+
+**⚠ 段边界（硬性约束）**：本段只执行步骤4/5/6/7，最后一个步骤完成并同步 context_snapshot.yaml 后必须立即停止。
+禁止进入步骤8。步骤8由下一段独立会话执行。
+完成标志：输出 \"[段2] 步骤4/5/6/7全部完成，context 已同步\" 后停止所有操作。"
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  段2/3  精度评测 + 精度调优 + 性能评测 + 性能调优           ║"
+echo "║         (步骤 4→[5]→6→[7])                                  ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+SEG2_START_TS=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段2 开始"
 claude -p "${PROMPT_SEG2}" \
     --permission-mode auto \
     --output-format stream-json \
@@ -425,41 +594,81 @@ claude -p "${PROMPT_SEG2}" \
     --max-turns 150 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 4 ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" ${FILTER_FLAGS} || true
 
 # 段间检查
+SEG2_END_TS=$(date +%s)
+SEG2_ELAPSED=$(( SEG2_END_TS - SEG2_START_TS ))
+SEG2_MIN=$(( SEG2_ELAPSED / 60 ))
+SEG2_SEC=$(( SEG2_ELAPSED % 60 ))
 echo ""
-echo "[段2完成] 检查状态..."
+echo "┌──────────────────────────────────────────────────────────────┐"
+echo "│  段2 完成 — 耗时 ${SEG2_MIN}m ${SEG2_SEC}s                                     │"
+echo "└──────────────────────────────────────────────────────────────┘"
+
+# 兜底：如果 Claude 未同步 context，尝试从容器/挂载卷恢复
+CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+if [ ! -f "${CTX_FILE}" ] || [ "$(find "${CTX_FILE}" -mmin +60 2>/dev/null)" ]; then
+    echo "  ⚠ context_snapshot.yaml 缺失或过旧，尝试兜底同步..."
+    SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+    if [ -f "${SHARED_CTX}" ]; then
+        cp "${SHARED_CTX}" "${CTX_FILE}"
+        echo "  ✓ 从挂载卷恢复 context_snapshot.yaml"
+    elif [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null && \
+            echo "  ✓ 从容器 ${SEG_CTR} 恢复 context_snapshot.yaml" || \
+            echo "  ✗ 兜底同步失败"
+    fi
+fi
+
 CTX_INFO=$(read_context "${MODEL}") || { echo "错误：段2未更新 context_snapshot.yaml"; }
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
 echo ""
 
-# ===== 段3: ⑥ (打包发布) =====
+# ===== 段3: 8 (打包发布) =====
 PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
 ${COMMON_TOKENS}
 
-按 CLAUDE.md 工作流定义执行步骤⑥自动发布。
+按 CLAUDE.md 工作流定义执行步骤8自动发布。
+
+**步骤编号（严格遵守）**：本段只有 [步骤8] 自动发布，输出进度标记时必须使用 [步骤8]，不要使用其他编号。
 
 **执行前**：读取容器内 /flagos-workspace/shared/context.yaml 确认 workflow 状态。
-如果 context.yaml 显示步骤④或⑤未完成（status 非 success），将对应的 workflow.accuracy_ok 或 workflow.performance_ok 标记为 false，然后继续发布（私有）。
-**进度输出**：步骤开始/完成时输出 [步骤⑥] 标记，关键命令后输出 ✓/✗ 结果摘要。
+如果 context.yaml 显示步骤4或6未完成（status 非 success），将对应的 workflow.accuracy_ok 或 workflow.performance_ok 标记为 false，然后继续发布（私有）。
+**进度输出**：步骤开始/完成时输出 [步骤8] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
+**发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
+（如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
 发布工具: python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
-完成后将最终 context 回传到宿主机 /data/flagos-workspace/${MODEL}/config/context_final.yaml。
+完成后通过 docker cp 回传最终 context：
+  docker cp ${SEG_CTR}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_final.yaml
 
-全流程结束后输出完整的 FlagOS 迁移报告（含精度、性能、发布信息、耗时统计、问题记录摘要）。"
+全流程结束后输出完整的 FlagOS 迁移报告（含精度、性能、发布信息、耗时统计、问题记录摘要）。
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== 段3: 打包发布 ====="
+**完成标志**：输出最终迁移报告后，输出 \"[段3] 步骤8完成，流程结束\" 后停止所有操作。"
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  段3/3  打包发布  (步骤 8)                                   ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+SEG3_START_TS=$(date +%s)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段3 开始"
 claude -p "${PROMPT_SEG3}" \
     --permission-mode auto \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg3" \
-    --max-turns 40 \
+    --max-turns 60 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 6 ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" ${FILTER_FLAGS} || true
+
+SEG3_END_TS=$(date +%s)
+SEG3_ELAPSED=$(( SEG3_END_TS - SEG3_START_TS ))
+SEG3_MIN=$(( SEG3_ELAPSED / 60 ))
+SEG3_SEC=$(( SEG3_ELAPSED % 60 ))
 
 # ===== Claude 退出后自动故障诊断 =====
 # 从宿主机 context_snapshot 读取容器名（镜像模式下容器名由 Claude 动态创建）
@@ -512,7 +721,7 @@ except: print('False')
 fi
 
 # ========== 兜底：同步容器产出到宿主机 ==========
-# 无论 Claude 是否在步骤⑥中调用了 main.py，都确保容器内产出同步到宿主机。
+# 无论 Claude 是否在步骤8中调用了 main.py，都确保容器内产出同步到宿主机。
 # setup_workspace.sh 会在流程开始时归档清空宿主机 results/traces，
 # 如果 Claude 跳过了 main.py 的 _sync_to_host()，宿主机将无数据。
 if [ -n "${DIAG_CONTAINER}" ] && docker inspect --type=container "${DIAG_CONTAINER}" &>/dev/null; then
@@ -568,6 +777,90 @@ except Exception as e:
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ context_snapshot.yaml 不存在，无法判断 Harbor 发布状态"
     fi
 
+    # ========== 兜底：生成缺失的 issue 文件（精度/性能不达标时） ==========
+    CONTEXT_SNAP="${HOST_BASE}/config/context_snapshot.yaml"
+    if [ -f "${CONTEXT_SNAP}" ]; then
+        # 读取 workflow 状态
+        SERVICE_OK=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('workflow',{}).get('service_ok', True))
+except: print('True')
+" 2>/dev/null) || SERVICE_OK="True"
+
+        PERF_OK=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('workflow',{}).get('performance_ok', True))
+except: print('True')
+" 2>/dev/null) || PERF_OK="True"
+
+        ACC_OK=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('workflow',{}).get('accuracy_ok', True))
+except: print('True')
+" 2>/dev/null) || ACC_OK="True"
+
+        # 服务启动失败但 issue 文件缺失 → 兜底调用 issue_reporter.py
+        if [ "${SERVICE_OK}" = "False" ]; then
+            CRASH_ISSUE_EXISTS=$(docker exec "${DIAG_CONTAINER}" bash -c "ls /flagos-workspace/results/issue_operator-crash_*.md 2>/dev/null | head -1" 2>/dev/null || echo "")
+            if [ -z "${CRASH_ISSUE_EXISTS}" ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底生成启动崩溃 issue（Claude 遗漏）..."
+                docker exec "${DIAG_CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+                    --type operator-crash \
+                    --log-path /flagos-workspace/logs/startup_flagos.log \
+                    --context-yaml /flagos-workspace/shared/context.yaml \
+                    --repo flagos-ai/FlagGems \
+                    --output-dir /flagos-workspace/results/ \
+                    --json" 2>&1 && \
+                    echo "  ✓ 启动崩溃 issue 文件已生成" || echo "  ⚠ 启动崩溃 issue 文件生成失败"
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/results/." "${HOST_BASE}/results/" 2>/dev/null
+            fi
+        fi
+
+        # 性能不达标但 issue 文件缺失 → 兜底调用 issue_reporter.py
+        if [ "${PERF_OK}" = "False" ]; then
+            PERF_ISSUE_EXISTS=$(docker exec "${DIAG_CONTAINER}" bash -c "ls /flagos-workspace/results/issue_performance-degraded_*.md 2>/dev/null | head -1" 2>/dev/null || echo "")
+            PERF_ISSUE_LOG=$(docker exec "${DIAG_CONTAINER}" bash -c "[ -s /flagos-workspace/logs/issues_performance.log ] && echo 'exists' || echo ''" 2>/dev/null || echo "")
+            if [ -z "${PERF_ISSUE_EXISTS}" ] || [ -z "${PERF_ISSUE_LOG}" ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底生成性能不达标 issue（Claude 遗漏）..."
+                docker exec "${DIAG_CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+                    --type performance-degraded \
+                    --context-yaml /flagos-workspace/shared/context.yaml \
+                    --repo flagos-ai/FlagGems \
+                    --output-dir /flagos-workspace/results/ \
+                    --json" 2>&1 && \
+                    echo "  ✓ 性能 issue 文件已生成" || echo "  ⚠ 性能 issue 文件生成失败"
+                # 同步到宿主机
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/results/." "${HOST_BASE}/results/" 2>/dev/null
+            fi
+        fi
+
+        # 精度不达标但 issue 文件缺失 → 兜底调用 issue_reporter.py
+        if [ "${ACC_OK}" = "False" ]; then
+            ACC_ISSUE_EXISTS=$(docker exec "${DIAG_CONTAINER}" bash -c "ls /flagos-workspace/results/issue_accuracy-degraded_*.md 2>/dev/null | head -1" 2>/dev/null || echo "")
+            ACC_ISSUE_LOG=$(docker exec "${DIAG_CONTAINER}" bash -c "[ -s /flagos-workspace/logs/issues_accuracy.log ] && echo 'exists' || echo ''" 2>/dev/null || echo "")
+            if [ -z "${ACC_ISSUE_EXISTS}" ] || [ -z "${ACC_ISSUE_LOG}" ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底生成精度不达标 issue（Claude 遗漏）..."
+                docker exec "${DIAG_CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+                    --type accuracy-degraded \
+                    --context-yaml /flagos-workspace/shared/context.yaml \
+                    --repo flagos-ai/FlagGems \
+                    --output-dir /flagos-workspace/results/ \
+                    --json" 2>&1 && \
+                    echo "  ✓ 精度 issue 文件已生成" || echo "  ⚠ 精度 issue 文件生成失败"
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/results/." "${HOST_BASE}/results/" 2>/dev/null
+            fi
+        fi
+    fi
+
     # ========== 兜底：生成性能对比文件（如缺失） ==========
     NATIVE_PERF="${HOST_BASE}/results/native_performance.json"
     FLAGOS_PERF="${HOST_BASE}/results/flagos_performance.json"
@@ -595,6 +888,37 @@ except Exception as e:
     fi
 fi
 
+# 流程结束前清理推理服务
+cleanup_gpu_services
+
+echo ""
+PIPELINE_END_TS=$(date +%s)
+PIPELINE_ELAPSED=$(( PIPELINE_END_TS - PIPELINE_START_TS ))
+PIPELINE_MIN=$(( PIPELINE_ELAPSED / 60 ))
+PIPELINE_SEC=$(( PIPELINE_ELAPSED % 60 ))
+
+# 读取各段费用
+SEG1_COST=$(cat "${LOG_DIR}/seg1_cost.txt" 2>/dev/null || echo "N/A")
+SEG2_COST=$(cat "${LOG_DIR}/seg2_cost.txt" 2>/dev/null || echo "N/A")
+SEG3_COST=$(cat "${LOG_DIR}/seg3_cost.txt" 2>/dev/null || echo "N/A")
+# 计算总费用
+TOTAL_COST=$(python3 -c "
+costs = []
+for v in ['${SEG1_COST}', '${SEG2_COST}', '${SEG3_COST}']:
+    try: costs.append(float(v.strip()))
+    except: pass
+print(f'{sum(costs):.2f}' if costs else 'N/A')
+" 2>/dev/null || echo "N/A")
+
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  全流程完成 — 耗时 & 费用汇总                                ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+printf "║  段1  容器准备+环境检测+服务启动   %6s   \$%-8s║\n" "${SEG1_MIN}m${SEG1_SEC}s" "${SEG1_COST}"
+printf "║  段2  精度评测+调优+性能评测+调优  %6s   \$%-8s║\n" "${SEG2_MIN}m${SEG2_SEC}s" "${SEG2_COST}"
+printf "║  段3  打包发布                     %6s   \$%-8s║\n" "${SEG3_MIN}m${SEG3_SEC}s" "${SEG3_COST}"
+echo "║──────────────────────────────────────────────────────────────║"
+printf "║  总计                              %6s   \$%-8s║\n" "${PIPELINE_MIN}m${PIPELINE_SEC}s" "${TOTAL_COST}"
+echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Claude Code 流程结束"
 echo "日志文件:"

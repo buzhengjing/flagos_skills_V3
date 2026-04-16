@@ -27,13 +27,13 @@ claude "
 
 ### 工作流（新模型迁移发布）
 \`\`\`
-① container-preparation       → 容器准备（镜像/容器 + 本地权重检查 + 自动下载）
-② pre-service-inspection      → 环境检测（判定 env_type + flaggems 控制方式）
-③ service-startup             → 启动服务（验证初始环境可用）
-④ eval-comprehensive          → 快速精度评测（V1 基线 → V2 精度 → 算子调优直到精度达标）
-⑤ performance-testing         → 快速性能评测（V1 基线 → V2 性能 → 算子调优直到性能达标）
-⑥ flagos-release (image)      → 打包镜像（commit → tag → push Harbor）
-⑦ flagos-release (publish)    → 上传权重发布（ModelScope + HuggingFace）
+1. container-preparation       → 容器准备（镜像/容器 + 本地权重检查 + 自动下载）
+2. pre-service-inspection      → 环境检测（判定 env_type + flaggems 控制方式）
+3. service-startup             → 启动服务（验证初始环境可用）
+4. eval-comprehensive          → 快速精度评测（V1 基线 → V2 精度 → 算子调优直到精度达标）
+5. performance-testing         → 快速性能评测（V1 基线 → V2 性能 → 算子调优直到性能达标）
+6. flagos-release (image)      → 打包镜像（commit → tag → push Harbor）
+7. flagos-release (publish)    → 上传权重发布（ModelScope + HuggingFace）
 → 报告整理收尾
 \`\`\`
 
@@ -41,10 +41,10 @@ claude "
 
 ## 自动化原则
 
-- 步骤①~⑤全自动执行，零交互
+- 步骤1~5全自动执行，零交互
 - 仅网络失败时需用户介入：
   - 网络失败时（pip 自动加阿里云镜像重试，其他操作询问代理）
-  - ⑥⑦打包发布凭证通过环境变量自动读取（Harbor 登录、MODELSCOPE_TOKEN、HF_TOKEN）
+  - 6/7打包发布凭证通过环境变量自动读取（Harbor 登录、MODELSCOPE_TOKEN、HF_TOKEN）
 - 每个 Skill 的详细步骤在 skills/<skill-name>/SKILL.md
 - 遇到问题时使用 flagos-log-analyzer 诊断
 

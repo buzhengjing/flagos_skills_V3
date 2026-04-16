@@ -36,7 +36,7 @@ context.template.yaml (项目目录，只读模板)
 
 ### 宿主机归档
 
-- 步骤⑥发布阶段和兜底同步会将容器内 context 回传到宿主机：`/data/flagos-workspace/<model>/config/context_snapshot.yaml`
+- 步骤6发布阶段和兜底同步会将容器内 context 回传到宿主机：`/data/flagos-workspace/<model>/config/context_snapshot.yaml`
 - 全流程结束时回传最终状态：`/data/flagos-workspace/<model>/config/context_final.yaml`
 
 ## 数据流

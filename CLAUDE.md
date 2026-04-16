@@ -22,7 +22,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 - 运行时 context 位于容器内 `/flagos-workspace/shared/context.yaml`，每个容器独立，互不干扰
 - 读取 context：`docker exec <container> cat /flagos-workspace/shared/context.yaml`
 - 写入 context：通过 `docker exec <container>` 在容器内操作
-- 宿主机快照：`/data/flagos-workspace/<model>/config/context_snapshot.yaml`（只读归档，由步骤⑥和兜底同步写入）
+- 宿主机快照：`/data/flagos-workspace/<model>/config/context_snapshot.yaml`（只读归档，由步骤8和兜底同步写入）
 - 宿主机最终状态：`/data/flagos-workspace/<model>/config/context_final.yaml`（全流程结束时回传）
 
 ### 会话恢复检测
@@ -59,31 +59,31 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 
 ## 工作流（新模型迁移发布）
 
-**用户提供目标（容器名或镜像地址）+ 模型名后，①-⑧ 全自动执行，零交互。**
+**用户提供目标（容器名或镜像地址）+ 模型名后，1-8 全自动执行，零交互。**
 **自动识别**：含 `:` 或 `/` 的目标视为镜像地址，否则通过 `docker inspect --type=container` 判断是否为已有容器。模型路径自动搜索，无需手动指定。
 
 ```
-① 容器准备           → 自动识别容器/镜像 + 模型权重搜索/下载 + 工具部署
-② 环境检测           → inspect_env.py 场景分类 + FlagGems 集成分析
-③ 启服务             → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
-④ 精度评测           → V1/V2 GPQA Diamond 对比 → 异常自动 issue
-⑤ 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
-⑦ 精度算子调优       → [条件] 偏差>5% 时分组排查定位问题算子（最多3轮）
-⑧ 性能算子调优       → [条件] ratio<80% 时逐个禁用直到达标
-⑥ 自动发布           → 打包 + 上传 → qualified 公开 / 不合格私有
+1 容器准备           → 自动识别容器/镜像 + 模型权重搜索/下载 + 工具部署
+2 环境检测           → inspect_env.py 场景分类 + FlagGems 集成分析
+3 启服务             → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
+4 精度评测           → V1/V2 GPQA Diamond 对比 → 异常自动 issue
+5 精度算子调优       → [条件] 偏差>5% 时分组排查定位问题算子（最多3轮）
+6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
+7 性能算子调优       → [条件] ratio<80% 时逐个禁用直到达标
+8 自动发布           → 打包 + 上传 → qualified 公开 / 不合格私有
 ```
 
-执行顺序：① → ② → ③ → ④ → [⑦ 如需] → ⑤ → [⑧ 如需] → ⑥
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 
-**设计理由**：⑦ 紧跟 ④ 之后、⑤ 之前。先完成精度对齐（④+⑦），确定精度安全的算子集，再在该算子集上采集性能基线（⑤）。禁用算子逐步累计：⑦ 禁用精度问题算子 → ⑤ 在此基础上测性能 → ⑧ 继续禁用性能问题算子。避免在错误的算子集上采集性能基线。
+**设计理由**：5 紧跟 4 之后、6 之前。先完成精度对齐（4+5），确定精度安全的算子集，再在该算子集上采集性能基线（6）。禁用算子逐步累计：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。避免在错误的算子集上采集性能基线。
 
 ### V1/V2/V3 定义
 
 - **V1**：不开启 flaggems 算子替换的版本，作为精度和性能基线。plugin 环境若关闭 flaggems 后无法启动服务，则标记"无 V1"，跳过 V1 基线测试
 - **V2**：初始环境的 flaggems 状态（已开启部分或全部算子）。服务启动后以 `flaggems_enable_oplist.txt` 或 `gems.txt` 记录的算子为准
-- **V3**：经过算子调优（步骤⑦/⑧）后的优化版本。仅在精度或性能不达标时产出
+- **V3**：经过算子调优（步骤5/7）后的优化版本。仅在精度或性能不达标时产出
 
-### 步骤③ 启服务异常处理
+### 步骤3 启服务异常处理
 
 ```
 FlagGems 模式启动失败（不含超时，超时属于正常等待）：
@@ -99,10 +99,10 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
   → 编排层需手动将 issue_reporter.py 的 --json 输出中的结果写入 context.yaml 的 issues.submitted[] 和 logs/issues_startup.log
   → 排除操作失误：native 模式也失败 → 环境问题，需人工介入
   → 确认是 FlagGems 问题 → workflow.service_ok = false
-  → 跳过④⑤ → 直接到⑥发布（私有）
+  → 跳过4/6 → 直接到8发布（私有）
 ```
 
-### 步骤④ 精度评测详情
+### 步骤4 精度评测详情
 
 精度评测+精度调优全部完成后才进入性能测试。
 
@@ -111,33 +111,41 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
 2. 开启 flaggems → 启动服务 → GPQA Diamond V2 精度
 3. V1 vs V2 精度对比（偏差阈值 5%）
 4. 结果判定：
-   ├── 服务崩溃 → 调用 issue_reporter.py --type operator-crash 生成 issue 文件（同步骤③）
+   ├── 服务崩溃 → 调用 issue_reporter.py --type operator-crash 生成 issue 文件（同步骤3）
    ├── 偏差 ≤5% → 标记 workflow.accuracy_ok=true
-   └── 偏差 >5% → 标记 workflow.accuracy_ok=false，调用 issue_reporter.py --type accuracy-degraded 生成 issue 文件 → 直接触发步骤⑦
-5. 精度达标或⑦完成后，继续进入⑤性能评测
+   └── 偏差 >5% → **必须按顺序完成以下三步，再进入步骤5**：
+       ① 标记 workflow.accuracy_ok=false
+       ② 调用 issue_reporter.py --type accuracy-degraded 生成 issue 文件（写入 results/issue_accuracy-degraded_*.md）
+       ③ 追加写入 logs/issues_accuracy.log（格式见"问题日志规范"）
+       完成 ①②③ 后 → 直接触发步骤5
+5. 精度达标或5完成后，继续进入6性能评测
 ```
 
-### 步骤⑤ 性能评测详情
+### 步骤6 性能评测详情
 
-**前置条件**：步骤④（及⑦如触发）已完成，当前算子集为精度对齐后的最终集合。
+**前置条件**：步骤4（及5如触发）已完成，当前算子集为精度对齐后的最终集合。
 
 ```
 1. 关闭 flaggems → 启动服务 → benchmark 4k_input_1k_output V1 性能基线 → 停服务
-2. 开启 flaggems → 启动服务 → benchmark V2 性能（使用经过精度调优后的算子集，⑦未触发则为全量算子）
+2. 开启 flaggems → 启动服务 → benchmark V2 性能（使用经过精度调优后的算子集，5未触发则为全量算子）
 3. V2/V1 性能对比（quick 模式：4k_input_1k_output 并发 64 单数据点；comprehensive 模式：所有用例所有并发），ratio ≥ 80%?
    ├── 达标 → 标记 workflow.performance_ok=true
-   └── 不达标 → 标记 workflow.performance_ok=false，调用 issue_reporter.py --type performance-degraded 生成 issue 文件 → 触发步骤⑧
-4. 性能不达标 → 触发步骤⑧；达标 → 直接进入⑥发布
+   └── 不达标 → **必须按顺序完成以下三步，再进入步骤7**：
+       ① 标记 workflow.performance_ok=false
+       ② 调用 issue_reporter.py --type performance-degraded 生成 issue 文件（写入 results/issue_performance-degraded_*.md）
+       ③ 追加写入 logs/issues_performance.log（格式见"问题日志规范"）
+       完成 ①②③ 后 → 触发步骤7
+4. 性能不达标 → 触发步骤7；达标 → 直接进入8发布
 ```
 
-### 步骤⑦ 精度算子调优（条件触发）
+### 步骤5 精度算子调优（条件触发）
 
-**触发条件**：步骤④完成后 `workflow.accuracy_ok = false`（V1 vs V2 偏差 > 5%）
-**跳过条件**：`env_type = native`（无 FlagGems）或 `accuracy_ok = true`
+**触发条件**：步骤4完成后 `workflow.accuracy_ok = false`（V1 vs V2 偏差 > 5%）
+**跳过条件**：`env_type = native`（无 FlagGems）或 `accuracy_ok = true`（不触发时显示已完成）
 
 ```
 流程：
-1. 读取步骤④的精度结果和当前算子列表（ops_list.json）
+1. 读取步骤4的精度结果和当前算子列表（ops_list.json）
 2. 调用 diagnose_ops.py 分组定位问题算子：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups \
      --ops-file /flagos-workspace/results/ops_list.json \
@@ -148,20 +156,20 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
    ├── 偏差 ≤ 5% → accuracy_ok = true，记录 excluded_ops_accuracy
    └── 3 轮后仍 > 5% → accuracy_ok = false，记录已排除的算子，继续
 6. 调优结果写入 context.yaml 的 eval.excluded_ops_accuracy 和 optimization 字段
-7. 写入 traces/07_accuracy_tuning.json
+7. 写入 traces/05_accuracy_tuning.json
 8. 如有问题算子被禁用，调用 issue_reporter.py --type accuracy-degraded 生成 issue 文件（默认不提交，需 --submit 显式提交）
 ```
 
-**注意**：精度调优禁用的算子会传递给后续步骤⑤，⑤在此算子集上采集性能基线。⑧在⑤的基础上继续禁用性能问题算子。
+**注意**：精度调优禁用的算子会传递给后续步骤6，6在此算子集上采集性能基线。7在6的基础上继续禁用性能问题算子。
 
-### 步骤⑧ 性能算子调优（条件触发）
+### 步骤7 性能算子调优（条件触发）
 
-**触发条件**：步骤⑤完成后 `workflow.performance_ok = false`（V2/V1 ratio < 80%）
-**跳过条件**：`env_type = native` 或 `performance_ok = true`
+**触发条件**：步骤6完成后 `workflow.performance_ok = false`（V2/V1 ratio < 80%）
+**跳过条件**：`env_type = native` 或 `performance_ok = true`（不触发时显示已完成）
 
 ```
 流程：
-1. 读取步骤⑤的性能结果和当前算子列表（含步骤⑦已禁用的算子）
+1. 读取步骤6的性能结果和当前算子列表（含步骤5已禁用的算子）
 2. 自动发现算子列表：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_optimizer.py discover \
      --save-ops /flagos-workspace/results/ops_list.json"
@@ -176,14 +184,14 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
 4. 运行搜索循环（容器内全自动）：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
      --state-path /flagos-workspace/results/operator_config.json \
-     --perf-config /flagos-workspace/config/perf_config.yaml \
+     --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
      --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \
      [--plugin-mode] \
      --max-rounds 30"
    （elimination 策略逐个禁用，最坏情况 = 算子总数轮）
 5. 搜索完成后：应用最终配置 → 重启服务 → V3 验证 benchmark：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py \
-     --config /flagos-workspace/perf/config/perf_config.yaml \
+     --config /flagos-workspace/scripts/config/perf_config.yaml \
      --strategy quick \
      --output-name flagos_optimized \
      --output-dir /flagos-workspace/results/ \
@@ -199,11 +207,11 @@ FlagGems 模式启动失败（不含超时，超时属于正常等待）：
    ├── V3/V1 ratio ≥ 80% → performance_ok = true
    └── 仍不达标 → performance_ok = false
 8. 更新 context.yaml 的 optimization 和 operator_replacement 字段
-9. 写入 traces/08_performance_tuning.json
+9. 写入 traces/07_performance_tuning.json
 10. 如有问题算子被禁用，调用 issue_reporter.py --type performance-degraded 生成 issue 文件（默认不提交，需 --submit 显式提交）
 ```
 
-### 步骤⑥ 自动发布（flagos-release skill）
+### 步骤8 自动发布（flagos-release skill）
 
 发布步骤通过 `flagos-release` skill 的宿主机工具统一执行，**禁止手动拼 docker commit/tag/push 命令**：
 
@@ -222,14 +230,14 @@ python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspac
 **执行路径强制规则**：release 脚本**必须从项目目录执行**（`python3 skills/flagos-release/tools/main.py`），**严禁**将脚本复制到 `/tmp` 或其他临时目录后执行。复制到非项目路径会导致权限配置不匹配而被拦截。
 
 工具自动完成：
-1. 从 context_snapshot.yaml 读取 `workflow.qualified`（= service_ok AND accuracy_ok AND performance_ok）判定发布可见性（公开/私有）。注意：accuracy_ok 和 performance_ok 包含调优后的最终结果（经过⑦⑧后的值）
+1. 从 context_snapshot.yaml 读取 `workflow.qualified`（= service_ok AND accuracy_ok AND performance_ok）判定发布可见性（公开/私有）。注意：accuracy_ok 和 performance_ok 包含调优后的最终结果（经过7/8后的值）
 2. docker commit → docker tag（自动生成标准命名）→ docker push Harbor
 3. 生成 README（含评测结果、环境信息、启动命令）
 4. 发布到 ModelScope / HuggingFace（SDK 优先，CLI 降级，Token 从环境变量读取）
 5. 数据回传宿主机（挂载模式下已自动可见，非挂载模式通过 docker cp 回传 results/traces/logs）
 
 工具执行完成后，编排层仍需完成：
-- 写入 `traces/06_release.json`（记录工具输出、发布 URL、耗时）
+- 写入 `traces/08_release.json`（记录工具输出、发布 URL、耗时）
 - 更新容器内 `/flagos-workspace/shared/context.yaml` 的 `image`、`release` 字段和 `workflow_ledger`
 - 更新 `timing.steps.release`
 
@@ -241,7 +249,7 @@ python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspac
 ### native 场景工作流简化
 
 纯原生环境无 FlagGems，工作流简化为：
-①容器准备 → ②环境检测 → ③服务启动 → ④精度评测 → ⑤性能测试 → ⑥发布
+1容器准备 → 2环境检测 → 3服务启动 → 4精度评测 → 6性能测试 → 8发布
 跳过所有 FlagGems 相关步骤（toggle、V2 对比）。只产出单版结果。
 
 ### NV 重点场景
@@ -252,7 +260,7 @@ python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspac
 
 ## 环境场景定义
 
-环境检测（步骤②）自动分类为以下场景之一，核心判定依据是 flaggems 是否存在（FlagOS 的核心组件）：
+环境检测（步骤2）自动分类为以下场景之一，核心判定依据是 flaggems 是否存在（FlagOS 的核心组件）：
 
 | env_type | 判定条件 | FlagGems 控制 | 算子列表来源 |
 |----------|---------|--------------|-------------|
@@ -302,17 +310,17 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 | 镜像模式容器名冲突 | 追加时间戳后缀 `_MMDD_HHMM` 创建新容器 | 禁止复用已有容器，必须 docker run 新建 |
 | 精度调优触发 | `accuracy_ok=false` 且 `env_type≠native` 时自动触发 | 不询问，diagnose_ops accuracy-groups 分组排查，最多 3 轮 |
 | 性能调优触发 | `performance_ok=false` 且 `env_type≠native` 时自动触发 | 不询问，elimination 逐个禁用直到达标 |
-| V3 验证 benchmark | quick 模式（与步骤⑤一致） | 不询问策略 |
+| V3 验证 benchmark | quick 模式（与步骤6一致） | 不询问策略 |
 
 ---
 
 ## 用户交互规则
 
-**①-⑧ 全自动执行，零交互。** 网络失败自动尝试备选镜像源，全部失败则终止任务，不询问用户。
+**1-8 全自动执行，零交互。** 网络失败自动尝试备选镜像源，全部失败则终止任务，不询问用户。
 
 1. **网络失败**（详见"网络问题处理策略"）— pip 失败自动依次尝试阿里云/清华/腾讯镜像，其他网络操作自动重试一次，全部失败直接终止任务
 
-**⑥ 打包发布**所需凭证均通过环境变量提供，脚本自动读取：
+**6 打包发布**所需凭证均通过环境变量提供，脚本自动读取：
 - Harbor：`HARBOR_USER` / `HARBOR_PASSWORD` 环境变量（脚本自动登录，未设置则需手动 `docker login`）
 - ModelScope：`MODELSCOPE_TOKEN` 环境变量
 - HuggingFace：`HF_TOKEN` 环境变量
@@ -322,7 +330,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 
 ## 工具脚本部署
 
-容器准备阶段（步骤①完成后），通过 `setup_workspace.sh` 一次性部署所有工具：
+容器准备阶段（步骤1完成后），通过 `setup_workspace.sh` 一次性部署所有工具：
 
 ```bash
 # 宿主机执行，一次性复制所有脚本到容器
@@ -371,8 +379,10 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 │   ├── 02_environment_inspection.json
 │   ├── 03_service_startup.json
 │   ├── 04_quick_accuracy.json
-│   ├── 05_quick_performance.json
-│   └── 06_release.json
+│   ├── 05_accuracy_tuning.json
+│   ├── 06_quick_performance.json
+│   ├── 07_performance_tuning.json
+│   └── 08_release.json
 │
 ├── logs/                                 # 运行日志
 │   ├── pipeline.log                         # 全流程执行记录（人可读，tail -f 可跟踪）
@@ -424,8 +434,8 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 **计时强制规则**：
 - 每个 Skill 开始时记录 `timestamp_start`（ISO 8601），结束时记录 `timestamp_end` 和 `duration_seconds`
 - 完成 trace 写入后，同步更新 `context.yaml` 的 `timing.steps.<step_name>` 字段
-- 步骤①开始时额外写入 `timing.workflow_start`
-- 步骤⑥完成时写入 `timing.workflow_end` 和 `timing.total_duration_seconds`
+- 步骤1开始时额外写入 `timing.workflow_start`
+- 步骤8完成时写入 `timing.workflow_end` 和 `timing.total_duration_seconds`
 
 ### Trace JSON 统一格式
 
@@ -481,14 +491,14 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 
 | 步骤 | trace 文件 | 记录的 actions |
 |------|-----------|----------------|
-| ①容器准备 | `01_container_preparation.json` | docker run 命令（含完整参数）、权重搜索/下载、setup_workspace 部署结果 |
-| ②环境检测 | `02_environment_inspection.json` | inspect_env.py 命令、场景分类结果、FlagGems 集成分析 |
-| ③启服务 | `03_service_startup.json` | 启动命令、env vars、健康检查结果、端口、issue 提交记录（如有） |
-| ④精度评测 | `04_quick_accuracy.json` | V1/V2 精度评测命令、精度结果、issue 提交记录 |
-| ⑤性能评测 | `05_quick_performance.json` | V1/V2 性能测试命令、性能对比、issue 提交记录 |
-| ⑦精度算子调优 | `07_accuracy_tuning.json` | diagnose_ops 命令、分组测试结果、禁用算子、重评结果 |
-| ⑧性能算子调优 | `08_performance_tuning.json` | optimizer init/search 命令、每轮搜索结果、V3 benchmark |
-| ⑥自动发布 | `06_release.json` | qualified 判定、commit/tag/push 命令、ModelScope/HuggingFace 上传 URL |
+| 1容器准备 | `01_container_preparation.json` | docker run 命令（含完整参数）、权重搜索/下载、setup_workspace 部署结果 |
+| 2环境检测 | `02_environment_inspection.json` | inspect_env.py 命令、场景分类结果、FlagGems 集成分析 |
+| 3启服务 | `03_service_startup.json` | 启动命令、env vars、健康检查结果、端口、issue 提交记录（如有） |
+| 4精度评测 | `04_quick_accuracy.json` | V1/V2 精度评测命令、精度结果、issue 提交记录 |
+| 5精度算子调优 | `05_accuracy_tuning.json` | diagnose_ops 命令、分组测试结果、禁用算子、重评结果 |
+| 6性能评测 | `06_quick_performance.json` | V1/V2 性能测试命令、性能对比、issue 提交记录 |
+| 7性能算子调优 | `07_performance_tuning.json` | optimizer init/search 命令、每轮搜索结果、V3 benchmark |
+| 8自动发布 | `08_release.json` | qualified 判定、commit/tag/push 命令、ModelScope/HuggingFace 上传 URL |
 
 ### Trace 写入方式
 
@@ -579,16 +589,16 @@ pending → in_progress → success | failed | skipped
 - 保留包含关键信号词的行（步骤、✓、✗、达标、env_type、精度、性能等）
 
 **pipeline.log 不受模式影响**，始终按以下规则写入：
-- `[步骤①]` ~ `[步骤⑧]` 格式的行 — 步骤开始/完成/失败/跳过
+- `[步骤1]` ~ `[步骤8]` 格式的行 — 步骤开始/完成/失败/跳过
 - `✓` / `✗` / `⚠` 开头的行 — 关键结果摘要
 - 包含 `达标` / `不达标` / `qualified` / `ratio` / `偏差` 等关键词的行
 - 流程开始/结束自动写入头尾分隔线和耗时统计
 
 **对 Claude 输出的要求**：为确保 stream_filter.py 能正确提取，编排层输出文本时应遵循以下格式约定：
-- 步骤开始：`[步骤①] 容器准备 — 开始`
-- 步骤完成：`[步骤①] 容器准备 — 完成 (1m 9s)`
-- 步骤失败：`[步骤③] 启服务 — 失败`
-- 步骤跳过：`[步骤④] 精度评测 — 跳过`
+- 步骤开始：`[步骤1] 容器准备 — 开始`
+- 步骤完成：`[步骤1] 容器准备 — 完成 (1m 9s)`
+- 步骤失败：`[步骤3] 启服务 — 失败`
+- 步骤跳过：`[步骤4] 精度评测 — 跳过`
 - 关键结果：`✓ env_type=vllm_flaggems, flaggems=5.1.0`
 - 异常事件：`✗ V2/V1 性能比 72.1% < 80%`
 
@@ -598,7 +608,7 @@ pending → in_progress → success | failed | skipped
 
 ### 输出格式示例
 
-**流程开始**（步骤①开始前）：
+**流程开始**（步骤1开始前）：
 
 ```
 [2026-04-09 15:10:07] ===== FlagOS 迁移流程开始 =====
@@ -610,20 +620,20 @@ pending → in_progress → success | failed | skipped
 **步骤开始**：
 
 ```
-[2026-04-09 15:11:13] [步骤①] 容器准备 — 开始
+[2026-04-09 15:11:13] [步骤1] 容器准备 — 开始
 ```
 
 **步骤完成**：
 
 ```
-[2026-04-09 15:12:22] [步骤①] 容器准备 — 完成 (1m 9s)
+[2026-04-09 15:12:22] [步骤1] 容器准备 — 完成 (1m 9s)
   结果: 容器 nv_gems_tree 就绪, 8x H20-3e, 工具脚本已部署
 ```
 
 **步骤失败**：
 
 ```
-[2026-04-09 15:45:12] [步骤③] 启服务 — 失败
+[2026-04-09 15:45:12] [步骤3] 启服务 — 失败
   原因: FlagGems 模式启动失败, CUDA error in softmax
   操作: 提交 operator-crash issue, 标记 workflow.service_ok=false
 ```
@@ -631,41 +641,41 @@ pending → in_progress → success | failed | skipped
 **步骤跳过**：
 
 ```
-[2026-04-09 15:46:00] [步骤④] 精度评测 — 跳过
+[2026-04-09 15:46:00] [步骤4] 精度评测 — 跳过
   原因: 服务启动失败, 无法执行评测
 ```
 
 **异常事件与处理**（精度/性能不达标）：
 
 ```
-[2026-04-09 16:30:05] [步骤④] 精度异常 — V2 偏差超阈值
+[2026-04-09 16:30:05] [步骤4] 精度异常 — V2 偏差超阈值
   详情: V1=68.2%, V2=61.5%, 偏差=6.7% (阈值 5%)
-  操作: 标记 workflow.accuracy_ok=false, 直接触发步骤⑦
+  操作: 标记 workflow.accuracy_ok=false, 直接触发步骤5
 ```
 
 **算子调优（条件触发）**：
 
 ```
-[2026-04-09 16:50:00] [步骤⑦] 精度算子调优 — 开始
-[2026-04-09 16:55:00] [步骤⑦] 精度算子调优 — 完成 (5m 0s)
+[2026-04-09 16:50:00] [步骤5] 精度算子调优 — 开始
+[2026-04-09 16:55:00] [步骤5] 精度算子调优 — 完成 (5m 0s)
   结果: 分组排查2轮, 禁用 softmax+layer_norm, 偏差从6.7%降至1.7%, 达标
 
-[2026-04-09 16:55:30] [步骤⑧] 性能算子调优 — 开始
-[2026-04-09 17:10:00] [步骤⑧] 性能算子调优 — 完成 (14m 30s)
+[2026-04-09 16:55:30] [步骤7] 性能算子调优 — 开始
+[2026-04-09 17:10:00] [步骤7] 性能算子调优 — 完成 (14m 30s)
   结果: elimination 逐删15轮, 禁用 fused_moe, V3/V1=85.3%, 达标
 ```
 
 **算子调优跳过**：
 
 ```
-[2026-04-09 16:50:00] [步骤⑦] 精度算子调优 — 跳过
+[2026-04-09 16:50:00] [步骤5] 精度算子调优 — 已完成（未触发）
   原因: 精度达标 (偏差 1.7% ≤ 5%)
 
-[2026-04-09 16:50:01] [步骤⑧] 性能算子调优 — 跳过
+[2026-04-09 16:50:01] [步骤7] 性能算子调优 — 已完成（未触发）
   原因: 性能达标 (V2/V1=85.3% ≥ 80%)
 ```
 
-**流程结束**（步骤⑥完成后）：
+**流程结束**（步骤8完成后）：
 
 ```
 [2026-04-09 17:45:00] ===== FlagOS 迁移流程结束 =====
@@ -678,7 +688,7 @@ pending → in_progress → success | failed | skipped
 ### 格式规则
 
 - 时间戳格式：`[YYYY-MM-DD HH:MM:SS]`
-- 步骤标记：`[步骤①]` ~ `[步骤⑧]`（与 CLAUDE.md 工作流定义一致，⑦⑧为条件步骤）
+- 步骤标记：`[步骤1]` ~ `[步骤8]`（与 CLAUDE.md 工作流定义一致，5/7为条件步骤，不触发时显示已完成）
 - 事件关键词：`开始` / `完成` / `失败` / `跳过` / `异常`
 - 详情用 2 空格缩进
 - 每个步骤之间空一行
@@ -702,9 +712,9 @@ pending → in_progress → success | failed | skipped
 
 | 文件 | 写入时机 | 产出步骤 |
 |------|---------|---------|
-| `logs/issues_startup.log` | 服务启动失败、崩溃（不含超时，超时属于正常等待） | ③启服务、④⑤⑦⑧中的模式切换启动 |
-| `logs/issues_accuracy.log` | 精度偏差 >5%、评测报错、服务端错误 | ④精度评测、⑦精度算子调优 |
-| `logs/issues_performance.log` | 任一并发级别 V2/V1 < 80% | ⑤性能评测、⑧性能算子调优 |
+| `logs/issues_startup.log` | 服务启动失败、崩溃（不含超时，超时属于正常等待） | 3启服务、4/6中的模式切换启动 |
+| `logs/issues_accuracy.log` | 精度偏差 >5%、评测报错、服务端错误 | 4精度评测、5精度算子调优 |
+| `logs/issues_performance.log` | 任一并发级别 V2/V1 < 80% | 6性能评测、7性能算子调优 |
 
 ### 统一日志条目格式
 
@@ -725,12 +735,12 @@ pending → in_progress → success | failed | skipped
 [2026-03-20 16:30:05] V2 | 精度偏差超阈值
   详情: V1=68.2%, V2=61.5%, 偏差=6.7% (阈值 5%)
   操作: 提交 accuracy-degraded issue, 标记 workflow.accuracy_ok=false
-  结果: 触发步骤⑦精度算子调优
+  结果: 触发步骤5精度算子调优
 
 [2026-03-20 17:15:33] V2 | 性能不达标
   详情: 4k→1k conc=64, V1=12500 TPS, V2=8900 TPS, ratio=71.2% (<80%)
   操作: 提交 performance-degraded issue, 标记 workflow.performance_ok=false
-  结果: 继续进入⑥发布（私有）
+  结果: 继续进入6发布（私有）
 ```
 
 ### 写入方式
@@ -806,7 +816,7 @@ ISSUE_EOF"
 
 ## 最终报告格式
 
-步骤⑥完成后输出最终迁移报告并收尾：
+步骤8完成后输出最终迁移报告并收尾：
 
 **交付物清单**：
 - `results/` — 性能/精度结果文件
@@ -816,7 +826,7 @@ ISSUE_EOF"
 
 ### 容器产出同步到宿主机（按挂载模式决定）
 
-步骤⑥完成后、输出最终报告之前，根据 `workspace.mount_mode` 决定同步策略。
+步骤8完成后、输出最终报告之前，根据 `workspace.mount_mode` 决定同步策略。
 
 **判断方式**：读取容器内 `/flagos-workspace/.mount_mode` 标记文件（由 setup_workspace.sh 写入）。
 
@@ -878,14 +888,14 @@ GPU: <gpu_count>x <gpu_type>
 （V3 列仅在触发算子调优时显示）
 
 流程耗时:
-  ①容器准备:          XXm XXs
-  ②环境检测:          XXm XXs
-  ③启服务:            XXm XXs
-  ④精度评测:          XXm XXs
-  ⑦精度算子调优:      XXm XXs（如触发）
-  ⑤性能评测:          XXm XXs
-  ⑧性能算子调优:      XXm XXs（如触发）
-  ⑥自动发布:          XXm XXs
+  1容器准备:          XXm XXs
+  2环境检测:          XXm XXs
+  3启服务:            XXm XXs
+  4精度评测:          XXm XXs
+  7精度算子调优:      XXm XXs（如触发）
+  5性能评测:          XXm XXs
+  8性能算子调优:      XXm XXs（如触发）
+  6自动发布:          XXm XXs
 
 发布信息:
   Harbor 镜像: <full_harbor_tag>
@@ -922,7 +932,7 @@ GPU: <gpu_count>x <gpu_type>
 11. **流程不可中途终止**。精度不达标、性能不达标都不是终止流程的理由。编排层必须：
     - 写入对应的 issue log（`issues_accuracy.log` / `issues_performance.log`）
     - 标记 `workflow.xxx_ok=false`，继续下一步
-    - 最终走到步骤⑥发布（`qualified=false` → 私有发布）
+    - 最终走到步骤8发布（`qualified=false` → 私有发布）
     - 唯一允许终止的情况：Claude API 本身不可用（非模型问题）
 12. **workflow 状态字段必须与实际数据一致**。设置 `accuracy_ok` / `performance_ok` 时必须基于实际评测数据：
     - `accuracy_ok=true` 仅当 `eval.deviation <= eval.threshold`
@@ -936,13 +946,24 @@ GPU: <gpu_count>x <gpu_type>
 15. **流程中断后自动诊断**。`run_pipeline.sh` 在 Claude 退出后会自动运行 `diagnose_failure.py`，将诊断结果打印到终端并保存到 `logs/failure_diagnosis.json`。新会话启动时应优先读取此文件了解中断原因
 16. **编排层生成的 JSON 必须包含 `_meta` 字段说明**。Claude 通过 heredoc 写入的 JSON 文件（trace JSON、final_report.json 等）必须在顶层包含 `_meta` 对象，用中文说明关键字段含义，格式为 `{"字段名": "说明", ...}`。工具脚本（fast_gpqa.py、benchmark_runner.py、error_writer.py）已内置 `_meta` 输出，无需额外处理。所有消费方已通过 `_` 前缀约定自动跳过该字段
 17. **Issue 生成只能通过 `issue_reporter.py` 执行**，禁止手动拼 `gh issue create` 或直接调用 GitHub API。issue_reporter.py 默认只生成 markdown issue 文件（按类型标注文件名，如 `issue_operator-crash_*.md`），显式传入 `--submit` 时才通过 GitHub API 提交。生成的 issue 文件路径写入 context.yaml 的 `issues.submitted[]`
-18. **性能对比必须通过 `performance_compare.py` 执行**。步骤⑤ V1/V2 性能测试完成后，必须调用 `performance_compare.py` 生成对比表（quick 模式下只有 4k_input_1k_output × 64 一行，comprehensive 模式下为全量用例全并发）。禁止自行从 JSON 中提取数据手动计算 ratio。`performance_ok` 的判定必须基于 `performance_compare.py` 输出的 `min_ratio`
+18. **性能对比必须通过 `performance_compare.py` 执行**。步骤6 V1/V2 性能测试完成后，必须调用 `performance_compare.py` 生成对比表（quick 模式下只有 4k_input_1k_output × 64 一行，comprehensive 模式下为全量用例全并发）。禁止自行从 JSON 中提取数据手动计算 ratio。`performance_ok` 的判定必须基于 `performance_compare.py` 输出的 `min_ratio`
 19. **性能测试 output-name 必须使用标准命名**：V1 用 `native_performance`，V2 用 `flagos_performance`，V3 用 `flagos_optimized`。禁止使用 `benchmark_native`、`benchmark_flagos` 等非标准名称，否则 `performance_compare.py` 和下游消费方无法找到文件
 20. **工具脚本必须从项目目录或容器内 `/flagos-workspace` 执行**。禁止将脚本复制到 `/tmp` 或其他临时目录后执行。权限配置仅匹配 `python3 skills/*` 路径，复制到其他路径会被权限系统拦截
-21. **步骤⑦与④、⑧与⑤严禁同时进行（GPU 互斥）**。⑦必须在④完成后才能开始，⑤必须在⑦完成（或跳过）后才能开始，⑧必须在⑤完成后才能开始。整体串行：④ → ⑦ → ⑤ → ⑧
-22. **步骤⑦禁用的算子必须传递给步骤⑤和⑧**。禁用算子逐步累计：⑤的算子集 = 全量算子 - ⑦禁用的算子；⑧的初始算子集 = ⑤的算子集（即已排除⑦禁用的算子）
+21. **步骤5与4、7与6严禁同时进行（GPU 互斥）**。5必须在4完成后才能开始，6必须在5完成（或未触发）后才能开始，7必须在6完成后才能开始。整体串行：4 → 5 → 6 → 7
+22. **步骤5禁用的算子必须传递给步骤6和7**。禁用算子逐步累计：6的算子集 = 全量算子 - 5禁用的算子；7的初始算子集 = 6的算子集（即已排除5禁用的算子）
 23. **elimination 策略不限轮次上限**（由算子总数决定），但每轮 benchmark 使用 quick 模式（4k_input_1k_output 并发 64）。达标即停，不继续优化
-24. **步骤⑦⑧的 trace 文件独立**（`07_accuracy_tuning.json` / `08_performance_tuning.json`），不混入 `04_quick_accuracy.json` / `05_quick_performance.json`
+24. **步骤5/7的 trace 文件独立**（`05_accuracy_tuning.json` / `07_performance_tuning.json`），不混入 `04_quick_accuracy.json` / `06_quick_performance.json`
+25. **Claude Code Bash 工具受沙箱限制，只能直接操作项目工作目录内的文件**。`/data/flagos-workspace/`、`/data/models/` 等外部路径的文件读写必须通过以下方式：
+    - **读取/写入容器内文件**：`docker exec $CONTAINER bash -c "..."`（容器内 `/flagos-workspace` = 宿主机 `/data/flagos-workspace`）
+    - **宿主机同步**：`docker cp $CONTAINER:/flagos-workspace/... /data/flagos-workspace/.../`
+    - **宿主机目录创建**：由 `run_pipeline.sh` 和 `setup_workspace.sh` 预创建，Claude 不需要自行 mkdir
+    - **禁止**：直接 `mkdir -p /data/...`、`ls /data/models/...`、`cat > /data/.../file` 等宿主机路径操作（会被沙箱拦截）
+    - **唯一例外**：`docker cp` 命令本身在宿主机执行，但其目标路径已在权限白名单中
+26. **每个 segment 结束时 Claude 必须停止推理服务释放 GPU 显存**。每个 Claude 段（segment）结束前，如果该段启动了推理服务，必须执行 `docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null"` 停止服务。`run_pipeline.sh` 的 EXIT trap 会在脚本退出时兜底清理，但 Claude 段内的主动清理可以更早释放 GPU 资源
+27. **V1/V2 模式切换前必须先停止当前服务释放 GPU**。每次切换 FlagGems 模式（native↔flagos）前，必须先执行 `docker restart $CONTAINER && sleep 5` 停止当前服务。禁止在旧服务运行时直接启动新服务，否则会导致 GPU 显存泄漏、显卡越用越少
+28. **V1 和 V2 必须使用相同的 GPU 配置**。GPU 检测（步骤2.3）结果写入 context.yaml 后，后续所有模式切换（V1/V2/V3）复用同一 `CUDA_VISIBLE_DEVICES` 和 `TP_SIZE` 配置，禁止重新检测 GPU。重新检测会因旧服务残留导致可用 GPU 数量不一致，使性能对比不公平
+29. **步骤7性能算子调优必须通过 `operator_search.py run` 一次性执行**。禁止编排层手动拼凑 toggle→restart→benchmark 循环。`operator_search.py` 已封装完整的 next→配置→重启→benchmark→update 自动循环，包含 GPU 可用性检查、显存释放验证、断点恢复。手动拼凑会消耗大量 token 且容易在 GPU 资源不足时做出错误决策（如禁用大量算子反而性能更差）。唯一例外：`operator_search.py` 本身报错退出时，编排层可读取 `_last_error.json` 诊断后决定是否重试或终止
+30. **每轮算子搜索前必须验证 GPU 显存已释放**。`operator_search.py` 的 `restart_service()` 在 pkill 后等待 GPU 显存降至空闲水平（<5% 占用），超时 30s 未释放则 pkill -9 强制清理。`run_full_search()` 每轮开始前检查 GPU 可用性，连续清理仍无可用 GPU 则中止搜索并记录错误，禁止在无可用 GPU 时盲目启动服务
 
 ---
 
