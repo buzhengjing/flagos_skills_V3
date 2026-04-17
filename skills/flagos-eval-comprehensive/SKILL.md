@@ -190,7 +190,7 @@ docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
   模型:     Qwen3-30B-A3B
   模式:     thinking (temperature=0.6, max_tokens=24576)
   并发:     32
-  题数:     198
+  题数:     30
   得分:     61.11%
   耗时:     10m 25s
   报告:     gpqa_result.json

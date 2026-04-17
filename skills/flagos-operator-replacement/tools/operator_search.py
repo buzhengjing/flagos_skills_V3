@@ -291,13 +291,12 @@ def _apply_non_plugin_config(action: Dict[str, Any],
     test_enabled = action.get("test_enabled_ops", [])
     test_disabled = action.get("test_disabled_ops", [])
 
-    # 未传 capabilities 时自动探测
-    if capabilities:
-        caps = capabilities
-    else:
-        caps = _detect_flaggems_capabilities()
-        if caps:
-            print(f"  [auto-detect] FlagGems capabilities: {caps}")
+    # 始终自动探测 capabilities，忽略外部传入（避免传错导致 Layer 降级失败）
+    caps = _detect_flaggems_capabilities()
+    if caps:
+        print(f"  [auto-detect] FlagGems capabilities: {caps}")
+    if capabilities and set(capabilities) != set(caps):
+        print(f"  [auto-detect] 忽略外部传入 capabilities={capabilities}，以自动探测为准")
 
     # 用注册表（而非 oplist）计算完整禁用列表，确保不在 oplist 中的算子也被显式关闭
     base_ops = registered_ops or all_ops
@@ -404,14 +403,16 @@ def restart_service(stop_cmd: str, startup_cmd: str,
         if not wait_gpu_memory_release(timeout=15):
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
-    # 启动（plugin 场景使用内联环境变量前缀）
+    # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
     if env_inline:
         actual_cmd = f"{env_inline} {startup_cmd}"
-        print(f"  启动服务（内联 env vars）...")
+        print(f"  启动服务（内联 env vars，后台）...")
     else:
         actual_cmd = startup_cmd
-        print("  启动服务...")
-    run_cmd(actual_cmd, check=False)
+        print("  启动服务（后台）...")
+    log_path = "/flagos-workspace/logs/startup_search.log"
+    bg_cmd = f"nohup {actual_cmd} > {log_path} 2>&1 &"
+    run_cmd(bg_cmd, check=False)
 
     # 等待就绪（传递端口号，避免非默认端口时超时）
     wait_cmd = f"bash {wait_script} --timeout {wait_timeout}"
@@ -743,11 +744,17 @@ def run_full_search(state_path: str, perf_config: str,
                     capabilities: Optional[List[str]] = None,
                     **kwargs) -> Dict[str, Any]:
     """运行完整搜索循环"""
-    # 读取搜索方向
+    # 读取状态并检查残留 completed 状态
     _state = {}
     try:
         _state = load_json(state_path)
         search_direction = _state.get("search_direction", "forward")
+        # 防御：上次失败后残留 status=completed 但无有效搜索结果，自动重置
+        if _state.get("status") == "completed" and not _state.get("completed_at"):
+            print("  ⚠ 检测到残留 status=completed（无 completed_at），自动重置为 in_progress")
+            _state["status"] = "in_progress"
+            _state["current_step"] = 0
+            save_json(_state, state_path)
     except Exception:
         search_direction = "forward"
 
@@ -905,7 +912,7 @@ def main():
     common.add_argument("--service-startup-cmd", required=True, help="服务启动命令")
     common.add_argument("--gems-txt-path", help="gems.txt 路径（非 plugin 兜底写入）")
     common.add_argument("--plugin-mode", action="store_true", help="Plugin 模式（环境变量控制）")
-    common.add_argument("--capabilities", help="flaggems_capabilities（逗号分隔，非 plugin 场景）")
+    common.add_argument("--capabilities", help="已废弃：capabilities 始终自动探测，此参数被忽略")
     common.add_argument("--optimizer-script", default=DEFAULT_OPTIMIZER_SCRIPT)
     common.add_argument("--benchmark-script", default=DEFAULT_BENCHMARK_SCRIPT)
     common.add_argument("--toggle-script", default=DEFAULT_TOGGLE_SCRIPT)

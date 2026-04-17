@@ -422,6 +422,7 @@ def run_fast_gpqa(
     api_key: str = 'EMPTY',
     dataset_dir: Optional[str] = None,
     dataset_hub: str = 'modelscope',
+    limit: Optional[int] = 30,
 ) -> Dict:
     """
     GPQA Diamond 快速评测主流程。
@@ -501,7 +502,8 @@ def run_fast_gpqa(
 
     # Step 7: 正式评测
     print("-" * 60)
-    print(f"[EVAL] 正式评测: gpqa_diamond (198题, 并发={batch_size})")
+    total_questions = limit if limit else 198
+    print(f"[EVAL] 正式评测: gpqa_diamond ({total_questions}题, 并发={batch_size})")
     print("-" * 60)
 
     model_id = _sanitize_model_id(model_name)
@@ -523,6 +525,8 @@ def run_fast_gpqa(
     )
     if dataset_dir:
         task_kwargs['dataset_dir'] = dataset_dir
+    if limit:
+        task_kwargs['limit'] = limit
 
     task_cfg = TaskConfig(**task_kwargs)
 
@@ -545,7 +549,7 @@ def run_fast_gpqa(
         'benchmark': 'gpqa_diamond',
         'mode': mode_str,
         'score': score,
-        'total_questions': 198,
+        'total_questions': total_questions,
         'eval_batch_size': batch_size,
         'max_tokens': max_tokens,
         'max_model_len': max_model_len,
@@ -561,7 +565,7 @@ def run_fast_gpqa(
             'benchmark': '评测基准名称（固定 gpqa_diamond）',
             'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
             'score': 'GPQA Diamond 正确率百分比',
-            'total_questions': '评测题目总数（GPQA Diamond 固定 198 题）',
+            'total_questions': '评测题目总数（默认 30 题，--limit 0 为全量 198 题）',
             'eval_batch_size': '评测并发数（自动探测选择）',
             'max_tokens': '单次生成最大 token 数',
             'max_model_len': '模型支持的最大上下文长度',
@@ -588,7 +592,7 @@ def run_fast_gpqa(
     print(f"  模型:     {model_name}")
     print(f"  模式:     {mode_str} (temperature={gen_config['temperature']}, max_tokens={max_tokens})")
     print(f"  并发:     {batch_size}")
-    print(f"  题数:     198")
+    print(f"  题数:     {total_questions}")
     if score is not None:
         print(f"  得分:     {score:.2f}%")
     else:
@@ -624,6 +628,8 @@ def main():
                         help='API 密钥 (覆盖 config)')
     parser.add_argument('--dataset-dir', type=str, default=None,
                         help='数据集缓存目录 (覆盖 config)')
+    parser.add_argument('--limit', type=int, default=30,
+                        help='限制评测题数（默认 30 题，传 0 或 198 为全量）')
     args = parser.parse_args()
 
     # 加载配置
@@ -682,6 +688,7 @@ def main():
             api_key=api_key,
             dataset_dir=dataset_dir,
             dataset_hub=dataset_hub,
+            limit=args.limit or None,
         )
         sys.exit(0 if report.get('score') is not None else 1)
     except Exception as e:
