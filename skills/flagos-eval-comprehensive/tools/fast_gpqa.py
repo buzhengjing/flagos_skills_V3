@@ -87,7 +87,7 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
     """
     自动计算 max_tokens，基于服务端实际 max_model_len。
 
-    thinking 模型：max_model_len - 8192，下限 8192，不设上限 cap
+    thinking 模型：max_model_len - 8192，clamp 到 [32768, 49152]（截断时 check_truncation 自动翻倍）
     标准模型：max_model_len - 8192，clamp 到 [4096, 32768]
 
     Returns:
@@ -97,13 +97,14 @@ def auto_max_tokens(api_base: str, api_key: str, model_name: str, is_thinking: b
     if max_model_len:
         tokens = max_model_len - 8192  # 预留 8K 给 prompt
         if is_thinking:
-            tokens = max(tokens, 8192)
+            tokens = max(tokens, 32768)
+            tokens = min(tokens, 49152)
         else:
             tokens = max(tokens, 4096)
             tokens = min(tokens, 32768)
         return tokens, max_model_len
     # fallback
-    return (16384 if is_thinking else 8192), None
+    return (32768 if is_thinking else 8192), None
 
 
 # =============================================================================
