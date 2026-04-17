@@ -1,5 +1,5 @@
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 ｜ google/gemma-3-1b-itiv
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 ｜ google/gemma-2-2b-it
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 ｜ meta-llama/Llama-3.2-1B-Instruct
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 ｜ tencent/Hunyuan-7B-Instruct
-harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 ｜ zai-org/GLM-4-9B-0414
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | google/gemma-3-1b-it
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | google/gemma-2-2b-it
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | meta-llama/Llama-3.2-1B-Instruct
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | tencent/Hunyuan-7B-Instruct
+harbor.baai.ac.cn/flagrelease-public/nv_gems_tree:04081426 | THUDM/glm-4-9b-chat

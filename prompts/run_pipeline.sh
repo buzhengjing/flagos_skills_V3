@@ -106,6 +106,11 @@ else
     fi
 fi
 
+if [ -z "$MODEL" ]; then
+    echo "错误: 模型名为空，请检查输入参数（可能是分隔符使用了全角字符）"
+    exit 1
+fi
+
 # ========== 镜像模式：自动搜索宿主机模型路径 ==========
 if $IMAGE_MODE && [ -z "$MODEL_PATH" ]; then
     echo "[pre-flight] 搜索宿主机模型路径: ${MODEL} ..."
