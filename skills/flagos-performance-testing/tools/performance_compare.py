@@ -200,7 +200,8 @@ def shorten_test_case(name: str) -> str:
     return name
 
 
-def print_markdown_table(rows: List[Dict[str, Any]], benchmark_names: List[str]):
+def print_markdown_table(rows: List[Dict[str, Any]], benchmark_names: List[str],
+                         target_ratio: float = 0.8):
     """打印标准 markdown 格式的逐并发级别对比表格"""
 
     display_names = {
@@ -267,12 +268,13 @@ def print_markdown_table(rows: List[Dict[str, Any]], benchmark_names: List[str])
         if all_ratios:
             avg_ratio = sum(all_ratios) / len(all_ratios)
             min_ratio = min(all_ratios)
-            status = "PASS" if min_ratio >= 0.8 else "FAIL"
+            status = "PASS" if min_ratio >= target_ratio else "FAIL"
             dn = display_names.get(name, name)
             print(f"{dn}: avg_ratio={avg_ratio*100:.1f}%, min_ratio={min_ratio*100:.1f}% [{status}]")
 
 
-def print_comparison(rows: List[Dict[str, Any]], benchmark_names: List[str]):
+def print_comparison(rows: List[Dict[str, Any]], benchmark_names: List[str],
+                     target_ratio: float = 0.8):
     """打印文本格式的逐并发级别对比"""
     print(f"\n{'='*80}")
     print("性能对比摘要（逐并发级别）")
@@ -331,7 +333,7 @@ def print_comparison(rows: List[Dict[str, Any]], benchmark_names: List[str]):
         if all_ratios:
             avg_ratio = sum(all_ratios) / len(all_ratios)
             min_ratio = min(all_ratios)
-            status = "PASS" if min_ratio >= 0.8 else "FAIL"
+            status = "PASS" if min_ratio >= target_ratio else "FAIL"
             print(f"{name}: avg_ratio={avg_ratio*100:.1f}%, min_ratio={min_ratio*100:.1f}% [{status}]")
 
 
@@ -417,9 +419,9 @@ def main():
 
     # 打印摘要
     if args.format == "markdown":
-        print_markdown_table(rows, benchmark_names)
+        print_markdown_table(rows, benchmark_names, target_ratio=args.target_ratio)
     else:
-        print_comparison(rows, benchmark_names)
+        print_comparison(rows, benchmark_names, target_ratio=args.target_ratio)
 
     # 保存 CSV
     save_csv(rows, args.output, benchmark_names)

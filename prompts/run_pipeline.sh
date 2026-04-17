@@ -204,6 +204,19 @@ COMMON_PLAN_STEPS=$(cat <<PLAN_STEPS_EOF
   docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"
   docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --json --output /flagos-workspace/results/report.json"
 报告随步骤推进自动丰富，无需手动拼接。
+
+**context.yaml 更新方式（必须使用工具脚本，禁止手写 Python）**：
+容器内已部署 update_context.py，支持嵌套字段设置、数组追加、台账更新，避免 sandbox 拦截：
+  # 设置字段
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set container.name=xxx --set gpu.count=8 --json"
+  # 设置复杂 JSON 值
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --json-set 'service={\\\"port\\\":8001}' --json"
+  # 更新台账
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --ledger-update 01_container_preparation --ledger-status success --ledger-notes '容器就绪' --json"
+  # 追加数组
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --append issues.submitted=/path/to/issue.md --json"
+  # 设置 timing
+  docker exec \${CONTAINER} bash -c "PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set-timing steps.container_preparation=171 --json"
 PLAN_STEPS_EOF
 )
 
@@ -510,6 +523,28 @@ echo "  环境类型: ${SEG_ENV}"
 echo "  最后完成步骤: ${SEG_LAST}"
 echo ""
 
+# 从 context_snapshot 提取关键参数，注入段2 prompt 减少 Claude 重读文件时间
+SEG2_CTX_SUMMARY=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+svc = ctx.get('service', {})
+rt = ctx.get('runtime', {})
+gpu = ctx.get('gpu', {})
+env = ctx.get('environment', {})
+mdl = ctx.get('model', {})
+fc = ctx.get('flaggems_control', {})
+print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
+- GPU: {gpu.get('count','')}x {gpu.get('type','')}, CUDA_VISIBLE_DEVICES={rt.get('cuda_visible_devices', gpu.get('cuda_visible_devices',''))}
+- TP: {rt.get('tp_size','')}
+- 端口: {svc.get('port','')}
+- FlagGems 算子数: {svc.get('enable_oplist_count','')}
+- gems_txt_path: {env.get('flaggems_txt_path', svc.get('gems_txt_path',''))}
+- max_model_len: {svc.get('max_model_len','')}
+- thinking_model: {rt.get('thinking_model','')}
+- integration_type: {fc.get('integration_type','')}''')
+" 2>/dev/null || echo "  (context 摘要提取失败)")
+
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
 PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
 ${COMMON_TOKENS}
@@ -521,6 +556,13 @@ ${COMMON_TOKENS}
 - env_type=${SEG_ENV}，最后完成步骤: ${SEG_LAST}
 - context.yaml 中 workflow_ledger 的步骤3状态可能未更新（段1的已知问题），但步骤3确实已完成，直接从步骤4开始
 - **禁止**回头检查或重做步骤1/2/3，**禁止**查找 execution_plan.md（不存在）
+
+**关键参数（从 context.yaml 提取，无需重新读取文件）**：
+${SEG2_CTX_SUMMARY}
+
+**context.yaml 更新方式**：使用容器内 update_context.py 工具（已部署到 /flagos-workspace/scripts/），避免手写 Python 脚本：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set key.path=value --json\"
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --ledger-update 04_quick_accuracy --ledger-status success --ledger-notes '...'\"
 
 **步骤编号（严格遵守，输出 [步骤X] 时必须使用以下编号）**：
 - [步骤4] 精度评测（GPQA Diamond）
@@ -622,10 +664,34 @@ if [ ! -f "${CTX_FILE}" ] || [ "$(find "${CTX_FILE}" -mmin +60 2>/dev/null)" ]; 
     fi
 fi
 
-CTX_INFO=$(read_context "${MODEL}") || { echo "错误：段2未更新 context_snapshot.yaml"; }
+CTX_INFO=$(read_context "${MODEL}") || { echo "错误：段2未更新 context_snapshot.yaml，终止"; exit 1; }
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
 echo ""
+
+# 从 context_snapshot 提取段3所需的关键参数
+SEG3_CTX_SUMMARY=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+wf = ctx.get('workflow', {})
+ev = ctx.get('eval', {})
+perf = ctx.get('performance', {})
+svc = ctx.get('service', {})
+gpu = ctx.get('gpu', {})
+mdl = ctx.get('model', {})
+ws = ctx.get('workspace', {})
+print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
+- GPU: {gpu.get('count','')}x {gpu.get('type','')}
+- service_ok: {wf.get('service_ok','')}
+- accuracy_ok: {wf.get('accuracy_ok','')}
+- performance_ok: {wf.get('performance_ok','')}
+- qualified: {wf.get('qualified','')}
+- V1 精度: {ev.get('v1_score','')}%, V2 精度: {ev.get('v2_score','')}%, 偏差: {ev.get('accuracy_diff','')}%
+- 性能 min_ratio: {perf.get('min_ratio','')}
+- mount_mode: {ws.get('mount_mode','')}
+- 宿主机路径: {ws.get('host_path','')}''')
+" 2>/dev/null || echo "  (context 摘要提取失败)")
 
 # ===== 段3: 8 (打包发布) =====
 PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
@@ -638,6 +704,12 @@ ${COMMON_TOKENS}
 - 容器 ${SEG_CTR} 已就绪，评测结果已写入 results/ 目录
 - context.yaml 中 workflow_ledger 的部分步骤状态可能未更新（已知问题），但前段步骤确实已完成
 - **禁止**回头检查或重做步骤1-7，直接执行步骤8
+
+**关键参数（从 context.yaml 提取，无需重新读取文件）**：
+${SEG3_CTX_SUMMARY}
+
+**context.yaml 更新方式**：使用容器内 update_context.py 工具：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/update_context.py --set key.path=value --json\"
 
 **步骤编号（严格遵守）**：本段只有 [步骤8] 自动发布，输出进度标记时必须使用 [步骤8]，不要使用其他编号。
 

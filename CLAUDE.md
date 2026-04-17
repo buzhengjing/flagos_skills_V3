@@ -222,7 +222,7 @@ docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/resu
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/performance_compare.py \
      --native /flagos-workspace/results/native_performance.json \
      --flagos-optimized /flagos-workspace/results/flagos_optimized.json \
-     --flagos-full /flagos-workspace/results/flagos_performance.json \
+     --flagos-initial /flagos-workspace/results/flagos_performance.json \
      --output /flagos-workspace/results/performance_compare.csv \
      --target-ratio 0.8 --format markdown"
 7. 结果判定：

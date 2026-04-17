@@ -246,6 +246,8 @@ SCRIPT_MAP=(
     "skills/flagos-log-analyzer/tools/log_analyzer.py:scripts/log_analyzer.py"
     # 共享模块
     "skills/flagos-operator-replacement/tools/ops_constants.py:scripts/ops_constants.py"
+    # context.yaml 结构化更新工具
+    "shared/update_context.py:scripts/update_context.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
     # 错误/检查点持久化
@@ -309,6 +311,7 @@ fi
 echo "[4/6] 检查脚本依赖..."
 docker exec "${CONTAINER}" bash -c "
     PATH=/opt/conda/bin:\$PATH python3 -c 'import yaml' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install pyyaml -q 2>/dev/null || true
+    PATH=/opt/conda/bin:\$PATH python3 -c 'import evalscope' 2>/dev/null || PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests modelscope -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>/dev/null || true
 "
 echo "  依赖检查完成"
 
@@ -327,6 +330,12 @@ if [ -n "${ENV_LINES}" ]; then
 else
     echo "  ⚠ 宿主机未设置任何 token 环境变量，跳过 .env 写入"
 fi
+
+# 4.6. 预装评测依赖（避免评测阶段首次 pip install 浪费 2-3 分钟）
+echo "[4.6/6] 预装评测依赖..."
+docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH pip install evalscope pyyaml requests -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com -q 2>&1 | tail -3" && \
+    echo "  ✓ 评测依赖预装完成" || \
+    echo "  ⚠ 评测依赖安装失败（非致命，评测阶段会重试）"
 
 # 5. 验证
 echo "[5/6] 验证部署..."

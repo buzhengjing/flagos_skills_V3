@@ -776,7 +776,6 @@ def main():
     parser.add_argument("--output-json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--download-dir", default=None, help="自动下载目标目录")
     parser.add_argument("--no-download", action="store_true", help="禁用自动下载，仅搜索本地")
-    parser.add_argument("--container", default=None, help="容器名，提供时优先在容器内下载（需挂载目标目录）")
     parser.add_argument("--container-model-path", default=None, help="容器内模型下载路径（如 /data/models/Qwen3-8B）")
     args = parser.parse_args()
 

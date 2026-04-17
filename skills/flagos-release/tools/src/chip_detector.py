@@ -878,6 +878,8 @@ def sanitize_docker_tag(tag: str) -> str:
     Returns:
         清理后的合法 tag 字符串
     """
+    # Docker tag 不允许 + 字符，替换为 .
+    tag = tag.replace('+', '.')
     # 将 _- 替换为 _（去掉连字符）
     tag = re.sub(r'_-', '_', tag)
     # 将 -_ 替换为 _（去掉连字符）

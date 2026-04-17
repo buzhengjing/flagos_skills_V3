@@ -380,7 +380,8 @@ def _apply_txt_fallback(enabled_ops: List[str], gems_txt_path: Optional[str]) ->
 
 def restart_service(stop_cmd: str, startup_cmd: str,
                     wait_script: str, wait_timeout: int = SERVICE_WAIT_TIMEOUT,
-                    env_inline: Optional[str] = None) -> bool:
+                    env_inline: Optional[str] = None,
+                    port: Optional[int] = None) -> bool:
     """重启服务：停止 → 启动 → 等待就绪"""
     print("\n[重启服务]")
 
@@ -412,10 +413,13 @@ def restart_service(stop_cmd: str, startup_cmd: str,
         print("  启动服务...")
     run_cmd(actual_cmd, check=False)
 
-    # 等待就绪
-    print(f"  等待服务就绪 (最多 {wait_timeout}s)...")
+    # 等待就绪（传递端口号，避免非默认端口时超时）
+    wait_cmd = f"bash {wait_script} --timeout {wait_timeout}"
+    if port:
+        wait_cmd += f" --port {port}"
+    print(f"  等待服务就绪 (最多 {wait_timeout}s, port={port or 8000})...")
     result = run_cmd(
-        f"bash {wait_script} --timeout {wait_timeout}",
+        wait_cmd,
         timeout=wait_timeout + 30,
         check=False
     )
@@ -538,8 +542,9 @@ def preflight_framework_check(service_startup_cmd: str,
 
     # 以 USE_FLAGGEMS=0 启动（完全禁用 FlagGems，仅保留 plugin 框架）
     env_inline = "USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false"
+    svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline):
+                           env_inline=env_inline, port=svc_port):
         return {"pass": False, "ratio": 0, "throughput": 0,
                 "message": "ERROR: 框架预检服务启动失败"}
 
@@ -600,6 +605,18 @@ def preflight_framework_check(service_startup_cmd: str,
 # 主搜索循环
 # =============================================================================
 
+def _read_service_port() -> Optional[int]:
+    """从 context.yaml 读取服务端口"""
+    try:
+        import yaml
+        with open("/flagos-workspace/shared/context.yaml", "r") as f:
+            ctx = yaml.safe_load(f) or {}
+        port = ctx.get("service", {}).get("port")
+        return int(port) if port else None
+    except Exception:
+        return None
+
+
 def run_search_step(state_path: str, perf_config: str,
                     service_startup_cmd: str,
                     gems_txt_path: Optional[str] = None,
@@ -653,8 +670,9 @@ def run_search_step(state_path: str, perf_config: str,
 
     # 3. 重启服务
     t0 = time.time()
+    svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline):
+                           env_inline=env_inline, port=svc_port):
         return {"action": "error", "message": "服务重启失败"}
     step_timing["restart_seconds"] = round(time.time() - t0, 1)
 

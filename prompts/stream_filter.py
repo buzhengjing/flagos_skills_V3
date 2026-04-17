@@ -42,7 +42,7 @@ RE_SEPARATOR = re.compile(r'={3,}')
 
 # 关键判定词
 RE_VERDICT = re.compile(
-    r'qualified|达标|不达标|偏差|ratio|精度|性能|service_ok|accuracy_ok|performance_ok|'
+    r'qualified|达标|不达标|偏差|\bratio\b|精度|性能|service_ok|accuracy_ok|performance_ok|'
     r'env_type=|flaggems=|公开发布|私有发布',
     re.IGNORECASE
 )
@@ -78,10 +78,11 @@ RE_FILLER = re.compile(
 
 # 关键信号词 — 包含这些的行始终显示
 SIGNAL_KEYWORDS = [
-    '步骤', '✓', '✗', '⚠', '达标', '不达标', 'qualified', 'ratio',
+    '步骤', '✓', '✗', '⚠', '达标', '不达标', 'qualified', 'ratio=', 'ratio ',
     'env_type', 'flaggems=', '偏差', '性能', '精度', '公开发布', '私有发布',
     'service_ok', 'accuracy_ok', 'performance_ok', '报告', '迁移报告',
     '耗时', 'TPS', 'V1', 'V2', 'V3', '算子',
+    'ops,', 'ops)', 'ops ', 'excluded', 'disabled', 'round ', 'deviation', 'baseline',
 ]
 
 # 关键 Bash 命令关键词 — 只有匹配这些的才在终端显示
@@ -379,12 +380,12 @@ def should_display_line(line: str) -> bool:
     # 段边框行 → 始终显示
     if RE_SEG_BORDER.match(stripped):
         return True
-    # 英文填充语 → 先判定过滤（优先于信号词，避免含 V1/V2 的填充语漏过）
-    if RE_FILLER.match(stripped):
-        return False
-    # 包含关键信号词 → 显示
+    # 包含关键信号词 → 始终显示（优先于填充语和纯英文过滤）
     if any(kw in stripped for kw in SIGNAL_KEYWORDS):
         return True
+    # 英文填充语 → 过滤
+    if RE_FILLER.match(stripped):
+        return False
     # 步骤分隔线
     if RE_SEPARATOR.match(stripped) or stripped.startswith('━') or stripped.startswith('---'):
         return True
@@ -421,7 +422,7 @@ def should_show_command(cmd: str) -> bool:
 
 _PHASE_BANNERS = [
     ('vllm serve',           '🚀 服务启动中...'),
-    ('sglang',               '🚀 服务启动中（SGLang）...'),
+    ('-m sglang',            '🚀 服务启动中（SGLang）...'),
     ('wait_for_service',     '⏳ 等待服务就绪...'),
     ('fast_gpqa',            '📊 精度评测运行中（GPQA Diamond）...'),
     ('benchmark_runner',     '📊 性能评测运行中（Benchmark）...'),
@@ -429,17 +430,42 @@ _PHASE_BANNERS = [
     ('diagnose_ops.py',      '🔧 精度算子诊断中...'),
     ('toggle_flaggems.py --action enable',  '🔄 启用 FlagGems...'),
     ('toggle_flaggems.py --action disable', '🔄 关闭 FlagGems...'),
+    ('toggle_flaggems.py --action modify-enable', None),  # 动态生成，见 _detect_phase_banner
     ('docker commit',        '📦 打包镜像中...'),
     ('docker push',          '📦 推送镜像中...'),
 ]
 _last_phase_banner = ''
 
 
+def _extract_ops_summary(cmd: str) -> str:
+    """从 toggle_flaggems modify-enable 命令中提取算子摘要"""
+    m = re.search(r"--disabled-ops\s+['\"]?([^'\"]+)['\"]?", cmd)
+    if m:
+        ops = m.group(1).strip().rstrip("'\"")
+        if len(ops) > 40:
+            count = len(ops.split(','))
+            ops = ops[:35] + f'...共{count}个'
+        return f'🔄 启用 FlagGems（排除 {ops}）...'
+    m = re.search(r"--enabled-ops\s+['\"]?([^'\"]+)['\"]?", cmd)
+    if m:
+        ops = m.group(1).strip().rstrip("'\"")
+        if len(ops) > 40:
+            count = len(ops.split(','))
+            ops = ops[:35] + f'...共{count}个'
+        return f'🔄 启用 FlagGems（仅 {ops}）...'
+    return '🔄 调整 FlagGems 算子...'
+
+
 def _detect_phase_banner(cmd: str) -> str:
     """检测命令是否对应关键阶段，返回标题（连续相同标题不重复）"""
     global _last_phase_banner
+    # 停止/检查命令不触发阶段标题
+    if any(p in cmd for p in ('pkill', 'kill -', 'pgrep', 'docker restart', 'docker stop')):
+        return ''
     for pattern, banner in _PHASE_BANNERS:
         if pattern in cmd:
+            if banner is None:
+                banner = _extract_ops_summary(cmd)
             if banner != _last_phase_banner:
                 _last_phase_banner = banner
                 return banner
@@ -580,7 +606,7 @@ def out(text: str, colors: Colors = None, end: str = '\n'):
     print(text, end=end, flush=True)
 
 
-def format_result_compact(stdout: str, is_error: bool) -> str:
+def format_result_compact(stdout: str, is_error: bool, last_cmd: str = '') -> str:
     """精简模式：压缩工具结果为一行摘要"""
     if not stdout:
         return ''
@@ -592,8 +618,20 @@ def format_result_compact(stdout: str, is_error: bool) -> str:
         for l in lines:
             s = l.strip()
             if s and len(s) > 3 and not s.startswith('{') and not s.startswith('['):
-                return f'    ✗ {s[:150]}'
-        return f'    ✗ {lines[0].strip()[:150]}'
+                return f'    \u2717 {s[:150]}'
+        return f'    \u2717 {lines[0].strip()[:150]}'
+    # 评测/性能结果：提取关键数值行
+    if last_cmd and ('fast_gpqa' in last_cmd or 'benchmark_runner' in last_cmd or 'performance_compare' in last_cmd):
+        key_lines = []
+        for l in lines:
+            s = l.strip()
+            if re.search(r'得分|score|TPS|throughput|ratio|accuracy|正确率', s, re.IGNORECASE):
+                key_lines.append(s)
+        if key_lines:
+            summary = ' | '.join(s.lstrip('| ').rstrip() for s in key_lines[:3])
+            if len(lines) > 5:
+                return f'    {summary[:140]}  ({len(lines)} lines)'
+            return f'    {summary[:150]}'
     # 过滤无意义的单字符/括号结果
     last = lines[-1].strip()
     if len(last) <= 2 or last in ('}', ']', '{', '[', 'OK', 'ok'):
@@ -635,6 +673,7 @@ def main():
 
     # 跟踪上一个 tool_use 是否应该显示结果（精简模式用）
     last_tool_visible = False
+    last_cmd = ''
 
     try:
         for line in sys.stdin:
@@ -701,17 +740,10 @@ def main():
                         if name == "Bash":
                             cmd = inp.get('command', '')[:200]
 
-                            # 兜底：检测到步骤1相关命令但进度条仍 pending → 自动标记开始
+                            # 提前更新进度条状态（不输出可见文本，步骤标记由 Claude 文本输出驱动）
                             STEP1_CMD_HINTS = ['nvidia-smi', 'docker inspect', 'docker run', 'setup_workspace', 'check_model_local']
                             if any(kw in cmd for kw in STEP1_CMD_HINTS) and progress.states[0] == 'pending':
-                                step1_start = '[步骤1] 容器准备 — 开始'
-                                if not verbose:
-                                    out('━' * 50, colors)
-                                    out(step1_start, colors)
-                                    out('━' * 50, colors)
                                 progress.on_step_start('1')
-                                if logger.log_file:
-                                    logger.write_line(add_timestamp(step1_start))
 
                             # pipeline.log 记录关键命令
                             if args.pipeline_log and logger.log_file:
@@ -723,9 +755,11 @@ def main():
                             if verbose:
                                 out(f"\n  ▶ {cmd}")
                                 last_tool_visible = True
+                                last_cmd = cmd
                             else:
-                                # 关键阶段自动注入醒目标题（不依赖 Claude 输出）
-                                banner = _detect_phase_banner(cmd)
+                                # 关键阶段自动注入醒目标题（仅对可见命令）
+                                show_cmd = should_show_command(cmd)
+                                banner = _detect_phase_banner(cmd) if show_cmd else ''
                                 if banner:
                                     out('', colors)
                                     out(f'  ▸ {banner}', colors)
@@ -733,9 +767,10 @@ def main():
                                     if logger.log_file:
                                         logger.write_line(add_timestamp(f'▸ {banner}'))
 
-                                if should_show_command(cmd):
+                                if show_cmd:
                                     out(f"  ▶ {cmd}", colors)
                                     last_tool_visible = True
+                                    last_cmd = cmd
                                 else:
                                     last_tool_visible = False
 
@@ -775,7 +810,7 @@ def main():
                         print(f"    {preview}", flush=True)
                     elif last_tool_visible:
                         # 精简模式：只显示可见命令的压缩结果
-                        compact = format_result_compact(stdout, is_error)
+                        compact = format_result_compact(stdout, is_error, last_cmd)
                         if compact:
                             out(compact, colors)
 
