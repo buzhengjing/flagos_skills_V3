@@ -191,9 +191,9 @@ class EnvironmentInfo:
     # GPU/加速卡
     gpu_model: str = ""            # GPU型号
     gpu_count: int = 0             # GPU数量
-    # FlagGems/FlagScale
+    # FlagGems/FlagTree
     flaggems_version: str = ""
-    flagscale_version: str = ""
+    flagtree_version: str = ""
     # vLLM
     vllm_version: str = ""
     # 架构
@@ -343,8 +343,8 @@ class ChipDetector:
         # FlagGems 版本
         env.flaggems_version = self._detect_flaggems_version()
 
-        # FlagScale 版本
-        env.flagscale_version = self._detect_flagscale_version()
+        # FlagTree 版本
+        env.flagtree_version = self._detect_flagtree_version()
 
         # vLLM 版本
         env.vllm_version = self._detect_vllm_version()
@@ -440,16 +440,17 @@ class ChipDetector:
             return output.strip()
         return ""
 
-    def _detect_flagscale_version(self) -> str:
-        """检测 FlagScale 版本"""
+    def _detect_flagtree_version(self) -> str:
+        """检测 FlagTree 版本"""
+        # 优先通过 python import 获取版本
         success, output, _ = self._run_in_torch_env(
-            "pip show flag-scale 2>/dev/null | grep -i '^Version:' | awk '{print $2}'"
+            "python3 -c \"import flagtree; print(flagtree.__version__)\" 2>/dev/null"
         )
         if success and output and "error" not in output.lower():
             return output.strip()
-        # 备用：尝试 flag_scale 包名
+        # 备用：pip show
         success, output, _ = self._run_in_torch_env(
-            "pip show flag_scale 2>/dev/null | grep -i '^Version:' | awk '{print $2}'"
+            "pip show flagtree 2>/dev/null | grep -i '^Version:' | awk '{print $2}'"
         )
         if success and output and "error" not in output.lower():
             return output.strip()
@@ -897,14 +898,13 @@ def generate_image_tag(
     harbor_registry: str = "harbor.baai.ac.cn/flagrelease-public",
     tree: str = "none",
     gems_version: str = "",
-    scale_version: str = "",
     cx: str = "none",
     date_tag: str = ""
 ) -> str:
     """
     生成镜像 tag
 
-    格式: {registry}/flagrelease-{vendor}-release-model_{model}-tree_{tree}-gems_{gems}-scale_{scale}-cx_{cx}-python_{python}-torch_{backend}-{torch_version}-pcp_{sdk}-gpu_{gpu}-arc_{arch}-driver_{driver}:{date}
+    格式: {registry}/flagrelease-{vendor}-release-model_{model}-tree_{tree}-gems_{gems}-cx_{cx}-python_{python}-torch_{backend}-{torch_version}-pcp_{sdk}-gpu_{gpu}-arc_{arch}-driver_{driver}:{date}
 
     Args:
         info: 芯片版本信息
@@ -912,7 +912,6 @@ def generate_image_tag(
         harbor_registry: Harbor 仓库地址
         tree: tree 参数
         gems_version: gems 版本
-        scale_version: scale 版本
         cx: cx 参数
         date_tag: 日期标签，如果为空则自动生成
 
@@ -924,8 +923,8 @@ def generate_image_tag(
     if not date_tag:
         date_tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
 
-    # 清理模型名称，只保留字母数字和连字符
-    clean_model = re.sub(r'[^a-zA-Z0-9-]', '-', model_name.lower())
+    # 清理模型名称，保留字母数字、连字符和小数点
+    clean_model = re.sub(r'[^a-zA-Z0-9.\-]', '-', model_name.lower())
     clean_model = re.sub(r'-+', '-', clean_model).strip('-')
 
     vendor_name = info.vendor.value
@@ -940,7 +939,6 @@ def generate_image_tag(
     gpu_model = get_gpu_code(gpu_model, vendor_name)
     arch = info.arch if info.arch else "amd64"
     gems_version = gems_version if gems_version else "none"
-    scale_version = scale_version if scale_version else "none"
 
     # 构建镜像名（日期放在最后）
     tag_parts = [
@@ -948,7 +946,6 @@ def generate_image_tag(
         f"model_{clean_model}",
         f"tree_{tree}",
         f"gems_{gems_version}",
-        f"scale_{scale_version}",
         f"cx_{cx}",
         f"python_{python_version}",
         f"torch_{torch_backend}-{torch_version}",

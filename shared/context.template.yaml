@@ -162,6 +162,7 @@ environment:
   env_type: ""              # 环境场景: native | vllm_flaggems | vllm_plugin_flaggems
   has_plugin: false          # 是否有 vllm-plugin-FL
   has_flagtree: false        # 是否有 FlagTree
+  flagtree_version: ""       # FlagTree 版本
   initial_env_verified: false      # 初始环境是否验证通过
   flaggems_code_path: ""    # flaggems 代码文件路径 (仅 vllm_flaggems)
   flaggems_enable_call: ""  # flag_gems.enable() 完整调用 (仅 vllm_flaggems)

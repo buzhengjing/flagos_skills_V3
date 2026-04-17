@@ -298,7 +298,7 @@ class PublishStage(BaseStage):
                 print(f"    Python版本: {chip_config.python_version}")
                 print(f"    GPU型号: {chip_config.gpu_model}")
                 print(f"    FlagGems版本: {chip_config.gems_version}")
-                print(f"    FlagScale版本: {chip_config.scale_version}")
+                print(f"    FlagTree版本: {chip_config.tree}")
 
                 self.steps.append(StepResult(
                     step_name="自动生成 tag",
@@ -344,7 +344,6 @@ class PublishStage(BaseStage):
                 harbor_registry=chip_config.harbor_registry,
                 tree=chip_config.tree,
                 gems_version=chip_config.gems_version,
-                scale_version=chip_config.scale_version,
                 cx=chip_config.cx,
                 date_tag=chip_config.date_tag
             )
@@ -727,7 +726,7 @@ class PublishStage(BaseStage):
             vars["python_version"] = self.env_info.python_version or "N/A"
             vars["torch_version"] = self.env_info.torch_version or "N/A"
             vars["torch_backend"] = self.env_info.torch_backend or "N/A"
-            vars["flagscale_version"] = self.env_info.flagscale_version or chip_config.scale_version or "N/A"
+            vars["flagtree_version"] = self.env_info.flagtree_version or chip_config.tree or "N/A"
             vars["flaggems_version"] = self.env_info.flaggems_version or chip_config.gems_version or "N/A"
             if self.env_info.vllm_version:
                 vars["vllm_row"] = f"| vLLM | Version: {self.env_info.vllm_version} |"
@@ -744,7 +743,7 @@ class PublishStage(BaseStage):
             vars["python_version"] = "N/A"
             vars["torch_version"] = "N/A"
             vars["torch_backend"] = "N/A"
-            vars["flagscale_version"] = chip_config.scale_version or "N/A"
+            vars["flagtree_version"] = chip_config.tree or "N/A"
             vars["flaggems_version"] = chip_config.gems_version or "N/A"
             vars["vllm_row"] = ""
 
@@ -946,10 +945,10 @@ class PublishStage(BaseStage):
         elif chip_config.gems_version:
             rows.append(("FlagGems Version", chip_config.gems_version))
 
-        if self.env_info and self.env_info.flagscale_version:
-            rows.append(("FlagScale Version", self.env_info.flagscale_version))
-        elif chip_config.scale_version:
-            rows.append(("FlagScale Version", chip_config.scale_version))
+        if self.env_info and self.env_info.flagtree_version:
+            rows.append(("FlagTree Version", self.env_info.flagtree_version))
+        elif chip_config.tree and chip_config.tree != "none":
+            rows.append(("FlagTree Version", chip_config.tree))
 
         if self.env_info and self.env_info.vllm_version:
             rows.append(("vLLM Version", self.env_info.vllm_version))

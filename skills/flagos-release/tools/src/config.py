@@ -22,7 +22,6 @@ class ChipConfig:
     auto_generate_tag: bool = True
     tree: str = "none"
     gems_version: str = ""
-    scale_version: str = ""
     cx: str = "none"
     date_tag: str = ""
     driver_version: str = ""
@@ -158,6 +157,16 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     gpu = ctx.get('gpu', {})
     config.chip.vendor = gpu.get('vendor', 'auto')
 
+    # flagtree 版本从 inspection 或 env_status 读取
+    inspection = ctx.get('inspection', {})
+    flag_packages = inspection.get('flag_packages', {})
+    env_status = ctx.get('env_status', {})
+    flagtree_ver = flag_packages.get('flagtree', '') or ''
+    if not flagtree_ver and env_status.get('has_flagtree'):
+        flagtree_ver = env_status.get('flagtree_version', '')
+    if flagtree_ver:
+        config.chip.tree = flagtree_ver
+
     # ---- publish ----
     config.publish.tag_image = True
     config.publish.push_harbor = True
@@ -249,7 +258,7 @@ def _extract_model_name(source: str) -> str:
 def _clean_model_name_for_tag(name: str) -> str:
     """清理模型名称用于生成 tag"""
     import re
-    clean = re.sub(r'[^a-zA-Z0-9-]', '-', name.lower())
+    clean = re.sub(r'[^a-zA-Z0-9.\-]', '-', name.lower())
     clean = re.sub(r'-+', '-', clean).strip('-')
     return clean
 
@@ -309,8 +318,8 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
 
         if env_info.flaggems_version:
             config.chip.gems_version = env_info.flaggems_version
-        if env_info.flagscale_version:
-            config.chip.scale_version = env_info.flagscale_version
+        if env_info.flagtree_version:
+            config.chip.tree = env_info.flagtree_version
 
     # ==================== 模型名称 ====================
     model_name = _extract_model_name(config.model_info.source_of_model_weights)
@@ -356,7 +365,6 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
                 harbor_registry=config.chip.harbor_registry,
                 tree=config.chip.tree,
                 gems_version=config.chip.gems_version,
-                scale_version=config.chip.scale_version,
                 cx=config.chip.cx,
                 date_tag=config.chip.date_tag,
             )

@@ -167,13 +167,13 @@ else:
 ## Tag 格式
 
 ```
-{registry}/flagrelease-{vendor}-release-model_{model}-tree_{tree}-gems_{gems}-scale_{scale}-cx_{cx}-python_{python}-torch_{backend}-{torch_version}-pcp_{sdk}-gpu_{gpu_code}-arc_{arch}-driver_{driver}:{YYYYMMDDHHMM}
+{registry}/flagrelease-{vendor}-release-model_{model}-tree_{tree}-gems_{gems}-cx_{cx}-python_{python}-torch_{backend}-{torch_version}-pcp_{sdk}-gpu_{gpu_code}-arc_{arch}-driver_{driver}:{YYYYMMDDHHMM}
 ```
 
 ## 示例
 
 ```
-harbor.baai.ac.cn/flagrelease-public/flagrelease-nvidia-release-model_qwen3-8b-tree_none-gems_4.2.1rc0-scale_none-cx_none-python_3.12.3-torch_cuda-2.9.0-pcp_cuda13.1-gpu_nvidia003-arc_amd64-driver_570.158.01:202603301143
+harbor.baai.ac.cn/flagrelease-public/flagrelease-nvidia-release-model_qwen3.5-8b-tree_none-gems_4.2.1rc0-cx_none-python_3.12.3-torch_cuda-2.9.0-pcp_cuda13.1-gpu_nvidia003-arc_amd64-driver_570.158.01:202603301143
 ```
 
 ## 规则
