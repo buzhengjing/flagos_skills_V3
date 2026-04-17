@@ -418,27 +418,16 @@ def should_show_command(cmd: str) -> bool:
     return any(kw in cmd for kw in SHOW_COMMANDS)
 
 
-def add_timestamp(line: str) -> str:
-
-# 关键阶段命令 → 自动注入的标题映射
-# 用 _last_phase_banner 避免连续重复，但允许不同阶段间再次触发
 _PHASE_BANNERS = [
-    # 服务启动
     ('vllm serve',           '🚀 服务启动中...'),
     ('sglang',               '🚀 服务启动中（SGLang）...'),
-    # 服务就绪检测
     ('wait_for_service',     '⏳ 等待服务就绪...'),
-    # 精度评测
     ('fast_gpqa',            '📊 精度评测运行中（GPQA Diamond）...'),
-    # 性能评测
     ('benchmark_runner',     '📊 性能评测运行中（Benchmark）...'),
-    # 算子调优
     ('operator_search.py run', '🔧 性能算子调优中（自动搜索）...'),
     ('diagnose_ops.py',      '🔧 精度算子诊断中...'),
-    # FlagGems 切换
     ('toggle_flaggems.py --action enable',  '🔄 启用 FlagGems...'),
     ('toggle_flaggems.py --action disable', '🔄 关闭 FlagGems...'),
-    # 发布
     ('docker commit',        '📦 打包镜像中...'),
     ('docker push',          '📦 推送镜像中...'),
 ]
@@ -457,7 +446,7 @@ def _detect_phase_banner(cmd: str) -> str:
     return ''
 
 
-
+def add_timestamp(line: str) -> str:
     """如果行没有时间戳前缀，自动添加"""
     stripped = line.strip()
     if RE_HAS_TIMESTAMP.match(stripped):
