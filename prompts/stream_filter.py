@@ -13,6 +13,7 @@
 """
 
 import sys
+import os
 import json
 import re
 import argparse
@@ -503,6 +504,7 @@ class PipelineLogger:
 
     def open(self):
         if self.log_path:
+            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
             self.log_file = open(self.log_path, 'a', encoding='utf-8')
             # 分段执行时，段2/3 追加写入已有文件，跳过重复 header
             if self.log_file.tell() > 0:

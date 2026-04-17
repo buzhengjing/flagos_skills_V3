@@ -10,8 +10,16 @@
 
 set -euo pipefail
 
-CONTAINER="${1:?用法: $0 <container_name> [model_path]}"
-MODEL_NAME="${2:-}"
+SKIP_ARCHIVE=false
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --skip-archive) SKIP_ARCHIVE=true ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+CONTAINER="${POSITIONAL[0]:?用法: $0 <container_name> [model_path] [--skip-archive]}"
+MODEL_NAME="${POSITIONAL[1]:-}"
 
 # 项目根目录（此脚本所在位置的上三级）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +92,9 @@ for m in mounts:
 fi
 
 # 1. 归档上一轮数据（容器内）
+if $SKIP_ARCHIVE; then
+    echo "[1/6] 跳过归档（--skip-archive）"
+else
 echo "[1/6] 检查并归档历史数据..."
 HAS_HISTORY=$(docker exec "${CONTAINER}" bash -c "
     found=0
@@ -131,13 +142,16 @@ if [ "${HAS_HISTORY}" = "1" ]; then
 else
     echo "  无历史数据，跳过归档"
 fi
+fi  # end SKIP_ARCHIVE
 
 # 1.5. 创建宿主机工作目录
 if [ -n "${MODEL_NAME}" ]; then
     echo "[1.5/6] 创建宿主机工作目录..."
 
-    # 归档宿主机历史数据
     HOST_BASE="/data/flagos-workspace/${MODEL_NAME}"
+
+    if ! $SKIP_ARCHIVE; then
+    # 归档宿主机历史数据
     if [ -d "${HOST_BASE}" ]; then
         HOST_HAS_HISTORY=0
         for d in results traces logs config; do
@@ -154,13 +168,9 @@ if [ -n "${MODEL_NAME}" ]; then
                     mv "${HOST_BASE}/${d}" "${HOST_ARCHIVE}/${d}"
                 fi
             done
-            # logs 目录不整体移动：run_pipeline.sh 在启动时已完成宿主机 logs 归档，
-            # 此时 logs/ 中只有当前会话的活跃文件（tee 正在写入），不能移动。
-            # 但归档 logs 中已有的非活跃文件（上一轮残留）
             if [ -d "${HOST_BASE}/logs" ] && [ "$(ls -A "${HOST_BASE}/logs" 2>/dev/null)" ]; then
                 mkdir -p "${HOST_ARCHIVE}/logs"
                 find "${HOST_BASE}/logs" -maxdepth 1 -type f ! -name "*.log" -newer "${HOST_BASE}/logs" -prune -o -type f -print 2>/dev/null | while read -r f; do
-                    # 跳过正在被 tee 写入的当前会话日志（通过 fuser 检测）
                     if ! fuser "$f" >/dev/null 2>&1; then
                         mv "$f" "${HOST_ARCHIVE}/logs/" 2>/dev/null || true
                     fi
@@ -169,6 +179,7 @@ if [ -n "${MODEL_NAME}" ]; then
             echo "  宿主机历史数据归档到: ${HOST_ARCHIVE}/"
         fi
     fi
+    fi  # end SKIP_ARCHIVE for host
 
     mkdir -p "${HOST_BASE}/results"
     mkdir -p "${HOST_BASE}/traces"
