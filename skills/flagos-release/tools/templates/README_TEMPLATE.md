@@ -41,6 +41,14 @@ modelscope download --model {{source_of_model_weights}} --local_dir {{weights_lo
 {{serve_start_cmd}}
 ```
 
+### Operator Configuration
+The image has been pre-configured with the final tuned FlagGems operator set. Starting the service directly uses the qualified operator configuration — no additional environment variables or parameters needed.
+
+To view the operator configuration details:
+```bash
+cat /root/flaggems_op_config.json
+```
+
 ## Service Invocation
 ### Invocation Script
 ```python

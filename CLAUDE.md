@@ -235,6 +235,31 @@ docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/resu
     docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt
 ```
 
+### 步骤7完成后 → 步骤8之前：算子配置固化
+
+**强制执行**：无论是否触发了步骤5/7，只要 `env_type` 不是 `native`，都必须执行配置固化。
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto --verify"
+```
+
+固化方式（按 `env_type` 自动选择）：
+- **`vllm_flaggems`**：直接修改容器内源码中的 `flag_gems.enable()` 调用，写入最终算子列表（`enable(unused=[...])` 或 `only_enable(include=[...])`）。同时写入 Layer 1 yaml exclude 作为双重保险
+- **`vllm_plugin_flaggems`**：将环境变量（`USE_FLAGGEMS`、`VLLM_FL_PREFER_ENABLED`、`VLLM_FL_FLAGOS_BLACKLIST`）持久化到 `/etc/environment` + `/root/.bashrc`
+
+两种场景都在 `/root/flaggems_op_config.json` 记录修改详情（修改了哪些文件、修改前后内容、最终算子列表）。
+
+`--verify` 会重启服务检查运行时算子数量是否与预期一致。
+
+验证失败时：
+- 标记 `workflow.config_persisted=false`
+- 继续发布但标记为私有（`qualified=false`）
+- 在 README 中说明需手动配置
+
+验证成功时：
+- 标记 `workflow.config_persisted=true`
+- 更新 context.yaml
+
 ### 步骤8 自动发布（flagos-release skill）
 
 发布步骤通过 `flagos-release` skill 的宿主机工具统一执行，**禁止手动拼 docker commit/tag/push 命令**：

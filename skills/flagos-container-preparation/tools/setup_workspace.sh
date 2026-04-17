@@ -225,6 +225,8 @@ SCRIPT_MAP=(
     "skills/flagos-operator-replacement/tools/apply_op_config.py:scripts/apply_op_config.py"
     # 算子快速诊断
     "skills/flagos-operator-replacement/tools/diagnose_ops.py:scripts/diagnose_ops.py"
+    # 算子配置固化
+    "skills/flagos-operator-replacement/tools/persist_op_config.py:scripts/persist_op_config.py"
     # 组件安装（统一入口）
     "skills/flagos-component-install/tools/install_component.py:scripts/install_component.py"
     # FlagTree 安装脚本
