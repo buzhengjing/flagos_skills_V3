@@ -64,9 +64,12 @@ def get_gpu_info():
             except (json.JSONDecodeError, Exception):
                 pass
 
-    # fallback: 实时检测
+    # fallback: 实时检测（搜索多个可能路径）
+    script_dir = str(Path(__file__).resolve().parent)
+    for search_path in [script_dir, "/flagos-workspace/scripts"]:
+        if search_path not in sys.path:
+            sys.path.insert(0, search_path)
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
         from detect_gpu import detect_gpu
         return detect_gpu()
     except (ImportError, Exception):

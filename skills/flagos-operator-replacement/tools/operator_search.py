@@ -257,6 +257,31 @@ def _apply_plugin_config(action: Dict[str, Any],
     return env_inline
 
 
+def _detect_flaggems_capabilities() -> List[str]:
+    """自动探测当前环境的 FlagGems capabilities"""
+    caps = []
+    try:
+        import flag_gems
+        # Layer 1: yaml_config — 检查 vendor 配置目录是否存在
+        gems_path = os.path.dirname(flag_gems.__file__)
+        for root, dirs, files in os.walk(gems_path):
+            if "runtime" in root and "backend" in root:
+                caps.append("yaml_config")
+                break
+        # Layer 2: only_enable
+        if hasattr(flag_gems, "only_enable"):
+            caps.append("only_enable")
+        # Layer 3: enable_unused
+        if hasattr(flag_gems, "enable"):
+            import inspect as insp_mod
+            sig = insp_mod.signature(flag_gems.enable)
+            if "unused" in list(sig.parameters.keys()):
+                caps.append("enable_unused")
+    except ImportError:
+        pass
+    return caps
+
+
 def _apply_non_plugin_config(action: Dict[str, Any],
                               capabilities: Optional[List[str]],
                               gems_txt_path: Optional[str],
@@ -265,7 +290,14 @@ def _apply_non_plugin_config(action: Dict[str, Any],
     """非 plugin 场景：Layer 1-4 分层降级"""
     test_enabled = action.get("test_enabled_ops", [])
     test_disabled = action.get("test_disabled_ops", [])
-    caps = capabilities or []
+
+    # 未传 capabilities 时自动探测
+    if capabilities:
+        caps = capabilities
+    else:
+        caps = _detect_flaggems_capabilities()
+        if caps:
+            print(f"  [auto-detect] FlagGems capabilities: {caps}")
 
     # 用注册表（而非 oplist）计算完整禁用列表，确保不在 oplist 中的算子也被显式关闭
     base_ops = registered_ops or all_ops
@@ -336,16 +368,14 @@ def _apply_enable_unused(disabled_ops: List[str]) -> bool:
 
 
 def _apply_txt_fallback(enabled_ops: List[str], gems_txt_path: Optional[str]) -> bool:
-    """Layer 4 兜底: 直接写 txt 文件"""
-    if not gems_txt_path:
-        print("  WARN: 未指定 gems_txt_path，跳过算子配置")
-        return True
-
-    print(f"  [Layer 4] 写入 {len(enabled_ops)} 个算子到 {gems_txt_path}")
-    with open(gems_txt_path, 'w', encoding='utf-8') as f:
-        for op in sorted(enabled_ops):
-            f.write(f"{op}\n")
-    return True
+    """Layer 4 兜底: 已废弃 — gems.txt 是 flag_gems.enable() 的输出记录文件，不是输入控制文件。
+    写入的内容会在服务启动后被 FlagGems 覆盖，无法控制算子替换。
+    正常流程应通过 Layer 1-3（yaml_config / only_enable / enable_unused）控制算子。
+    """
+    print("  ERROR: Layer 1-3 均不可用，无法控制算子替换。")
+    print("  原因: gems.txt 是 flag_gems.enable() 的输出记录文件，写入后会被服务启动覆盖。")
+    print("  请确认 FlagGems 已安装且支持 yaml_config / only_enable / enable_unused 之一。")
+    return False
 
 
 def restart_service(stop_cmd: str, startup_cmd: str,
@@ -628,13 +658,19 @@ def run_search_step(state_path: str, perf_config: str,
         return {"action": "error", "message": "服务重启失败"}
     step_timing["restart_seconds"] = round(time.time() - t0, 1)
 
-    # 3.5. 重启后验证算子变化
+    # 3.5. 重启后验证算子变化 — 运行时 txt 是实际生效算子的权威来源
     runtime_ops = verify_ops_via_txt()
     if runtime_ops is not None:
         test_disabled = action.get("test_disabled_ops", [])
         unexpected = [op for op in test_disabled if op in runtime_ops]
         if unexpected:
             print(f"  [验证] 警告: {len(unexpected)} 个应禁用的算子仍在运行时 txt 中: {unexpected[:5]}")
+        # 将运行时实际算子列表回写到 optimizer 状态，作为后续判定的权威依据
+        state = load_json(state_path)
+        state["runtime_enabled_ops"] = sorted(runtime_ops)
+        state["runtime_enabled_count"] = len(runtime_ops)
+        save_json(state, state_path)
+        print(f"  [验证] 运行时实际启用 {len(runtime_ops)} 个算子（已回写 state）")
 
     # 4. 运行 benchmark
     t0 = time.time()
@@ -656,6 +692,12 @@ def run_search_step(state_path: str, perf_config: str,
         op_name, throughputs, native_tp
     )
 
+    # 构建返回结果，附带运行时实际算子数
+    runtime_count = len(runtime_ops) if runtime_ops is not None else None
+    expected_count = len(action.get("test_enabled_ops", []))
+    if runtime_count is not None and runtime_count != expected_count:
+        print(f"  [注意] 预期启用 {expected_count} 个算子，运行时实际 {runtime_count} 个")
+
     print(f"\n[步骤完成] decision={update.get('decision', '?')}, "
           f"ratio={update.get('ratio', 0)*100:.1f}%"
           f" (config={step_timing['config_seconds']}s"
@@ -670,6 +712,8 @@ def run_search_step(state_path: str, perf_config: str,
         "ratio": update.get("ratio", 0),
         "status": update.get("status", "?"),
         "timing": step_timing,
+        "runtime_enabled_count": runtime_count,
+        "expected_enabled_count": expected_count,
     }
 
 
@@ -778,6 +822,13 @@ def run_full_search(state_path: str, perf_config: str,
     except Exception:
         state = {}
 
+    # 运行时实际算子数以最后一轮的 runtime_enabled_count 为准
+    last_runtime_count = None
+    for r in reversed(search_log):
+        if r.get("runtime_enabled_count") is not None:
+            last_runtime_count = r["runtime_enabled_count"]
+            break
+
     summary = {
         "total_rounds": total_rounds,
         "elapsed_seconds": round(elapsed),
@@ -787,6 +838,8 @@ def run_full_search(state_path: str, perf_config: str,
         "enabled_ops": len(state.get("enabled_ops", [])),
         "disabled_ops": len(state.get("disabled_ops", [])),
         "disabled_list": state.get("disabled_ops", []),
+        "runtime_enabled_ops": state.get("runtime_enabled_ops"),
+        "runtime_enabled_count": last_runtime_count,
         "framework_check": framework_check,
         "search_log": search_log,
         "timing": {
@@ -804,6 +857,8 @@ def run_full_search(state_path: str, perf_config: str,
     print(f"# 搜索完成: {total_rounds} 轮, 耗时 {summary['elapsed_display']}")
     print(f"# 状态: {summary['final_status']}")
     print(f"# 启用: {summary['enabled_ops']}, 禁用: {summary['disabled_ops']}")
+    if last_runtime_count is not None:
+        print(f"# 运行时实际启用: {last_runtime_count} 个算子（以运行时 txt 为准）")
     if summary["disabled_list"]:
         print(f"# 禁用列表: {', '.join(summary['disabled_list'])}")
     print(f"{'#' * 60}\n")

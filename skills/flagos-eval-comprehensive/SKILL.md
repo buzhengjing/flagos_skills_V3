@@ -138,8 +138,8 @@ eval:
 
 ```bash
 CONTAINER=<container_name>
-docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa.py $CONTAINER:/flagos-workspace/eval/fast_gpqa.py
-docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml $CONTAINER:/flagos-workspace/eval/fast_gpqa_config.yaml
+docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa.py $CONTAINER:/flagos-workspace/scripts/fast_gpqa.py
+docker cp skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml $CONTAINER:/flagos-workspace/scripts/fast_gpqa_config.yaml
 ```
 
 **步骤 2：安装依赖**
@@ -155,7 +155,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH pip install modelscop
 
 **步骤 3：配置**
 
-编辑容器内 `/flagos-workspace/eval/fast_gpqa_config.yaml`：
+编辑容器内 `/flagos-workspace/scripts/fast_gpqa_config.yaml`：
 
 ```yaml
 model:
@@ -171,11 +171,11 @@ dataset_hub: "modelscope"               # modelscope 或 huggingface
 
 ```bash
 # 方式一：使用配置文件
-docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 
 # 方式二：命令行参数（无需改配置文件）
-docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --model-name Qwen3-8B --api-base http://localhost:8000/v1"
 ```
 
@@ -231,10 +231,10 @@ sleep 5
 
 3. 运行评测：
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 # 保存结果
-docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_native.json
+docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_native.json
 ```
 
 4. **V1 评测完成后，必须停止服务释放 GPU**：
@@ -249,10 +249,10 @@ sleep 5
 
 2. 运行评测：
 ```bash
-docker exec $CONTAINER bash -c "cd /flagos-workspace/eval && \
+docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
     PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
 # 保存结果
-docker exec $CONTAINER cp /flagos-workspace/eval/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json
+docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json
 ```
 
 **强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。

@@ -38,7 +38,19 @@ while [[ $# -gt 0 ]]; do
         --max-timeout) MAX_TIMEOUT="$2"; shift 2 ;;
         --log-path) LOG_PATH="$2"; shift 2 ;;
         --mode) MODE="$2"; shift 2 ;;
-        *) echo "未知参数: $1"; exit 1 ;;
+        -h|--help)
+            echo "Usage: wait_for_service.sh [OPTIONS]"
+            echo "  --port PORT          服务端口 (默认 8000)"
+            echo "  --host HOST          服务地址 (默认 127.0.0.1)"
+            echo "  --model-name NAME    模型名称（用于 /v1/models 验证）"
+            echo "  --timeout SECS       无活动超时 (默认 120)"
+            echo "  --max-timeout SECS   绝对上限 (默认 1800)"
+            echo "  --log-path PATH      启动日志路径（启用动态超时模式）"
+            echo "  --mode MODE          启动模式: default/native/flagos (默认 default)"
+            exit 0 ;;
+        *) echo "未知参数: $1"
+           echo "可用参数: --port --host --model-name --timeout --max-timeout --log-path --mode --help"
+           exit 1 ;;
     esac
 done
 
@@ -312,7 +324,18 @@ print_failure_diagnostics() {
     # 检查端口
     echo ""
     echo "端口状态:"
-    ss -tlnp | grep ":${PORT}" || echo "  端口 ${PORT} 未监听"
+    if command -v ss &>/dev/null; then
+        ss -tlnp | grep ":${PORT}" || echo "  端口 ${PORT} 未监听"
+    elif command -v netstat &>/dev/null; then
+        netstat -tlnp 2>/dev/null | grep ":${PORT}" || echo "  端口 ${PORT} 未监听"
+    else
+        # ss/netstat 都没有，用 curl 探测
+        if curl -s --connect-timeout 1 "http://127.0.0.1:${PORT}/" &>/dev/null; then
+            echo "  端口 ${PORT} 有响应"
+        else
+            echo "  端口 ${PORT} 未监听（ss/netstat 不可用，curl 探测）"
+        fi
+    fi
 
     # 输出日志尾部
     if [ -n "$LOG_PATH" ] && [ -f "$LOG_PATH" ]; then
@@ -493,7 +516,20 @@ print(json.dumps({
     if [ "$DYNAMIC_MODE" = true ]; then
         NOW=$(date +%s)
         SINCE_ACTIVITY=$((NOW - LAST_ACTIVITY_TIME))
-        if [ "$SINCE_ACTIVITY" -gt "$TIMEOUT" ]; then
+
+        # 已知长编译阶段（torch.compile / CUDA graph）允许更长的无活动时间
+        # 这些阶段编译期间不输出日志是正常行为，只要进程还活着就继续等
+        EFFECTIVE_STALL_TIMEOUT=$TIMEOUT
+        case "$CURRENT_PHASE" in
+            torch_compile|cuda_graph_capture|triton_compile)
+                # 编译阶段：无活动超时至少 300s，取 max(TIMEOUT, 300)
+                if [ "$EFFECTIVE_STALL_TIMEOUT" -lt 300 ]; then
+                    EFFECTIVE_STALL_TIMEOUT=300
+                fi
+                ;;
+        esac
+
+        if [ "$SINCE_ACTIVITY" -gt "$EFFECTIVE_STALL_TIMEOUT" ]; then
             echo ""
             echo "=========================================="
             echo "✗ 服务启动停滞（${SINCE_ACTIVITY}s 无日志活动）"

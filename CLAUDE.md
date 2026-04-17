@@ -198,7 +198,7 @@ docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/resu
      --target-ratio 0.8 \
      --search-strategy elimination \
      [--plugin-mode]"
-4. 运行搜索循环（容器内全自动）：
+4. 运行搜索循环（容器内全自动，capabilities 自动探测无需手动传入）：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/operator_search.py run \
      --state-path /flagos-workspace/results/operator_config.json \
      --perf-config /flagos-workspace/scripts/config/perf_config.yaml \
@@ -206,6 +206,11 @@ docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/resu
      [--plugin-mode] \
      --max-rounds 50"
    （elimination 策略逐个禁用，最坏情况 = 算子总数轮）
+   **算子控制机制**：`operator_search.py` 自动探测 FlagGems capabilities（yaml_config → only_enable → enable_unused），
+   优先使用 Layer 1 yaml exclude 或 Layer 2 only_enable 控制算子替换。
+   **运行时验证**：每轮重启服务后读取运行时 txt（gems.txt / flaggems_enable_oplist.txt）获取实际生效算子列表，
+   回写到 `operator_config.json` 的 `runtime_enabled_ops` / `runtime_enabled_count`。
+   **达标判定基准**：性能达标与否以 benchmark 结果为准，但最终报告中的算子数必须以运行时 txt 为准，不以 optimizer 内部维护的列表为准。
 5. 搜索完成后：应用最终配置 → 重启服务 → V3 验证 benchmark：
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/benchmark_runner.py \
      --config /flagos-workspace/scripts/config/perf_config.yaml \
@@ -352,7 +357,8 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类（FlagTree 是 trito
 容器准备阶段（步骤1完成后），通过 `setup_workspace.sh` 一次性部署所有工具：
 
 ```bash
-# 宿主机执行，一次性复制所有脚本到容器
+# 宿主机执行，一次性复制所有脚本到容器（tar 批量传输，通常 < 30s）
+# Bash 工具调用时需设置 timeout: 300000，避免网络慢时超时
 bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 ```
 
@@ -957,13 +963,14 @@ GPU: <gpu_count>x <gpu_type>
 6. **禁止添加 SKILL.md 未记录的 vLLM/sglang 启动参数**（如 `--enforce-eager`、`--disable-log-stats` 等），遇到启动问题应分析日志找根因，而非猜测参数绕过
 7. **精度评测和性能测试严禁同时进行**。必须等一个完全结束后再启动另一个。并发执行会互相抢占 GPU 资源，导致两边结果都不可信。启动前必须检查是否有正在运行的评测/测试进程
 8. **性能达标判定粒度：每个数据点**。quick 模式下只有一个数据点（4k_input_1k_output × 并发 64），comprehensive 模式下每个 (test_case, concurrency) 组合独立计算。`performance_compare.py` 中所有 ratio 的最小值 ≥ 80% 才算达标
-8. **算子列表以 `flaggems_enable_oplist.txt` 为唯一权威来源**。每次服务启动后必须检查该文件（默认 `/tmp/flaggems_enable_oplist.txt`）：
+8. **算子列表以运行时 txt（`flaggems_enable_oplist.txt` 或 `gems.txt`）为唯一权威来源**。每次服务启动后必须检查该文件（默认 `/tmp/flaggems_enable_oplist.txt`，vllm_flaggems 场景可能是 `gems.txt`）：
    - **文件存在且有内容** → FlagGems 实际在运行，以此文件内容作为当前生效的算子列表
    - **文件不存在或为空** → FlagGems 未启用，不依赖任何缓存的算子列表
    - 每次 FlagGems 重新启动都会**重新生成**此文件，内容反映 blacklist 等配置生效后的实际结果
    - 如果启动模式为 native 但文件残留 → 是上次 flagos 的旧数据，不可作为当前算子列表
    - 所有后续操作（算子替换、搜索、性能对比、报告生成）中的"当前算子列表"均以此文件为准
    - **不在此文件中的算子必须被显式关闭**。算子调优 init 阶段通过 `--registered-ops` 传入 FlagGems 完整注册算子列表，黑名单计算以注册表为基准，确保注册表中有但 oplist 中没有的算子也被加入 blacklist（无论 plugin 还是非 plugin 场景）
+   - **算子调优中的关闭算子列表只是控制输入**。调优过程中 optimizer 维护的 enabled/disabled 列表用于告诉 FlagGems 要关哪些算子，但实际生效了多少个算子必须以服务启动后运行时 txt 打印出来的列表为准。`operator_search.py` 每轮重启后自动读取运行时 txt 并回写到 `operator_config.json` 的 `runtime_enabled_ops`。最终报告中的算子数、达标判定的算子基准均以 `runtime_enabled_ops` 为准
 9. **容器内 Python 必须用 conda 环境**。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=/opt/conda/bin:$PATH` 前缀，禁止依赖容器默认 `/usr/bin/python3`（系统 Python 缺少 torch/requests/yaml 等包）
 10. **宿主机 mkdir/ls 严禁使用花括号展开（这是硬性限制，违反必定失败）**。`mkdir -p /data/flagos-workspace/xxx/{a,b,c}` 和 `ls /path/{a,b}` 会被 sandbox 拦截导致整个命令失败。必须逐条执行，例如：`mkdir -p /data/flagos-workspace/xxx/a && mkdir -p /data/flagos-workspace/xxx/b && mkdir -p /data/flagos-workspace/xxx/c`，或通过 `setup_workspace.sh` 的第二参数统一创建宿主机目录。**注意**：容器内 `docker exec bash -c "mkdir -p {a,b,c}"` 不受此限制，花括号展开仅在宿主机 Bash 工具中被拦截
 11. **流程不可中途终止**。精度不达标、性能不达标都不是终止流程的理由。编排层必须：
