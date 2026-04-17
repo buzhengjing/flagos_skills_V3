@@ -152,7 +152,7 @@ if $IMAGE_MODE; then
     fi
 fi
 echo "  模式: V1 + V2 + V3（不达标时自动算子优化）"
-echo "  权限: --permission-mode auto + settings.local.json allowlist (89 rules)"
+echo "  权限: --permission-mode auto + settings.local.json allowlist (78 rules)"
 echo "============================================================"
 echo ""
 
@@ -174,14 +174,26 @@ COMMON_PLAN_FIRST=$(cat <<'PLAN_EOF'
 **执行模式：计划优先（Plan-First）**
 
 在执行任何操作之前，先完成规划阶段：
-1. 只读取本段需要的 SKILL.md 文件，提取关键命令、参数、文件路径：
-   - 段1（步骤1/2/3）：skills/flagos-container-preparation/SKILL.md、skills/flagos-pre-service-inspection/SKILL.md、skills/flagos-service-startup/SKILL.md
-   - 不要读取本段不执行的步骤对应的 SKILL.md（节省时间）
+1. 依次读取以下 SKILL.md 文件，提取每步的关键命令、参数、文件路径：
+   - skills/flagos-container-preparation/SKILL.md
+   - skills/flagos-pre-service-inspection/SKILL.md
+   - skills/flagos-service-startup/SKILL.md
+   - skills/flagos-eval-comprehensive/SKILL.md
+   - skills/flagos-performance-testing/SKILL.md
+   - skills/flagos-operator-replacement/SKILL.md
+   - skills/flagos-release/SKILL.md
 PLAN_EOF
 )
 
 COMMON_PLAN_STEPS=$(cat <<PLAN_STEPS_EOF
-2. 每个步骤开始前，通过 docker exec 读取容器内 /flagos-workspace/shared/context.yaml 获取最新状态
+2. 生成 execution_plan.md，通过 docker exec 写入容器内 /flagos-workspace/${MODEL}/config/execution_plan.md
+   （挂载卷自动同步到宿主机 /data/flagos-workspace/${MODEL}/config/execution_plan.md，无需额外操作）
+   - 包含每步的完整命令（变量已替换为实际值：容器名、模型名、端口等）
+   - 包含每步的输入/输出文件路径
+   - 包含每步的 context.yaml 读写字段清单
+   - 包含每步的校验检查项
+3. 每个步骤开始前，通过 docker exec cat 读取容器内 execution_plan.md 对应段落刷新记忆
+4. 每个步骤开始前，通过 docker exec 读取容器内 /flagos-workspace/shared/context.yaml 获取最新状态
 
 **重要：所有 /flagos-workspace 下的文件操作必须通过 docker exec 在容器内执行。Claude Code 的 Bash 沙箱禁止直接操作 /data/ 路径。**
 
@@ -230,7 +242,7 @@ if $IMAGE_MODE; then
    - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
    - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
    - 镜像模式下禁止复用已有容器，必须 docker run 新建${DOWNLOAD_NOTE}
-   - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
+   - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} 部署工具脚本
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
 STEP1_EOF
     )
@@ -268,7 +280,7 @@ else
      - 再在宿主机搜索，检查是否已通过挂载卷映射到容器
      - 如容器内未找到 → 在容器内自动从 ModelScope 下载（优先下载到已挂载卷路径，避免写入 overlay）
      - 从输出 JSON 中提取 final_container_path 和 final_host_path，记录到容器内 /flagos-workspace/shared/context.yaml 的 model.container_path 和 model.local_path
-   - bash skills/flagos-container-preparation/tools/setup_workspace.sh ${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
+   - bash skills/flagos-container-preparation/tools/setup_workspace.sh ${CONTAINER} ${MODEL} 部署工具脚本
    - 写入容器内 /flagos-workspace/shared/context.yaml + traces/01_container_preparation.json
 STEP1_EOF
     )
@@ -300,7 +312,7 @@ ${STEP1}
 fi
 
 # ========== 部署权限白名单 ==========
-mkdir -p .claude && cp settings.local.json .claude/settings.local.json
+[ -f .claude/settings.local.json ] || (mkdir -p .claude && cp settings.local.json .claude/settings.local.json)
 
 # ========== 动态注入模型特定权限 ==========
 # auto mode 可能被降级为 default mode（mco-4 等非官方模型 ID），
@@ -516,12 +528,6 @@ ${COMMON_TOKENS}
 
 按 CLAUDE.md 工作流定义执行步骤4精度评测、步骤5精度算子调优（如需）、步骤6性能评测、步骤7性能算子调优（如需）。
 
-**前段状态（段1已完成，无需验证）**：
-- 步骤1/2/3 已在上一段全部完成，容器 ${SEG_CTR} 已就绪，工具脚本已部署
-- env_type=${SEG_ENV}，最后完成步骤: ${SEG_LAST}
-- context.yaml 中 workflow_ledger 的步骤3状态可能未更新（段1的已知问题），但步骤3确实已完成，直接从步骤4开始
-- **禁止**回头检查或重做步骤1/2/3，**禁止**查找 execution_plan.md（不存在）
-
 **步骤编号（严格遵守，输出 [步骤X] 时必须使用以下编号）**：
 - [步骤4] 精度评测（GPQA Diamond）
 - [步骤5] 精度算子调优（条件触发：accuracy_ok=false 时执行）
@@ -529,9 +535,9 @@ ${COMMON_TOKENS}
 - [步骤7] 性能算子调优（条件触发：performance_ok=false 时执行）
 
 **执行前**：
-1. 读取容器内 /flagos-workspace/shared/context.yaml 获取模型路径、GPU 配置、FlagGems 状态等关键参数
-2. 读取 skills/flagos-eval-comprehensive/SKILL.md 了解精度评测工具用法
-3. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法（仅在步骤5/7需要时读取）
+1. 读取容器内 /flagos-workspace/shared/context.yaml 确认当前状态
+2. 读取容器内 /flagos-workspace/config/execution_plan.md 中步骤4/5/6/7段落
+3. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法
 
 **算子调优**：
 - 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）
@@ -632,16 +638,10 @@ ${COMMON_TOKENS}
 
 按 CLAUDE.md 工作流定义执行步骤8自动发布。
 
-**前段状态（段1+段2已完成，无需验证）**：
-- 步骤1/2/3/4/5/6/7 已在前两段全部完成（5/7为条件触发，可能跳过）
-- 容器 ${SEG_CTR} 已就绪，评测结果已写入 results/ 目录
-- context.yaml 中 workflow_ledger 的部分步骤状态可能未更新（已知问题），但前段步骤确实已完成
-- **禁止**回头检查或重做步骤1-7，直接执行步骤8
-
 **步骤编号（严格遵守）**：本段只有 [步骤8] 自动发布，输出进度标记时必须使用 [步骤8]，不要使用其他编号。
 
-**执行前**：读取容器内 /flagos-workspace/shared/context.yaml 获取 workflow 状态（accuracy_ok、performance_ok、service_ok）和模型/GPU 信息。
-如果 accuracy_ok 或 performance_ok 为 false，发布为私有镜像（qualified=false）。
+**执行前**：读取容器内 /flagos-workspace/shared/context.yaml 确认 workflow 状态。
+如果 context.yaml 显示步骤4或6未完成（status 非 success），将对应的 workflow.accuracy_ok 或 workflow.performance_ok 标记为 false，然后继续发布（私有）。
 **进度输出**：步骤开始/完成时输出 [步骤8] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
 **发布前同步 context 到宿主机**（发布工具从宿主机路径读取）：
@@ -728,7 +728,7 @@ fi
 
 # ========== 兜底：同步容器产出到宿主机 ==========
 # 无论 Claude 是否在步骤8中调用了 main.py，都确保容器内产出同步到宿主机。
-# setup_workspace.sh --skip-archive 跳过归档，但 run_pipeline.sh 启动前已归档清空宿主机 results/traces，
+# setup_workspace.sh 会在流程开始时归档清空宿主机 results/traces，
 # 如果 Claude 跳过了 main.py 的 _sync_to_host()，宿主机将无数据。
 if [ -n "${DIAG_CONTAINER}" ] && docker inspect --type=container "${DIAG_CONTAINER}" &>/dev/null; then
     HOST_BASE="/data/flagos-workspace/${MODEL}"

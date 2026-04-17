@@ -221,8 +221,6 @@ SCRIPT_MAP=(
     # GPQA Diamond 快速精度评测（eval/ 兼容 SKILL.md 引用，scripts/ 供编排层统一调用）
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:eval/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:eval/fast_gpqa_config.yaml"
-    # 精度对比
-    "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:scripts/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:scripts/fast_gpqa_config.yaml"
     # 评测配置模板
@@ -234,7 +232,7 @@ SCRIPT_MAP=(
     # 日志分析
     "skills/flagos-log-analyzer/tools/log_analyzer.py:scripts/log_analyzer.py"
     # 共享模块
-    "skills/flagos-operator-replacement/tools/ops_constants.py:scripts/ops_constants.py"
+    "skills/shared/ops_constants.py:scripts/ops_constants.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
     # 错误/检查点持久化

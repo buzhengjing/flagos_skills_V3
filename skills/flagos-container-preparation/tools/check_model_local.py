@@ -11,7 +11,6 @@ check_model_local.py — 模型权重搜索、校验与自动下载（宿主机 
     # 宿主机模式（默认，与旧版完全一致）
     python3 check_model_local.py --model "Qwen/Qwen3-8B" --output-json
     python3 check_model_local.py --model "Qwen/Qwen3-8B" --download-dir /mnt/data/models
-    python3 check_model_local.py --model "Qwen3-8B" --no-download --output-json
 
     # 容器模式（编排层在宿主机执行）
     python3 check_model_local.py --model "Qwen/Qwen3-8B" --mode container --container my_container --output-json
@@ -295,128 +294,22 @@ def validate_model_dir(dir_path: str) -> dict:
 DEFAULT_DOWNLOAD_DIR = "/mnt/data/models"
 
 
-def check_network(container=None) -> bool:
-    """检测网络连通性（宿主机或容器内）"""
-    for url in ["https://modelscope.cn", "https://pypi.org"]:
-        try:
-            if container:
-                cmd = ["docker", "exec", container, "curl", "--connect-timeout", "5",
-                       "-s", "-o", "/dev/null", "-w", "%{http_code}", url]
-            else:
-                cmd = ["curl", "--connect-timeout", "5", "-s", "-o", "/dev/null",
-                       "-w", "%{http_code}", url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout.strip().strip("'\"") in ("200", "301", "302"):
-                return True
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            continue
-    return False
-
-
-def ensure_modelscope_cli(container=None) -> bool:
-    """确保 modelscope CLI 可用，未安装则自动安装"""
-    try:
-        if container:
-            cmd_check = ["docker", "exec", container, "bash", "-c", "PATH=/opt/conda/bin:$PATH modelscope --help"]
-            cmd_install = ["docker", "exec", container, "bash", "-c", "PATH=/opt/conda/bin:$PATH pip install modelscope"]
-        else:
-            cmd_check = ["modelscope", "--help"]
-            cmd_install = ["pip", "install", "modelscope"]
-
-        subprocess.run(cmd_check, capture_output=True, timeout=10)
-        return True
-    except FileNotFoundError:
-        print("  modelscope CLI 未安装，正在自动安装...")
-        result = subprocess.run(cmd_install, capture_output=True, text=True, timeout=300)
-        if result.returncode == 0:
-            print("  modelscope 安装成功")
-            return True
-        else:
-            print(f"  modelscope 安装失败: {result.stderr}", file=sys.stderr)
-            return False
-    except subprocess.TimeoutExpired:
-        return True
-
-
-def download_in_container(container: str, model_id: str, container_download_path: str) -> dict:
-    """优先在容器内下载模型到挂载路径"""
-    result = {"success": False, "path": container_download_path, "error": "", "method": "container"}
-
-    # 容器内网络检测
-    if not check_network(container):
-        result["error"] = "容器内网络不通"
-        print(f"  容器内网络不通，将尝试宿主机下载", file=sys.stderr)
-        return result
-
-    # 容器内确保 modelscope
-    if not ensure_modelscope_cli(container):
-        result["error"] = "容器内 modelscope 安装失败"
-        print(f"  容器内 modelscope 不可用，将尝试宿主机下载", file=sys.stderr)
-        return result
-
-    cmd = [
-        "docker", "exec", container, "bash", "-c",
-        f"PATH=/opt/conda/bin:$PATH modelscope download --model {model_id} --local_dir {container_download_path}"
-    ]
-    print(f"\n>>> 在容器内下载模型: {model_id}")
-    print(f"    容器: {container}")
-    print(f"    目标路径: {container_download_path}")
-
-    try:
-        proc = subprocess.run(cmd, timeout=7200, capture_output=False)
-        if proc.returncode == 0:
-            result["success"] = True
-            print(f"\n✓ 容器内下载完成: {container_download_path}")
-        else:
-            result["error"] = f"容器内下载失败，退出码 {proc.returncode}"
-            print(f"\n✗ {result['error']}", file=sys.stderr)
-    except subprocess.TimeoutExpired:
-        result["error"] = "容器内下载超时（2小时）"
-        print(f"\n✗ {result['error']}", file=sys.stderr)
-    except Exception as e:
-        result["error"] = str(e)
-        print(f"\n✗ 容器内下载异常: {e}", file=sys.stderr)
-
-    return result
-
-
-def download_from_modelscope(model_id: str, download_path: str, container=None,
-                              container_download_path=None) -> dict:
-    """下载模型权重。优先容器内下载，失败 fallback 到宿主机。
+def download_from_modelscope(model_id: str, download_path: str) -> dict:
+    """从 ModelScope 下载模型权重。
 
     Args:
         model_id: ModelScope 模型 ID，格式 "org/model_name"
-        download_path: 宿主机下载目标路径
-        container: 容器名（可选，提供时优先在容器内下载）
-        container_download_path: 容器内下载路径（可选）
+        download_path: 本地下载目标路径
 
     Returns:
-        {"success": bool, "path": str, "error": str, "method": str}
+        {"success": bool, "path": str, "error": str}
     """
-    # 优先容器内下载
-    if container and container_download_path:
-        result = download_in_container(container, model_id, container_download_path)
-        if result["success"]:
-            return result
-        print(f"\n  容器内下载失败，fallback 到宿主机...")
-
-    # 宿主机下载
-    result = {"success": False, "path": download_path, "error": "", "method": "host"}
-
-    if not check_network():
-        result["error"] = "网络不通，无法下载模型。请检查网络连接或手动下载模型到宿主机"
-        print(f"\n✗ {result['error']}", file=sys.stderr)
-        return result
-
-    if not ensure_modelscope_cli():
-        result["error"] = "modelscope CLI 安装失败，请手动执行: pip install modelscope"
-        print(f"\n✗ {result['error']}", file=sys.stderr)
-        return result
+    result = {"success": False, "path": download_path, "error": ""}
 
     os.makedirs(download_path, exist_ok=True)
 
     cmd = ["modelscope", "download", "--model", model_id, "--local_dir", download_path]
-    print(f"\n>>> 在宿主机下载模型: {model_id}")
+    print(f"\n>>> 本地未找到权重，开始从 ModelScope 下载: {model_id}")
     print(f"    目标路径: {download_path}")
     print(f"    命令: {' '.join(cmd)}")
 
@@ -424,10 +317,13 @@ def download_from_modelscope(model_id: str, download_path: str, container=None,
         proc = subprocess.run(cmd, timeout=7200, capture_output=False)
         if proc.returncode == 0:
             result["success"] = True
-            print(f"\n✓ 宿主机下载完成: {download_path}")
+            print(f"\n✓ 下载完成: {download_path}")
         else:
             result["error"] = f"modelscope download 退出码 {proc.returncode}"
             print(f"\n✗ 下载失败: 退出码 {proc.returncode}", file=sys.stderr)
+    except FileNotFoundError:
+        result["error"] = "modelscope CLI 未安装，请先执行: pip install modelscope"
+        print(f"\n✗ {result['error']}", file=sys.stderr)
     except subprocess.TimeoutExpired:
         result["error"] = "下载超时（2小时）"
         print(f"\n✗ {result['error']}", file=sys.stderr)
@@ -776,8 +672,6 @@ def main():
     parser.add_argument("--output-json", action="store_true", help="JSON 格式输出")
     parser.add_argument("--download-dir", default=None, help="自动下载目标目录")
     parser.add_argument("--no-download", action="store_true", help="禁用自动下载，仅搜索本地")
-    parser.add_argument("--container", default=None, help="容器名，提供时优先在容器内下载（需挂载目标目录）")
-    parser.add_argument("--container-model-path", default=None, help="容器内模型下载路径（如 /data/models/Qwen3-8B）")
     args = parser.parse_args()
 
     # 参数校验
@@ -880,20 +774,11 @@ def main():
 
         if model_id:
             # 避免嵌套：download_dir 末段已是模型名时直接用
-            download_dir = args.download_dir
             if os.path.basename(download_dir.rstrip("/")).lower() == parsed["model_name"].lower():
                 download_path = download_dir
             else:
                 download_path = os.path.join(download_dir, parsed["model_name"])
-            # 容器内下载路径：优先用户指定，其次从 download_dir 推算
-            container_dl_path = args.container_model_path
-            if not container_dl_path and args.container:
-                container_dl_path = os.path.join(args.download_dir, parsed["model_name"])
-            dl_result = download_from_modelscope(
-                model_id, download_path,
-                container=args.container,
-                container_download_path=container_dl_path,
-            )
+            dl_result = download_from_modelscope(model_id, download_path)
             output["download"] = dl_result
 
             if dl_result["success"]:
