@@ -154,3 +154,53 @@ claude --permission-mode auto
 - 镜像模式：镜像可访问（本地已有或可 pull）
 - 当前目录为项目根目录（`flagos_skills_V3/`）
 - CLAUDE.md 已更新为简化版（已移除 V3 流程）
+
+---
+
+## 方式四：批量串行执行多个模型
+
+当需要对多个模型依次执行迁移流程时，使用 `run_batch.sh`：
+
+```bash
+bash prompts/run_batch.sh <任务列表文件> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose] [--stop-on-error] [--force]
+```
+
+### 任务列表文件格式
+
+创建 `tasks.txt`，每行一个任务，`|` 分隔：
+
+```
+# 格式: 容器名或镜像地址 | 模型名
+# 空行和 # 开头的行自动跳过
+harbor.baai.ac.cn/flagrelease/qwen3:latest | Qwen3-8B
+harbor.baai.ac.cn/flagrelease/llama3:latest | Llama-3-8B
+my_existing_container | Qwen2.5-7B-Instruct
+```
+
+### 示例
+
+```bash
+# 基本用法
+bash prompts/run_batch.sh tasks.txt ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
+
+# 调试模式
+bash prompts/run_batch.sh tasks.txt ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --verbose
+
+# 失败即停
+bash prompts/run_batch.sh tasks.txt ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --stop-on-error
+
+# 强制重跑已完成的任务（忽略断点）
+bash prompts/run_batch.sh tasks.txt ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --force
+```
+
+### 断点续跑
+
+默认自动跳过已完成的任务（通过检查 `context_snapshot.yaml` 中 `workflow.all_done` 字段）。中断后重跑同一个任务列表即可从未完成的任务继续。`--force` 可强制重跑所有任务。
+
+### 选项
+
+| 选项 | 说明 |
+|------|------|
+| `--verbose` | 透传给 run_pipeline.sh，显示全量终端输出 |
+| `--stop-on-error` | 某个任务失败后终止整个批次（默认继续下一个） |
+| `--force` | 强制重跑已完成的任务（默认跳过） |

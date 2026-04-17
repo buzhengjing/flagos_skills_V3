@@ -596,14 +596,51 @@ def extract_model_container(prompt_text: str):
 
 
 # ============================================================================
+# 终端日志记录器
+# ============================================================================
+
+class TerminalLogger:
+    """记录所有终端输出到文件（去除 ANSI 颜色码）"""
+
+    def __init__(self, log_path: str = None):
+        self.log_path = log_path
+        self.log_file = None
+
+    def open(self):
+        if self.log_path:
+            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
+            self.log_file = open(self.log_path, 'a', encoding='utf-8')
+
+    def close(self):
+        if self.log_file:
+            self.log_file.close()
+
+    def write(self, text: str, end: str = '\n'):
+        """写入文本到日志文件（去除 ANSI 颜色码）"""
+        if not self.log_file:
+            return
+        # 去除 ANSI 颜色码
+        clean_text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        self.log_file.write(clean_text + end)
+        self.log_file.flush()
+
+
+# 全局终端日志记录器（由 main() 初始化）
+_terminal_logger = None
+
+
+# ============================================================================
 # 终端输出函数
 # ============================================================================
 
 def out(text: str, colors: Colors = None, end: str = '\n'):
-    """输出到终端，可选着色"""
+    """输出到终端，可选着色，同时写入终端日志"""
     if colors:
         text = colorize_line(text, colors)
     print(text, end=end, flush=True)
+    # 同时写入终端日志
+    if _terminal_logger:
+        _terminal_logger.write(text, end=end)
 
 
 def format_result_compact(stdout: str, is_error: bool, last_cmd: str = '') -> str:
@@ -660,11 +697,16 @@ def main():
     parser.add_argument('--start-step', type=int, default=1,
                         help='分段执行时的起始步骤编号（1-8），之前的步骤标记为已完成')
     parser.add_argument('--cost-file', help='写入本段费用和耗时的文件路径（供 run_pipeline.sh 汇总）')
+    parser.add_argument('--terminal-log', help='记录处理后的终端输出到文件（去除 ANSI 颜色码）')
     args = parser.parse_args()
 
     verbose = args.verbose
     use_color = (not args.no_color) and sys.stdout.isatty()
     colors = Colors(enabled=use_color)
+
+    global _terminal_logger
+    _terminal_logger = TerminalLogger(args.terminal_log)
+    _terminal_logger.open()
 
     logger = PipelineLogger(args.pipeline_log)
     logger.open()
@@ -684,7 +726,7 @@ def main():
                 event = json.loads(line)
             except json.JSONDecodeError:
                 if verbose:
-                    print(line, flush=True)
+                    out(line)
                 continue
 
             if not isinstance(event, dict):
@@ -718,7 +760,7 @@ def main():
                         # --- 终端输出 ---
                         if verbose:
                             # verbose 模式：全量输出
-                            print(text, end="", flush=True)
+                            out(text, end="")
                         else:
                             # 精简模式：逐行过滤
                             for tline in text.split('\n'):
@@ -807,7 +849,7 @@ def main():
                         preview = "\n".join(lines[:3])
                         if len(lines) > 3:
                             preview += f"\n    ... ({len(lines)} lines total)"
-                        print(f"    {preview}", flush=True)
+                        out(f"    {preview}")
                     elif last_tool_visible:
                         # 精简模式：只显示可见命令的压缩结果
                         compact = format_result_compact(stdout, is_error, last_cmd)
@@ -844,6 +886,8 @@ def main():
                         pass
 
     finally:
+        if _terminal_logger:
+            _terminal_logger.close()
         logger.close()
 
 

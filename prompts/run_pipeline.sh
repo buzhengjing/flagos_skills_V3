@@ -381,6 +381,7 @@ LOG_FILE="${LOG_DIR}/claude_pipeline_${TIMESTAMP}.log"
 FULL_LOG="${LOG_DIR}/claude_full_${TIMESTAMP}.log"
 DEBUG_FILE="${LOG_DIR}/claude_debug_${TIMESTAMP}.log"
 PIPELINE_LOG="${LOG_DIR}/pipeline.log"
+TERMINAL_LOG="${LOG_DIR}/terminal.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "日志文件:"
@@ -471,10 +472,10 @@ claude -p "${PROMPT_SEG1}" \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg1" \
-    --max-turns 80 \
+    --max-turns 100 \
     2>&1 | tee "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" > "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --cost-file "${LOG_DIR}/seg1_cost.txt" ${FILTER_FLAGS} || true
 
 # 段间检查
 SEG1_END_TS=$(date +%s)
@@ -634,10 +635,10 @@ claude -p "${PROMPT_SEG2}" \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg2" \
-    --max-turns 150 \
+    --max-turns 250 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_cost.txt" ${FILTER_FLAGS} || true
 
 # 段间检查
 SEG2_END_TS=$(date +%s)
@@ -740,10 +741,10 @@ claude -p "${PROMPT_SEG3}" \
     --output-format stream-json \
     --verbose \
     --debug-file "${DEBUG_FILE}.seg3" \
-    --max-turns 60 \
+    --max-turns 100 \
     2>&1 | tee -a "${LOG_FILE}" \
          | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
-         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" ${FILTER_FLAGS} || true
+         | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 8 --cost-file "${LOG_DIR}/seg3_cost.txt" ${FILTER_FLAGS} || true
 
 SEG3_END_TS=$(date +%s)
 SEG3_ELAPSED=$(( SEG3_END_TS - SEG3_START_TS ))
