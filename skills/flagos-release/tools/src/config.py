@@ -187,7 +187,7 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     existing_tag = release.get('image_tag', '')
     if not existing_tag or '/' not in existing_tag:
         image = ctx.get('image', {})
-        candidate = image.get('tag', '')
+        candidate = str(image.get('tag', ''))
         if candidate and '/' in candidate:
             existing_tag = candidate
         else:
