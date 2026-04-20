@@ -267,7 +267,7 @@ def generate_accuracy_groups(
 ) -> Dict[str, Any]:
     """按功能组生成 blacklist 配置，供逐组精度测试
 
-    测试策略：全部禁用 → 逐组启用 → 哪组启用后精度下降就是问题组
+    测试策略：全量启用 → 逐组禁用 → 禁用哪组后精度恢复就是问题组 → 达标即停
     """
     # 加载算子列表
     all_ops = []
@@ -292,15 +292,13 @@ def generate_accuracy_groups(
     if plugin_mode:
         oot_actual = [op for op in OOT_OPERATORS if op in all_ops_set]
         if oot_actual:
-            # 启用 OOT 组 = 不 blacklist OOT，其余全 blacklist
-            non_oot = sorted(all_ops_set - set(oot_actual))
             groups.append({
                 "name": "oot",
                 "description": "OOT 高层融合算子（silu_and_mul, rms_norm 等）",
                 "ops": oot_actual,
                 "ops_count": len(oot_actual),
                 "test_env": _build_group_env(
-                    enable_group=oot_actual,
+                    disable_group=oot_actual,
                     all_ops=all_ops,
                     plugin_mode=True,
                 ),
@@ -318,7 +316,7 @@ def generate_accuracy_groups(
             "ops": group_actual,
             "ops_count": len(group_actual),
             "test_env": _build_group_env(
-                enable_group=group_actual,
+                disable_group=group_actual,
                 all_ops=all_ops,
                 plugin_mode=plugin_mode,
             ),
@@ -334,16 +332,16 @@ def generate_accuracy_groups(
             "ops": unclassified,
             "ops_count": len(unclassified),
             "test_env": _build_group_env(
-                enable_group=unclassified,
+                disable_group=unclassified,
                 all_ops=all_ops,
                 plugin_mode=plugin_mode,
             ),
         })
 
-    # 生成"全部禁用"的基线配置
+    # 基线 = 全量启用（即步骤4的 V2 配置，已有精度数据）
     baseline_env = {
-        "USE_FLAGGEMS": "0",
-        "VLLM_FL_PREFER_ENABLED": "false",
+        "USE_FLAGGEMS": "1",
+        "VLLM_FL_PREFER_ENABLED": "true",
     }
 
     return {
@@ -351,12 +349,12 @@ def generate_accuracy_groups(
         "groups_count": len(groups),
         "groups": groups,
         "baseline_env": baseline_env,
-        "baseline_env_inline": "USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false",
+        "baseline_env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true",
         "test_procedure": (
-            "1. 用 baseline（全禁用）跑 quick eval 确认精度正常\n"
-            "2. 逐组启用：用每组的 test_env 启动服务 → 跑 quick eval\n"
-            "3. 哪组启用后精度下降 → 该组有问题\n"
-            "4. 问题组内逐个算子排查"
+            "1. baseline: 全量启用（V2 配置）→ 已有步骤4的 V2 精度数据\n"
+            "2. 逐组禁用: 每次禁用一组，其余全开 → fast_gpqa.py 评测\n"
+            "3. 禁用某组后精度恢复（偏差 ≤5%）→ 该组有问题，达标即停\n"
+            "4. 问题组内逐个算子排查（可选，缩小禁用范围）"
         ),
     }
 
@@ -373,17 +371,15 @@ def _group_description(name: str) -> str:
 
 
 def _build_group_env(
-    enable_group: List[str],
+    disable_group: List[str],
     all_ops: List[str],
     plugin_mode: bool,
 ) -> Dict[str, str]:
-    """生成"只启用指定组"的环境变量配置
+    """生成"禁用指定组、其余全开"的环境变量配置
 
-    策略：全量启用 FlagGems，但把非本组的算子全部 blacklist
+    策略：全量启用 FlagGems，只把当前组的算子 blacklist
     """
-    all_ops_set = set(all_ops)
-    enable_set = set(enable_group)
-    blacklist = sorted(all_ops_set - enable_set)
+    blacklist = sorted(disable_group)
 
     if plugin_mode:
         # 分 OOT 和 flagos 两层
@@ -402,9 +398,11 @@ def _build_group_env(
         env["env_inline"] = " ".join(f"{k}={v}" for k, v in env.items() if k != "env_inline")
         return env
 
-    # 非 plugin：返回 enable 列表（供 Layer 1-4 使用）
+    # 非 plugin：返回 blacklist 列表（供 Layer 1-4 使用）
+    all_ops_set = set(all_ops)
+    enable_ops = sorted(all_ops_set - set(disable_group))
     return {
-        "enable_ops": enable_group,
+        "enable_ops": enable_ops,
         "blacklist_ops": blacklist,
     }
 

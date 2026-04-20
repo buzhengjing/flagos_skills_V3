@@ -345,9 +345,9 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
 - `crashed_ops` 为空但有 evidence → 人工查看日志
 - 无 evidence → 非算子问题，检查环境配置
 
-## 场景 2：精度不达标 → 按组启用测试（≤3 轮定位）
+## 场景 2：精度不达标 → 逐组禁用测试（达标即停）
 
-精度评测不通过时，**按功能组逐组启用测试**，快速缩小范围：
+精度评测不通过时，**逐组禁用测试**，每次禁用一组算子（其余全开），快速定位问题组：
 
 ```bash
 ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups \
@@ -359,13 +359,13 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups 
 输出每组的 test_env 配置（含 `env_inline`），测试流程：
 
 ```
-1. baseline: 全禁用（USE_FLAGGEMS=0）→ fast_gpqa.py 评测 → 确认精度正常
-2. 逐组启用: 用每组的 env_inline 启动服务 → fast_gpqa.py 评测
-3. 哪组启用后精度下降 → 该组有问题
-4. 问题组内逐个算子排查（最多 N 个算子，N 轮）
+1. baseline: 全量启用（V2 配置）→ 已有步骤4的 V2 精度数据
+2. 逐组禁用: 每次禁用一组，其余全开 → 重启服务 → fast_gpqa.py 评测
+3. 禁用某组后精度恢复（偏差 ≤5%）→ 该组有问题，达标即停
+4. 问题组内逐个算子排查（可选，缩小禁用范围）
 ```
 
-**预期效率**：分组测试 + 问题组内逐个排查，主工作流中上限 3 轮优化（超限标记不合格进入下一步）
+**达标即停**：任意一轮禁用后精度偏差 ≤5% 即标记 accuracy_ok=true 并停止排查，不继续测试剩余组。主工作流中上限 3 轮（超限标记不合格进入下一步）
 
 ## 场景 3：性能不达标 → Profiling 预扫描（缩小搜索范围）
 

@@ -155,11 +155,12 @@ docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/resu
    docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups \
      --ops-file /flagos-workspace/results/ops_list.json \
      [--plugin-mode] --json"
-3. 按组逐步启用测试 → 定位问题组 → 组内逐个排查
-4. 关闭问题算子 → 重启服务 → 重新评测（GPQA Diamond）
-5. 最多 3 轮：
-   ├── 偏差 ≤ 5% → accuracy_ok = true，记录 excluded_ops_accuracy
-   └── 3 轮后仍 > 5% → accuracy_ok = false，记录已排除的算子，继续
+3. 逐组禁用测试：每次禁用一组，其余全开 → 重启服务 → GPQA Diamond 评测
+4. **达标即停**：禁用某组后偏差 ≤5% → 标记该组为问题组，accuracy_ok=true，停止排查
+5. 如需精细定位：问题组内逐个算子排查（可选，仅当需要保留更多算子时）
+6. 最多 3 轮（3 组）：
+   ├── 某轮达标 → accuracy_ok = true，记录 excluded_ops_accuracy（= 被禁用的那组）
+   └── 3 轮后仍不达标 → accuracy_ok = false，记录已排除的算子，继续
 6. 调优结果写入 context.yaml 的 eval.excluded_ops_accuracy 和 optimization 字段
 7. 写入 traces/05_accuracy_tuning.json
 8. 如有问题算子被禁用，调用 issue_reporter.py --type accuracy-degraded 生成 issue 文件（默认不提交，需 --submit 显式提交）
