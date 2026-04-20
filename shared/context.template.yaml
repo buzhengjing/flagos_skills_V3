@@ -323,6 +323,7 @@ workflow:
   accuracy_ok: false          # 步骤4/5 精度是否达标 (偏差 ≤5%)
   performance_ok: false       # 步骤6/7 性能是否达标 (ratio ≥80%)
   qualified: false            # 综合判定: service_ok AND accuracy_ok AND performance_ok
+  config_persisted: false     # 算子配置是否已固化到镜像（步骤7/8完成后为 true）
   all_done: false             # 全流程是否完成
   last_error: ""              # 最近一次错误信息
 

@@ -248,7 +248,11 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
 # Quick 模式固定并发
 QUICK_CONCURRENCY = 64
 
-# 预热请求数（消除 CUDA kernel 编译、KV cache 分配等冷启动开销）
+# Quick 模式多轮测试：跑 5 轮，丢弃第 1 轮（自然预热），取后 4 轮均值
+QUICK_TOTAL_ROUNDS = 5
+QUICK_DISCARD_ROUNDS = 1
+
+# 预热请求数（comprehensive 模式使用）
 WARMUP_NUM_PROMPTS = 2
 WARMUP_CONCURRENCY = 2
 
@@ -317,27 +321,75 @@ def run_comprehensive_test(base_cmd: List[str], levels: List[int],
     return results
 
 
+def average_metrics(metrics_list: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """多轮 metrics 取均值，数值型字段平均，非数值取最后一轮"""
+    if not metrics_list:
+        return {}
+    if len(metrics_list) == 1:
+        return metrics_list[0]
+
+    averaged = {}
+    for key in METRIC_PATTERNS:
+        values = [m[key] for m in metrics_list if key in m and m[key] is not None]
+        if values and all(isinstance(v, (int, float)) for v in values):
+            averaged[key] = round(sum(values) / len(values), 1)
+        else:
+            averaged[key] = metrics_list[-1].get(key)
+
+    for key in metrics_list[-1]:
+        if key not in averaged:
+            averaged[key] = metrics_list[-1][key]
+
+    return averaged
+
+
 def run_quick_test(base_cmd: List[str],
                    dry_run: bool = False) -> Dict[str, Any]:
     """
-    Quick 模式：预热后只跑固定并发 64，num_prompts = 64。
+    Quick 模式：跑 5 轮，第 1 轮作为自然预热丢弃，取后 4 轮均值。
 
-    用于主流程快速验证，不遍历所有并发级别。
+    每轮 concurrency=64, num_prompts=64。
     """
-    # 预热
-    if not dry_run:
-        print(f"  [WARMUP] Sending {WARMUP_NUM_PROMPTS} warmup requests (concurrency={WARMUP_CONCURRENCY}) ...")
-        run_benchmark(base_cmd, WARMUP_NUM_PROMPTS, WARMUP_CONCURRENCY, dry_run=False)
-        print(f"  [WARMUP] Done, starting benchmark")
+    total_rounds = QUICK_TOTAL_ROUNDS
+    discard = QUICK_DISCARD_ROUNDS
+    used_rounds = total_rounds - discard
 
-    print(f"  [QUICK MODE] concurrency={QUICK_CONCURRENCY}, num_prompts={QUICK_CONCURRENCY}")
+    print(f"  [QUICK MODE] concurrency={QUICK_CONCURRENCY}, rounds={total_rounds} (discard first {discard}, average last {used_rounds})")
 
-    metrics = run_benchmark(base_cmd, QUICK_CONCURRENCY, QUICK_CONCURRENCY, dry_run)
-    results = {str(QUICK_CONCURRENCY): metrics}
+    if dry_run:
+        for i in range(1, total_rounds + 1):
+            run_benchmark(base_cmd, QUICK_CONCURRENCY, QUICK_CONCURRENCY, dry_run=True)
+        return {str(QUICK_CONCURRENCY): {"dry_run": True}, "_search_meta": {"quick_mode": True}}
+
+    all_round_metrics = []
+    for i in range(1, total_rounds + 1):
+        if i <= discard:
+            print(f"\n  [WARMUP ROUND {i}/{total_rounds}]")
+        else:
+            print(f"\n  [ROUND {i}/{total_rounds}]")
+
+        metrics = run_benchmark(base_cmd, QUICK_CONCURRENCY, QUICK_CONCURRENCY, dry_run=False)
+        all_round_metrics.append(metrics)
+
+    valid_metrics = [m for m in all_round_metrics[discard:] if "error" not in m]
+
+    if not valid_metrics:
+        final_metrics = all_round_metrics[-1]
+    else:
+        final_metrics = average_metrics(valid_metrics)
+
+    results = {str(QUICK_CONCURRENCY): final_metrics}
 
     throughput = 0
-    if not dry_run and "error" not in metrics:
-        throughput = metrics.get('Output token throughput (tok/s)', 0) or 0
+    if "error" not in final_metrics:
+        throughput = final_metrics.get('Output token throughput (tok/s)', 0) or 0
+
+    per_round_tps = []
+    for m in all_round_metrics[discard:]:
+        if "error" not in m:
+            per_round_tps.append(m.get('Output token throughput (tok/s)', 0) or 0)
+        else:
+            per_round_tps.append(None)
 
     results["_search_meta"] = {
         "best_concurrency": QUICK_CONCURRENCY,
@@ -345,6 +397,9 @@ def run_quick_test(base_cmd: List[str],
         "tested_levels": [QUICK_CONCURRENCY],
         "all_levels_tested": True,
         "quick_mode": True,
+        "rounds_total": total_rounds,
+        "rounds_used": len(valid_metrics),
+        "per_round_throughputs": per_round_tps,
     }
 
     return results
