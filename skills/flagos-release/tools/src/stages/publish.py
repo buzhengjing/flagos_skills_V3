@@ -973,7 +973,7 @@ class PublishStage(BaseStage):
     # ==================== ModelScope ====================
 
     def _publish_to_modelscope(self, readme_path: Optional[str]) -> bool:
-        """发布到 ModelScope（SDK 优先，CLI 降级）"""
+        """发布到 ModelScope（CLI 优先，SDK 降级）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
@@ -990,6 +990,23 @@ class PublishStage(BaseStage):
         print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
         print(f"  目标仓库: {model_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
+
+        if self._publish_to_modelscope_cli(readme_path):
+            return True
+
+        print("  CLI 方式失败，尝试使用 SDK...")
+        return self._publish_to_modelscope_sdk(readme_path)
+
+    def _publish_to_modelscope_sdk(self, readme_path: Optional[str]) -> bool:
+        """使用 SDK 发布到 ModelScope（降级方案）"""
+        publish_config = self.config.publish
+
+        model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
+        model_id = publish_config.modelscope_model_id or f"FlagRelease/{model_name}"
+
+        upload_dir = self._get_upload_directory(readme_path)
+        if not upload_dir or not os.path.exists(upload_dir):
+            return False
 
         try:
             from modelscope.hub.api import HubApi
@@ -1023,11 +1040,11 @@ class PublishStage(BaseStage):
             return True
 
         except ImportError:
-            print("  modelscope SDK 未安装，尝试使用命令行方式...")
-            return self._publish_to_modelscope_cli(readme_path)
+            print("  x modelscope SDK 也未安装，无法发布")
+            return False
 
         except Exception as e:
-            print(f"  x 发布到 ModelScope 失败: {e}")
+            print(f"  x SDK 发布到 ModelScope 失败: {e}")
             return False
 
     def _publish_to_modelscope_cli(self, readme_path: Optional[str]) -> bool:
@@ -1050,6 +1067,17 @@ class PublishStage(BaseStage):
         print(f"  准备上传目录: {upload_dir}")
         print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
         print(f"  目标仓库: {model_id}")
+
+        visibility = "private" if publish_config.private else "public"
+        create_cmd = f"modelscope create {model_id} --visibility {visibility}"
+        print(f"  创建/确认仓库: {model_id} ({visibility})")
+        result, stdout, stderr = self.run_command(
+            cmd=create_cmd,
+            step_name="创建 ModelScope 仓库",
+            timeout=60
+        )
+        if not result:
+            print(f"    创建仓库失败（可能已存在），继续尝试上传...")
 
         cmd = f"modelscope upload {model_id} {upload_dir}"
 
@@ -1074,7 +1102,7 @@ class PublishStage(BaseStage):
             else:
                 if attempt < UPLOAD_MAX_RETRIES - 1:
                     print(f"  x 上传失败 (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
-                    print(f"  等待 {current_delay} 秒后重试...")
+                    print(f"    等待 {current_delay} 秒后重试...")
                     time.sleep(current_delay)
                     current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
                 else:
@@ -1085,7 +1113,7 @@ class PublishStage(BaseStage):
     # ==================== HuggingFace ====================
 
     def _publish_to_huggingface(self, readme_path: Optional[str]) -> bool:
-        """发布到 HuggingFace（SDK 优先，CLI 降级）"""
+        """发布到 HuggingFace（CLI 优先，SDK 降级）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
@@ -1107,6 +1135,23 @@ class PublishStage(BaseStage):
         if not os.environ.get("HF_ENDPOINT"):
             os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
             print(f"  HF_ENDPOINT 未设置，使用镜像站: https://hf-mirror.com")
+
+        if self._publish_to_huggingface_cli(readme_path):
+            return True
+
+        print("  CLI 方式失败，尝试使用 SDK...")
+        return self._publish_to_huggingface_sdk(readme_path)
+
+    def _publish_to_huggingface_sdk(self, readme_path: Optional[str]) -> bool:
+        """使用 SDK 发布到 HuggingFace（降级方案）"""
+        publish_config = self.config.publish
+
+        model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
+        repo_id = publish_config.huggingface_repo_id or f"FlagRelease/{model_name}"
+
+        upload_dir = self._get_upload_directory(readme_path)
+        if not upload_dir or not os.path.exists(upload_dir):
+            return False
 
         try:
             from huggingface_hub import HfApi, login
@@ -1141,11 +1186,11 @@ class PublishStage(BaseStage):
             return True
 
         except ImportError:
-            print("  huggingface_hub SDK 未安装，尝试使用命令行方式...")
-            return self._publish_to_huggingface_cli(readme_path)
+            print("  x huggingface_hub SDK 也未安装，无法发布")
+            return False
 
         except Exception as e:
-            print(f"  x 发布到 HuggingFace 失败: {e}")
+            print(f"  x SDK 发布到 HuggingFace 失败: {e}")
             return False
 
     def _publish_to_huggingface_cli(self, readme_path: Optional[str]) -> bool:
