@@ -380,7 +380,9 @@ def _apply_txt_fallback(enabled_ops: List[str], gems_txt_path: Optional[str]) ->
 def restart_service(stop_cmd: str, startup_cmd: str,
                     wait_script: str, wait_timeout: int = SERVICE_WAIT_TIMEOUT,
                     env_inline: Optional[str] = None,
-                    port: Optional[int] = None) -> bool:
+                    port: Optional[int] = None,
+                    model_name: Optional[str] = None,
+                    max_timeout: Optional[int] = None) -> bool:
     """重启服务：停止 → 启动 → 等待就绪"""
     print("\n[重启服务]")
 
@@ -414,14 +416,22 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     bg_cmd = f"nohup {actual_cmd} > {log_path} 2>&1 &"
     run_cmd(bg_cmd, check=False)
 
-    # 等待就绪（传递端口号，避免非默认端口时超时）
+    # 传递 --log-path 启用动态超时模式（监控日志活动而非固定超时）
     wait_cmd = f"bash {wait_script} --timeout {wait_timeout}"
+    wait_cmd += f" --log-path {log_path}"
+    if max_timeout:
+        wait_cmd += f" --max-timeout {max_timeout}"
+    else:
+        wait_cmd += f" --max-timeout 1800"
     if port:
         wait_cmd += f" --port {port}"
-    print(f"  等待服务就绪 (最多 {wait_timeout}s, port={port or 8000})...")
+    if model_name:
+        wait_cmd += f" --model-name '{model_name}'"
+    effective_max = max_timeout or 1800
+    print(f"  等待服务就绪 (动态模式, 无活动超时={wait_timeout}s, 绝对上限={effective_max}s, port={port or 8000})...")
     result = run_cmd(
         wait_cmd,
-        timeout=wait_timeout + 30,
+        timeout=effective_max + 30,
         check=False
     )
     if result.returncode != 0:
@@ -545,7 +555,8 @@ def preflight_framework_check(service_startup_cmd: str,
     env_inline = "USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false"
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline, port=svc_port):
+                           env_inline=env_inline, port=svc_port,
+                           model_name=args.model_name, max_timeout=args.max_timeout):
         return {"pass": False, "ratio": 0, "throughput": 0,
                 "message": "ERROR: 框架预检服务启动失败"}
 
@@ -673,7 +684,8 @@ def run_search_step(state_path: str, perf_config: str,
     t0 = time.time()
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline, port=svc_port):
+                           env_inline=env_inline, port=svc_port,
+                           model_name=args.model_name, max_timeout=args.max_timeout):
         return {"action": "error", "message": "服务重启失败"}
     step_timing["restart_seconds"] = round(time.time() - t0, 1)
 
@@ -918,6 +930,8 @@ def main():
     common.add_argument("--toggle-script", default=DEFAULT_TOGGLE_SCRIPT)
     common.add_argument("--wait-script", default=DEFAULT_WAIT_SCRIPT)
     common.add_argument("--apply-config-script", default=DEFAULT_APPLY_CONFIG_SCRIPT)
+    common.add_argument("--model-name", help="模型名称（传递给 wait_for_service.sh 精确验证）")
+    common.add_argument("--max-timeout", type=int, default=1800, help="服务启动绝对超时上限（秒）")
 
     # run — 完整搜索
     run_parser = subparsers.add_parser("run", parents=[common], help="运行完整搜索循环")
