@@ -119,7 +119,7 @@ while IFS='|' read -r TARGET MODEL || [ -n "$TARGET" ]; do
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     TASK_START_TS=$(date +%s)
-    bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG
+    bash prompts/run_pipeline.sh "$TARGET" "$MODEL" "$MS_TOKEN" "$HF_TOKEN" "$GH_TOKEN" "$HARBOR_USER" "$HARBOR_PASS" $VERBOSE_FLAG < /dev/null
     EXIT_CODE=$?
     TASK_ELAPSED=$(( $(date +%s) - TASK_START_TS ))
     TASK_MIN=$(( TASK_ELAPSED / 60 ))
