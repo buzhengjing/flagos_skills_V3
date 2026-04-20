@@ -422,7 +422,7 @@ def run_fast_gpqa(
     api_key: str = 'EMPTY',
     dataset_dir: Optional[str] = None,
     dataset_hub: str = 'modelscope',
-    limit: Optional[int] = 30,
+    limit: Optional[int] = 50,
 ) -> Dict:
     """
     GPQA Diamond 快速评测主流程。
@@ -565,7 +565,7 @@ def run_fast_gpqa(
             'benchmark': '评测基准名称（固定 gpqa_diamond）',
             'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
             'score': 'GPQA Diamond 正确率百分比',
-            'total_questions': '评测题目总数（默认 30 题，--limit 0 为全量 198 题）',
+            'total_questions': '评测题目总数（默认 50 题，--limit 0 为全量 198 题）',
             'eval_batch_size': '评测并发数（自动探测选择）',
             'max_tokens': '单次生成最大 token 数',
             'max_model_len': '模型支持的最大上下文长度',
@@ -628,8 +628,8 @@ def main():
                         help='API 密钥 (覆盖 config)')
     parser.add_argument('--dataset-dir', type=str, default=None,
                         help='数据集缓存目录 (覆盖 config)')
-    parser.add_argument('--limit', type=int, default=30,
-                        help='限制评测题数（默认 30 题，传 0 或 198 为全量）')
+    parser.add_argument('--limit', type=int, default=50,
+                        help='限制评测题数（默认 50 题，传 0 或 198 为全量）')
     args = parser.parse_args()
 
     # 加载配置

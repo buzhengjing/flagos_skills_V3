@@ -587,6 +587,15 @@ class PublishStage(BaseStage):
             placeholder = "{{" + key + "}}"
             readme_content = readme_content.replace(placeholder, str(value))
 
+        if not self.config.config_persisted:
+            import re
+            readme_content = re.sub(
+                r'\n### Operator Configuration\n.*?(?=\n## |\Z)',
+                '',
+                readme_content,
+                flags=re.DOTALL
+            )
+
         output_path = self._get_readme_output_path()
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):

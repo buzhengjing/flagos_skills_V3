@@ -24,6 +24,8 @@ provides:
   - service.initial_operator_list
   - service.max_model_len
   - runtime.gpu_count
+  - runtime.tp_size
+  - runtime.tp_reason
   - runtime.flaggems_enabled
   - runtime.framework
   - runtime.thinking_model
@@ -101,6 +103,8 @@ service:
 runtime:
   framework: <vllm|sglang>
   gpu_count: <GPU 数量>
+  tp_size: <tensor-parallel-size>
+  tp_reason: <TP 推算原因>
   flaggems_enabled: true|false        # 根据 oplist 文件是否存在判断，而非启动模式
   thinking_model: true|false            # 是否为 thinking model（传递给后续评测 Skill）
 ```

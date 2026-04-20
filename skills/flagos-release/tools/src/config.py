@@ -93,6 +93,7 @@ class PipelineConfig:
     input_type: str = "container"
     container_name: str = ""
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
+    config_persisted: bool = False
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -133,7 +134,7 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     svc = ctx.get('service', {})
     runtime = ctx.get('runtime', {})
     port = svc.get('port', 8000)
-    tp = runtime.get('tp_size', 1)
+    tp = runtime.get('tp_size') or 1
     model_path = model.get('container_path', '')
     max_model_len = svc.get('max_model_len', '')
     cmd_parts = [f"vllm serve {model_path}",
@@ -173,6 +174,7 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # 从 workflow.qualified 判定发布可见性：qualified=true → 公开，否则私有
     workflow = ctx.get('workflow', {})
     config.publish.private = not workflow.get('qualified', False)
+    config.config_persisted = workflow.get('config_persisted', False)
     config.publish.upload_weights = True
     # 优先用 local_path（宿主机路径），其次 container_path（容器内路径）
     # 镜像模式下 local_path 是用户提供的宿主机路径，一定能访问
