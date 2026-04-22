@@ -55,6 +55,7 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 | 提交 issue / submit issue / report bug / 自动报告 | flagos-issue-reporter | `skills/flagos-issue-reporter/SKILL.md` |
 | 组件安装 / install component / 安装 FlagGems / 安装 FlagTree / 升级 FlagGems / flag upgrade | flagos-component-install | `skills/flagos-component-install/SKILL.md` |
 | 发布 / 镜像上传 / 镜像打包 / 模型发布 / release / publish / image upload / package image | flagos-release | `skills/flagos-release/SKILL.md` |
+| 安装 plugin / install plugin / plugin 安装 / vllm-plugin | flagos-plugin-install | `skills/flagos-plugin-install/SKILL.md` |
 
 ---
 
@@ -68,15 +69,28 @@ ls .claude/settings.local.json 2>/dev/null && echo "EXISTS" || echo "MISSING —
 2 环境检测           → inspect_env.py 场景分类 + FlagGems 集成分析
 3 启服务             → V1(native) + V2(flagos) 启动验证 → 异常自动 issue
 4 精度评测           → V1/V2 GPQA Diamond 对比 → 异常自动 issue
-5 精度算子调优       → [条件] 偏差>5% 时分组排查定位问题算子（最多3轮）
+5 精度算子调优       → [条件] V2精度下降>5% 时分组排查定位问题算子（最多3轮）
 6 性能评测           → V1/V2 4k1k benchmark 对比 → 异常自动 issue
 7 性能算子调优       → [条件] ratio<80% 时逐个禁用直到达标
 8 自动发布           → 打包 + 上传 → qualified 公开 / 不合格私有
+--- Plugin 验证流程（仅 qualified=true 时触发）---
+9  Plugin 安装       → install_plugin.py 安装 vllm-plugin-FL → 失败则 issue + 停止
+10 Plugin 启服务     → 以达标算子集 + plugin 模式启动 → 崩溃则 issue + 停止
+11 Plugin 精度评测   → 与 V1 基线对比 → 不达标则 issue（继续）
+12 Plugin 性能评测   → 与 V1 基线对比 → 不达标则 issue（继续）
+13 Plugin 发布       → plugin 镜像上传 + 更新已发布版本 README
 ```
 
-执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
+执行顺序：1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → [qualified=true] → 9 → 10 → 11 → 12 → 13
 
-**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
+**算子累计禁用规则**：5 禁用精度问题算子 → 6 在此基础上测性能 → 7 继续禁用性能问题算子。步骤 10-12 复用步骤 5/7 的最终算子集，不重新调优。各步骤详细流程见对应 SKILL.md 的"编排层指令"章节。
+
+**Plugin 流程特殊规则**：
+- 触发条件：步骤 8 完成且 `workflow.qualified=true`，否则步骤 9-13 全部 skipped
+- 崩溃停止：步骤 9 安装失败或步骤 10 服务崩溃 → 写 issue 到 `flagos-ai/vllm-plugin-FL` → **停止任务**（与主流程不同）
+- Issue 路由：步骤 9-13 所有 issue 提交到 `flagos-ai/vllm-plugin-FL`（非 FlagGems）
+- 不触发算子调优：精度/性能不达标只写 issue，不进入调优流程
+- 算子集复用：使用主流程已达标的算子集（含步骤 5/7 的禁用列表）
 
 ### V1/V2/V3 定义
 
@@ -149,12 +163,18 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。
 | 精度调优触发 | `accuracy_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
 | 性能调优触发 | `performance_ok=false` 且 `env_type≠native` 时自动触发 | 不询问 |
 | V3 验证 benchmark | quick 模式 | 不询问策略 |
+| Plugin 流程触发 | `workflow.qualified=true` 后自动进入步骤 9-13 | 不询问是否安装 plugin |
+| Plugin 安装失败 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不尝试恢复 |
+| Plugin 服务崩溃 | 写 issue 到 `flagos-ai/vllm-plugin-FL` → 停止任务 | 不切回非 plugin 模式 |
+| Plugin issue 路由 | 步骤 9-13 所有 issue → `flagos-ai/vllm-plugin-FL` | 非 FlagGems 仓库 |
+| Plugin 镜像命名 | 原 tag 追加 `-plugin` 后缀 | 自动生成 |
+| Plugin 算子集 | 复用主流程已达标的算子集（含步骤 5/7 禁用列表） | 不重新调优 |
 
 ---
 
 ## 用户交互规则
 
-**1-8 全自动执行，零交互。** 网络失败自动尝试备选镜像源，全部失败则终止任务，不询问用户。
+**1-13 全自动执行，零交互。** 网络失败自动尝试备选镜像源，全部失败则终止任务，不询问用户。
 
 凭证均通过环境变量提供：`HARBOR_USER`/`HARBOR_PASSWORD`、`MODELSCOPE_TOKEN`、`HF_TOKEN`、`GITHUB_TOKEN`。
 
@@ -168,7 +188,7 @@ FlagTree：仅记录 `has_flagtree`，不影响场景分类。
 bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 ```
 
-部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`。
+部署的脚本清单：`inspect_env.py`、`toggle_flaggems.py`、`wait_for_service.sh`、`benchmark_runner.py`、`performance_compare.py`、`operator_optimizer.py`、`operator_search.py`、`diagnose_ops.py`、`eval_monitor.py`、`install_component.py`、`install_flagtree.sh`、`issue_reporter.py`、`log_analyzer.py`、`install_plugin.py`。
 
 ---
 
@@ -257,7 +277,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 | 文件 | 写入时机 |
 |------|---------|
 | `logs/issues_startup.log` | 服务启动失败、崩溃（不含超时） |
-| `logs/issues_accuracy.log` | 精度偏差 >5%、评测报错 |
+| `logs/issues_accuracy.log` | V2精度下降 >5%、评测报错 |
 | `logs/issues_performance.log` | 任一并发级别 V2/V1 < 80% |
 
 统一格式：
@@ -302,8 +322,8 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 10. **算子列表以运行时 txt（`flaggems_enable_oplist.txt` 或 `gems.txt`）为唯一权威来源**。每次服务启动后必须检查该文件。不在此文件中的算子必须被显式关闭。算子调优中的关闭列表只是控制输入，实际生效以运行时 txt 为准
 11. **容器内 Python 必须用 conda 环境**。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=/opt/conda/bin:$PATH` 前缀
 12. **宿主机 mkdir/ls 严禁使用花括号展开**。`mkdir -p /path/{a,b,c}` 会被 sandbox 拦截。容器内不受此限制
-13. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用
-14. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当偏差 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio
+13. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤 9-10 中 plugin 安装失败或服务崩溃允许终止（写 issue 后停止）
+14. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度下降 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio
 15. **中间文件禁止写入项目源码目录**。只能写入 `/data/flagos-workspace/<model>/config/` 或容器内 `/flagos-workspace/config/`
 16. **工具脚本失败后必须读取 `/flagos-workspace/logs/_last_error.json`**，将错误同步到 context.yaml
 17. **流程中断后自动诊断**。新会话启动时应优先读取 `logs/failure_diagnosis.json` 了解中断原因
@@ -322,6 +342,10 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 30. **V1 和 V2 必须使用相同的 GPU 配置**。禁止重新检测 GPU
 31. **步骤7性能算子调优必须通过 `operator_search.py run` 一次性执行**。禁止编排层手动拼凑循环
 32. **每轮算子搜索前必须验证 GPU 显存已释放**。`operator_search.py` 自动处理，连续清理仍无可用 GPU 则中止
+33. **步骤 9-13 的 issue 必须提交到 `flagos-ai/vllm-plugin-FL`**。使用 `issue_reporter.py full --type plugin-error --repo flagos-ai/vllm-plugin-FL`
+34. **步骤 9 安装失败或步骤 10 服务崩溃必须停止任务**。写 issue 后设置 `plugin_workflow.crash_stopped=true`，不继续后续步骤
+35. **步骤 10-12 复用主流程 GPU 配置和算子集**。禁止重新检测 GPU，禁止重新调优算子
+36. **Plugin 镜像 tag 在原 date_tag 后追加 `-plugin`**。如 `202603301143-plugin`
 
 ---
 

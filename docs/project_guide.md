@@ -209,13 +209,13 @@ claude --permission-mode auto
 | 文件 | 写入时机 |
 |------|---------|
 | `logs/issues_startup.log` | 服务启动失败、崩溃、超时 |
-| `logs/issues_accuracy.log` | 精度偏差 >5% |
+| `logs/issues_accuracy.log` | V2精度下降 >5% |
 | `logs/issues_performance.log` | 任一并发级别 V2/V1 < 80% |
 
 统一格式，支持 `tail -f`：
 ```
-[2026-03-20 16:30:05] V2 | 精度偏差超阈值
-  详情: V1=68.2%, V2=61.5%, 偏差=6.7% (阈值 5%)
+[2026-03-20 16:30:05] V2 | 精度下降超阈值
+  详情: V1=68.2%, V2=61.5%, 下降=6.7% (阈值 5%)
   操作: 提交 accuracy-degraded issue, 标记 workflow.accuracy_ok=false
   结果: 继续进入5性能评测
 ```

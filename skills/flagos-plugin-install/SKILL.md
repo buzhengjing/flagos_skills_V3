@@ -160,3 +160,99 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 | import 失败 | 检查 Python 环境，确认 conda 环境激活 |
 | 服务启动后 plugin 未生效 | 检查 `VLLM_FL_PREFER_ENABLED` 环境变量 |
 | plugin 与 flaggems 冲突 | 卸载 plugin 回退到 flaggems+flagtree 环境 |
+
+---
+
+## 编排层指令（步骤9 Plugin 安装 — 固化决策）
+
+### 触发条件
+
+步骤 8（自动发布）完成后，检查 `workflow.qualified`：
+- `qualified=true` → 进入步骤 9，设置 `plugin_workflow.triggered=true`
+- `qualified=false` → 跳过步骤 9-13，设置 `plugin_workflow.skip_reason="主流程不达标"`
+
+### 调用方式
+
+```bash
+# 安装 plugin
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action install --json"
+
+# 验证安装
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/install_plugin.py --action verify --json"
+```
+
+### 失败处理（强制停止）
+
+Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installed=false`）时：
+
+1. 调用 `issue_reporter.py` 提交 issue 到 plugin 仓库：
+   ```bash
+   docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+       --type plugin-error \
+       --context-yaml /flagos-workspace/shared/context.yaml \
+       --repo flagos-ai/vllm-plugin-FL \
+       --output-dir /flagos-workspace/results/ \
+       --json"
+   ```
+2. 设置 `plugin_workflow.crash_stopped=true`
+3. 写入 `traces/09_plugin_install.json`（status=failed）
+4. **停止任务**，不继续步骤 10-13
+
+### 编排层后续操作
+
+安装成功后：
+- 更新 `context.yaml` 的 `plugin_install` 字段
+- 更新 `environment.env_type` 为 `vllm_plugin_flaggems`（如果原来不是）
+- 更新 `environment.has_plugin=true`
+- 写入 `traces/09_plugin_install.json`
+- 更新 `workflow_ledger` 步骤 09 状态
+- 更新 `timing.steps.plugin_install`
+
+### 步骤 10-12 概述（在此处统一说明）
+
+步骤 10（Plugin 服务启动）、11（Plugin 精度评测）、12（Plugin 性能评测）分别复用 `flagos-service-startup`、`flagos-eval-comprehensive`、`flagos-performance-testing` 的 Skill 逻辑，区别如下：
+
+| 差异项 | 主流程（步骤 3-7） | Plugin 流程（步骤 10-12） |
+|--------|-------------------|--------------------------|
+| 算子集 | 从全量开始，经调优得到最终集合 | 直接使用主流程最终算子集 |
+| Issue 路由 | FlagGems 仓库 | `flagos-ai/vllm-plugin-FL` |
+| 服务崩溃 | 尝试恢复（切 native / 翻倍 TP） | **写 issue + 停止任务** |
+| 不达标处理 | 触发算子调优（步骤 5/7） | 写 issue，继续下一步（不调优） |
+| 启动环境变量 | 按 env_type 决定 | 固定 `USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true` + blacklist |
+| V1 基线 | 当前流程内测得 | 复用步骤 4/6 的 V1 结果 |
+| Trace 文件 | `traces/03-07_*.json` | `traces/10-12_*.json` |
+| 日志命名 | `startup_flagos.log` | `startup_plugin.log` |
+
+**步骤 10 服务崩溃处理**：
+```bash
+# 服务崩溃 → 写 issue + 停止
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \
+    --type plugin-error \
+    --log-path /flagos-workspace/logs/startup_plugin.log \
+    --context-yaml /flagos-workspace/shared/context.yaml \
+    --repo flagos-ai/vllm-plugin-FL \
+    --output-dir /flagos-workspace/results/ \
+    --json"
+# 设置 plugin_workflow.crash_stopped=true → 停止任务
+```
+
+**步骤 11/12 不达标处理**：
+- 精度不达标：写 `logs/issues_accuracy.log`，`plugin_workflow.accuracy_ok=false`，继续步骤 12
+- 性能不达标：写 `logs/issues_performance.log`，`plugin_workflow.performance_ok=false`，继续步骤 13
+- 步骤 13 检查 `plugin_workflow.qualified`，不达标则跳过 plugin 发布
+
+### 步骤 13（Plugin 发布）
+
+触发条件：`plugin_workflow.accuracy_ok=true AND plugin_workflow.performance_ok=true`
+
+```bash
+# 宿主机执行 plugin 发布
+python3 skills/flagos-release/tools/main.py \
+    --from-context /data/flagos-workspace/<model>/config/context_snapshot.yaml \
+    --plugin-mode
+```
+
+`--plugin-mode` 标志使发布脚本：
+- 镜像 tag 追加 `-plugin` 后缀
+- 上传到新仓库 `FlagRelease/{Model}-{vendor}-plugin-FlagOS`
+- 发布完成后更新步骤 8 已发布仓库的 README（追加 plugin 镜像地址段落）

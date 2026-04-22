@@ -418,3 +418,16 @@ ISSUE_EOF"
 3. `performance_compare.py` 对比，ratio ≥ 80%?
    - 达标 → `workflow.performance_ok=true`，进入步骤8
    - 不达标 → 必须按顺序：① 标记 `performance_ok=false` ② issue_reporter.py --type performance-degraded ③ 追加 `logs/issues_performance.log` → 触发步骤7
+
+**服务启动必须内联传递 USE_FLAGGEMS 环境变量**（`/etc/environment` 和 `.bashrc` 持久化对 `docker exec -d bash -c` 无效）：
+```bash
+# V1 (native) — 必须 USE_FLAGGEMS=0
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 vllm serve ... > /flagos-workspace/logs/startup_native.log 2>&1"
+# 或通过 start_service.sh
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode native"
+
+# V2 (flagos) — 必须 USE_FLAGGEMS=1
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1"
+# 或通过 start_service.sh
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos"
+```

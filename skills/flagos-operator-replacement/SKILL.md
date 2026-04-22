@@ -377,11 +377,11 @@ ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py accuracy-groups 
 ```
 1. baseline: 全量启用（V2 配置）→ 已有步骤4的 V2 精度数据
 2. 逐组禁用: 每次禁用一组，其余全开 → 重启服务 → fast_gpqa.py 评测
-3. 禁用某组后精度恢复（偏差 ≤5%）→ 该组有问题，达标即停
+3. 禁用某组后精度恢复（下降 ≤5%）→ 该组有问题，达标即停
 4. 问题组内逐个算子排查（可选，缩小禁用范围）
 ```
 
-**达标即停**：任意一轮禁用后精度偏差 ≤5% 即标记 accuracy_ok=true 并停止排查，不继续测试剩余组。主工作流中上限 3 轮（超限标记不合格进入下一步）
+**达标即停**：任意一轮禁用后精度下降 ≤5% 即标记 accuracy_ok=true 并停止排查，不继续测试剩余组。主工作流中上限 3 轮（超限标记不合格进入下一步）
 
 ## 场景 3：性能不达标 → Profiling 预扫描（缩小搜索范围）
 
@@ -902,7 +902,7 @@ optimization:
 已剔除算子 (共 N 个):
   精度问题:
     1. softmax    — 精度评测报错 (CUDA error)
-    2. layer_norm — 精度偏差 >5% (V1 vs V2 对比)
+    2. layer_norm — 精度下降 >5% (V1 vs V2 对比)
   性能问题:
     3. fused_moe  — 性能拖慢 (禁用后 +15%)
 
@@ -940,6 +940,10 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 - **算子列表 txt 备份**（调优完成、服务重启验证通过后保存）：
   - 精度调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
   - 性能调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
+- **精度调优后精度结果保存**（步骤5达标时必须执行）：
+  - 将达标轮次的 GPQA 评测结果保存为 V3 精度文件：`docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_flagos_optimized.json`
+  - 同时覆盖 V2 精度文件（最终发布版本即调优后版本）：`docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json`
+  - 更新 context.yaml：`eval.v3_score` 设为调优后分数，`eval.accuracy_diff` 更新为调优后偏差
 
 ---
 

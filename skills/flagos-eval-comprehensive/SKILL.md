@@ -91,7 +91,7 @@ eval:
   results: {}
   v1_score: <V1 GPQA Diamond 分数>
   v2_score: <V2 GPQA Diamond 分数>
-  accuracy_diff: <|V2 - V1| 偏差>
+  accuracy_diff: <V1 - V2 精度下降, 正值=V2低于V1>
   accuracy_aligned: <true|false>
   accuracy_threshold: 5.0
   excluded_ops_accuracy: [<因精度问题关闭的算子>]
@@ -109,7 +109,8 @@ eval:
   │   └── gpqa_result.json          ← 评测结果（临时）
   ├── results/
   │   ├── gpqa_native.json          ← V1 精度结果
-  │   ├── gpqa_flagos.json          ← V2 精度结果
+  │   ├── gpqa_flagos.json          ← V2 精度结果（步骤5触发时会被调优后结果覆盖）
+  │   ├── gpqa_flagos_optimized.json ← V3 调优后精度结果（仅步骤5触发时生成）
   │   ├── eval_result.json          ← 远端评测结果
   │   └── ops_list.json             ← 当前算子列表
   ├── logs/
@@ -508,8 +509,8 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 脚本逻辑：
 1. 读取 `results/gpqa_native.json`（V1）和 `results/gpqa_flagos.json`（V2）
 2. 提取 `score` 字段
-3. 计算 `accuracy_diff = |V2_score - V1_score|`
-4. 判定：`accuracy_diff ≤ 5.0%` → 通过（退出码 0）；`> 5.0%` → 不达标（退出码 1）
+3. 计算 `accuracy_diff = V1_score - V2_score`（正值表示V2下降）
+4. 判定：`accuracy_diff ≤ 5.0%` → 通过（退出码 0）；`> 5.0%` → 不达标（退出码 1）。V2高于V1也算达标
 
 | CLI 参数 | 说明 |
 |----------|------|
@@ -535,7 +536,7 @@ V2 (Full FlagGems):  59.09%
 
 ## 精度不达标时的处理
 
-偏差 > 5% 时：
+V2精度下降 > 5% 时：
 
 1. 输出偏差报告 + 当前启用算子列表（从 `flaggems_enable_oplist.txt` 读取）
 2. 触发 `diagnose_ops.py accuracy-groups` 分组定位：
@@ -554,7 +555,7 @@ V2 (Full FlagGems):  59.09%
 ```
 算子状态更新
 ========================================
-本轮关闭: softmax, layer_norm（原因: 精度偏差 >5%）
+本轮关闭: softmax, layer_norm（原因: 精度下降 >5%）
 累计关闭: 3 个 (softmax, layer_norm, rms_norm)
 当前启用: 35 个
 启用列表: [addmm, mm, bmm, ...]
@@ -580,11 +581,11 @@ eval:
 ```
 完成 V1 + V2 评测后:
 
-IF deviation > threshold (5%):
+IF drop > threshold (V1 - V2 > 5%):
     # 1. 写 issue log（强制）
     追加写入 logs/issues_accuracy.log:
-      "[时间] V2 | 精度偏差超阈值"
-      "  详情: V1=XX%, V2=XX%, 偏差=XX% (阈值 5%)"
+      "[时间] V2 | 精度下降超阈值"
+      "  详情: V1=XX%, V2=XX%, 下降=XX% (阈值 5%)"
 
     # 2. 设置状态
     workflow.accuracy_ok = false
@@ -592,13 +593,13 @@ IF deviation > threshold (5%):
     # 3. 触发步骤5精度算子调优（不终止流程）
     #    5完成后再继续到步骤6性能评测
 
-ELSE:
+ELSE:  # V2下降≤5% 或 V2高于V1，均达标
     workflow.accuracy_ok = true
 
 → accuracy_ok=false 时触发步骤5精度算子调优，5完成（或跳过）后继续步骤6性能评测
 ```
 
-**禁止行为**：偏差 > 5% 时终止流程。必须写入 issue log、标记 `accuracy_ok=false`，然后继续后续步骤，最终走到发布（私有发布）。
+**禁止行为**：V2精度下降 > 5% 时终止流程。必须写入 issue log、标记 `accuracy_ok=false`，然后继续后续步骤，最终走到发布（私有发布）。
 
 ---
 
@@ -681,7 +682,7 @@ sleep 5
 
 ### 精度问题日志写入
 
-精度偏差 >5% 或评测过程中服务端报错时，必须追加写入 `logs/issues_accuracy.log`：
+V2精度下降 >5% 或评测过程中服务端报错时，必须追加写入 `logs/issues_accuracy.log`：
 
 ```bash
 docker exec $CONTAINER bash -c "cat >> /flagos-workspace/logs/issues_accuracy.log << 'ISSUE_EOF'
@@ -693,7 +694,7 @@ ISSUE_EOF"
 ```
 
 记录场景：
-- V1 vs V2 精度偏差 >5%（记录双方分数和偏差值）
+- V1 vs V2 精度下降 >5%（记录双方分数和下降值）
 - 评测过程中服务端 CUDA error / OOM / 进程崩溃
 - 算子排查每轮结果（禁用了哪些算子、重测后的偏差）
 
@@ -741,7 +742,7 @@ ISSUE_EOF"
 | model_id 含 `/` 报路径错误 | 模型名是路径格式 | 已内置 sanitize 逻辑，自动取最后一段 |
 | 远端提交失败 `err_code=1` | 参数错误 | 检查 eval_infos 参数格式 |
 | 连接远端平台超时 | 平台不可达 | 降级到模块 A 本地评测 |
-| V1 vs V2 精度偏差 >5% | FlagGems 算子精度问题 | 触发模块 C 精度排查流程 |
+| V1 vs V2 精度下降 >5% | FlagGems 算子精度问题 | 触发模块 C 精度排查流程 |
 
 ---
 
@@ -770,11 +771,24 @@ ISSUE_EOF"
 执行顺序（固定）：
 1. 关闭 flaggems → 启动服务 → GPQA Diamond V1 精度基线 → 停服务
 2. 开启 flaggems → 启动服务 → GPQA Diamond V2 精度
-3. V1 vs V2 精度对比（偏差阈值 5%）
+3. V1 vs V2 精度对比（下降阈值 5%）
 4. 结果判定：
-   - 偏差 ≤5% → `workflow.accuracy_ok=true`，进入步骤6
-   - 偏差 >5% → 必须按顺序：① 标记 `accuracy_ok=false` ② issue_reporter.py --type accuracy-degraded ③ 追加 `logs/issues_accuracy.log` → 触发步骤5
+   - 下降 ≤5%（含V2高于V1）→ `workflow.accuracy_ok=true`，进入步骤6
+   - 下降 >5% → 必须按顺序：① 标记 `accuracy_ok=false` ② issue_reporter.py --type accuracy-degraded ③ 追加 `logs/issues_accuracy.log` → 触发步骤5
    - 服务崩溃 → issue_reporter.py --type operator-crash（同步骤3）
+
+**服务启动必须内联传递 USE_FLAGGEMS 环境变量**（`/etc/environment` 和 `.bashrc` 持久化对 `docker exec -d bash -c` 无效）：
+```bash
+# V1 (native) — 必须 USE_FLAGGEMS=0
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 vllm serve ... > /flagos-workspace/logs/startup_native.log 2>&1"
+# 或通过 start_service.sh
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode native"
+
+# V2 (flagos) — 必须 USE_FLAGGEMS=1
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1"
+# 或通过 start_service.sh
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos"
+```
 
 精度评测+精度调优全部完成后才进入性能测试。
 
@@ -788,7 +802,7 @@ ISSUE_EOF"
 固化选择：
 - 使用 `diagnose_ops.py accuracy-groups` 分组排查（不使用逐个排查）
 - **最多 3 轮**（3 组），达标即停
-- 达标标准：禁用某组后偏差 ≤5%
+- 达标标准：禁用某组后精度下降 ≤5%
 
 执行后必须完成：
 - 写入 `context.yaml` 的 `eval.excluded_ops_accuracy` 和 `optimization` 字段

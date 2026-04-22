@@ -113,7 +113,7 @@ issues:
 | 触发条件 | issue type | 时机 |
 |---------|-----------|------|
 | 评测中服务崩溃 | `operator-crash` | 即时提交 |
-| V1/V2 精度偏差 >5% | `accuracy-degraded` | 发现即提交，然后开始算子优化 |
+| V2精度下降 >5% | `accuracy-degraded` | 发现即提交，然后开始算子优化 |
 | 3 轮优化后仍不达标 | `accuracy-degraded` | 最终汇总提交（含所有禁用算子及原因） |
 
 ## 步骤6 性能评测

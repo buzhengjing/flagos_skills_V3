@@ -80,17 +80,19 @@ def compare(v1_path: str, v2_path: str, threshold: float) -> Dict[str, Any]:
             result["message"] = f"V2 分数缺失 ({v2_path})"
         return result
 
-    # 计算偏差（绝对值）
-    diff = abs(v2_score - v1_score)
-    aligned = diff <= threshold
+    # 计算精度下降（正值=V2低于V1，仅下降超阈值时不达标）
+    drop = v1_score - v2_score
+    diff = round(abs(v2_score - v1_score), 2)
+    aligned = drop <= threshold
 
-    result["diff"] = round(diff, 2)
+    result["diff"] = diff
+    result["drop"] = round(drop, 2)
     result["aligned"] = aligned
     result["v2_vs_v1"] = round(v2_score - v1_score, 2)
     result["message"] = (
-        f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 偏差={diff:.2f}% (阈值 {threshold}%)"
+        f"精度达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 下降={drop:.2f}% (阈值 {threshold}%)"
         if aligned else
-        f"精度不达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 偏差={diff:.2f}% > 阈值 {threshold}%"
+        f"精度不达标: V1={v1_score:.2f}%, V2={v2_score:.2f}%, 下降={drop:.2f}% > 阈值 {threshold}%"
     )
 
     return result
@@ -128,7 +130,9 @@ def main():
         print(f"  V2 (FlagOS):  {v2['score']:.2f}%" if v2["score"] is not None else "  V2 (FlagOS):  N/A")
         if result["diff"] is not None:
             print(f"  偏差:         {result['diff']:.2f}%")
-            print(f"  阈值:         {args.threshold}%")
+            if result.get("drop") is not None and result["drop"] < 0:
+                print(f"  方向:         V2 高于 V1（不触发调优）")
+            print(f"  阈值:         {args.threshold}%（仅下降超阈值时不达标）")
             status = "✓ 达标" if result["aligned"] else "✗ 不达标"
             print(f"  结论:         {status}")
         else:

@@ -25,11 +25,11 @@ from datetime import datetime
 # pipeline.log 匹配规则（不受 --verbose 影响，始终按规则写入）
 # ============================================================================
 
-# 步骤标记: [步骤1] ~ [步骤8]（5/7为条件触发的算子调优步骤，不触发时显示已完成）
-RE_STEP = re.compile(r'\[步骤[1-8]\]')
+# 步骤标记: [步骤1] ~ [步骤13]（5/7为条件触发的算子调优步骤，9-13为条件触发的 plugin 流程）
+RE_STEP = re.compile(r'\[步骤\d{1,2}\]')
 
-# 段完成标记: [段1] ... / [段2] ... / [段3] ...
-RE_SEG_DONE = re.compile(r'\[段[123]\].*(?:完成|结束|已同步)')
+# 段完成标记: [段1] ... / [段2] ... / [段3] ... / [段4] ...
+RE_SEG_DONE = re.compile(r'\[段[1234]\].*(?:完成|结束|已同步)')
 
 # 段边框标记: ╔ ╚ ║ ┌ └ │ 开头的行（段分隔框）
 RE_SEG_BORDER = re.compile(r'^\s*[╔╚║┌└│]')
@@ -172,17 +172,22 @@ PIPELINE_STEPS = [
     ('6', '性能评测',   '[6]'),
     ('7', '性能调优',   '[7]'),
     ('8', '打包发布',   '[8]'),
+    ('9', 'Plugin安装', '[9]'),
+    ('10', 'Plugin服务', '[10]'),
+    ('11', 'Plugin精度', '[11]'),
+    ('12', 'Plugin性能', '[12]'),
+    ('13', 'Plugin发布', '[13]'),
 ]
 
-# 匹配 [步骤1] 开始 / 完成 / 失败 / 跳过
-RE_STEP_START = re.compile(r'\[步骤([1-8])\].*(?:开始|启动)')
-RE_STEP_DONE = re.compile(r'\[步骤([1-8])\].*(?:完成|结束)')
-RE_STEP_FAIL = re.compile(r'\[步骤([1-8])\].*失败')
-RE_STEP_SKIP = re.compile(r'\[步骤([1-8])\].*跳过')
+# 匹配 [步骤X] 开始 / 完成 / 失败 / 跳过（支持两位数步骤号）
+RE_STEP_START = re.compile(r'\[步骤(\d{1,2})\].*(?:开始|启动)')
+RE_STEP_DONE = re.compile(r'\[步骤(\d{1,2})\].*(?:完成|结束)')
+RE_STEP_FAIL = re.compile(r'\[步骤(\d{1,2})\].*失败')
+RE_STEP_SKIP = re.compile(r'\[步骤(\d{1,2})\].*跳过')
 
 
 class ProgressBar:
-    """8 步进度条，实时刷新在终端（5/7为条件触发的算子调优步骤，不触发时显示已完成）"""
+    """13 步进度条，实时刷新在终端（5/7为条件触发的算子调优步骤，9-13为条件触发的 plugin 流程）"""
 
     # 状态符号
     SYM_PENDING = '○'
@@ -252,21 +257,23 @@ class ProgressBar:
     def process_text(self, text: str):
         """从 assistant 文本中检测步骤状态变化"""
         for line in text.split('\n'):
-            m = RE_STEP_START.search(line)
-            if m:
-                self.on_step_start(m.group(1))
-                continue
+            # 终态优先：完成/失败/跳过 优先于 开始
+            # 避免步骤名含"启动"时误匹配 START（如 "[步骤10] Plugin 服务启动 — 完成"）
             m = RE_STEP_DONE.search(line)
             if m:
                 self.on_step_done(m.group(1))
+                continue
+            m = RE_STEP_FAIL.search(line)
+            if m:
+                self.on_step_fail(m.group(1))
                 continue
             m = RE_STEP_SKIP.search(line)
             if m:
                 self.on_step_skip(m.group(1))
                 continue
-            m = RE_STEP_FAIL.search(line)
+            m = RE_STEP_START.search(line)
             if m:
-                self.on_step_fail(m.group(1))
+                self.on_step_start(m.group(1))
 
     def _format_duration(self, seconds: float) -> str:
         if seconds is None:
@@ -695,7 +702,7 @@ def main():
     parser.add_argument('--verbose', action='store_true', help='详细模式：显示全量输出（同旧版行为）')
     parser.add_argument('--no-color', action='store_true', help='关闭 ANSI 颜色')
     parser.add_argument('--start-step', type=int, default=1,
-                        help='分段执行时的起始步骤编号（1-8），之前的步骤标记为已完成')
+                        help='分段执行时的起始步骤编号（1-13），之前的步骤标记为已完成')
     parser.add_argument('--cost-file', help='写入本段费用和耗时的文件路径（供 run_pipeline.sh 汇总）')
     parser.add_argument('--terminal-log', help='记录处理后的终端输出到文件（去除 ANSI 颜色码）')
     args = parser.parse_args()

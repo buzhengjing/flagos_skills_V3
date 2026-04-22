@@ -74,6 +74,13 @@ if [ -n "$CUDA_VISIBLE" ]; then
     export CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE"
 fi
 
+# FlagGems 开关：native 模式关闭，flagos 模式开启
+if [ "$MODE" = "native" ]; then
+    export USE_FLAGGEMS=0
+else
+    export USE_FLAGGEMS=1
+fi
+
 # 确保 conda 环境在 PATH 中
 export PATH=/opt/conda/bin:$PATH
 
@@ -109,9 +116,9 @@ else
         --trust-remote-code"
 fi
 
-echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}"
+echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}, USE_FLAGGEMS=${USE_FLAGGEMS}"
 echo "[start_service.sh] CMD: ${CMD}"
 
-# 后台启动，日志写入文件
-nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
+# 后台启动，日志写入文件（USE_FLAGGEMS 通过 export 传递给子进程）
+nohup bash -c "cd /flagos-workspace && USE_FLAGGEMS=${USE_FLAGGEMS} ${CMD}" > "${LOG_FILE}" 2>&1 &
 echo "[start_service.sh] PID=$!, log=${LOG_FILE}"

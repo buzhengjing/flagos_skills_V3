@@ -144,7 +144,7 @@ else:
 
 **判定细节**：
 - `service_ok = true`：V1 和 V2 都能正常启动
-- `accuracy_ok = true`：V1/V2 精度偏差 ≤5%，或经 ≤3 轮优化后达标
+- `accuracy_ok = true`：V2精度下降 ≤5%，或经 ≤3 轮优化后达标
 - `performance_ok = true`：V2/V1 每个并发级别 ≥80%，或经 elimination 逐删优化后达标
 - 提交了 issue 但优化成功 → 仍算合格（qualified=true）
 - `skip_reason` 非空时（如 `"service_startup_failed"`）→ 跳过了3/4，直接私有发布
@@ -323,3 +323,69 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 - `traces/` — 全流程执行留痕
 - `logs/` — 运行日志（含 `pipeline.log`）
 - `config/context_snapshot.yaml` — 流程结束时的完整 context 快照
+
+---
+
+## 编排层指令（步骤13 Plugin 发布 — 固化决策）
+
+### 触发条件
+
+步骤 12（Plugin 性能评测）完成后，检查 `plugin_workflow`：
+- `plugin_workflow.accuracy_ok=true AND plugin_workflow.performance_ok=true` → 执行 plugin 发布
+- 否则 → 跳过 plugin 发布，设置 `plugin_workflow.qualified=false`
+
+### 调用方式
+
+```bash
+# 宿主机执行（同步 context 后调用）
+MOUNT_MODE=$(docker exec <container> cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+    cp /data/flagos-workspace/<model>/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+else
+    docker cp <container>:/flagos-workspace/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+fi
+python3 skills/flagos-release/tools/main.py \
+    --from-context /data/flagos-workspace/<model>/config/context_snapshot.yaml \
+    --plugin-mode
+```
+
+### Plugin 模式行为
+
+`--plugin-mode` 标志使发布脚本执行以下差异化逻辑：
+
+| 步骤 | 主流程（步骤8） | Plugin 模式（步骤13） |
+|------|---------------|---------------------|
+| 镜像 tag | `{date_tag}` | `{date_tag}-plugin` |
+| 仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | `FlagRelease/{Model}-{vendor}-plugin-FlagOS` |
+| commit/tag/push | 从 existing_harbor_image 判断是否跳过 | 始终执行（plugin 版本是新镜像） |
+| README | 生成标准 README | 生成 plugin 版本 README |
+| 已发布仓库更新 | 不更新 | 在步骤8仓库的 README 中追加 plugin 镜像地址 |
+
+### README 更新已发布仓库
+
+Plugin 发布成功后，需更新步骤 8 已发布仓库的 README，追加 plugin 镜像段落：
+
+```markdown
+## Plugin-Enabled Version (vllm-plugin-FL)
+
+Plugin 版本镜像包含 vllm-plugin-FL 组件，提供更优的多芯片推理支持。
+
+### 下载 Plugin 版本镜像
+```bash
+docker pull {plugin_image_harbor_path}
+```
+```
+
+更新方式：
+1. 从本地 output 目录读取步骤8生成的 README
+2. 追加 plugin 镜像段落
+3. 重新上传到步骤8的 ModelScope/HuggingFace 仓库
+
+### 编排层后续操作
+
+Plugin 发布完成后：
+- 更新 `context.yaml` 的 `plugin_workflow` 字段（qualified、plugin_image_url、plugin_modelscope_url、plugin_huggingface_url）
+- 写入 `traces/13_plugin_release.json`
+- 更新 `workflow_ledger` 步骤 13 状态
+- 更新 `timing.steps.plugin_release`
+- 同步容器产出到宿主机（同步骤8的同步逻辑）

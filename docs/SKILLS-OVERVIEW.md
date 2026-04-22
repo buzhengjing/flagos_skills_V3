@@ -154,7 +154,7 @@
 | **依赖** | 步骤2 |
 | **触发词** | `精度评测`, `GPQA`, `fast gpqa`, `comprehensive eval`, `远端评测`, `FlagRelease`, `flageval` |
 
-**异常处理**：精度偏差 >5% → 提交 `accuracy-degraded` issue → 算子优化（≤3 轮）→ 超限标记 `workflow.accuracy_ok: false`
+**异常处理**：V2精度下降 >5% → 提交 `accuracy-degraded` issue → 算子优化（≤3 轮）→ 超限标记 `workflow.accuracy_ok: false`
 
 ---
 

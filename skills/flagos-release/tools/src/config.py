@@ -57,6 +57,9 @@ class PublishConfig:
     private: bool = True
     # 已有的 Harbor 镜像地址（跳过 commit/tag/push）
     existing_harbor_image: str = ""
+    # 步骤8 已发布的仓库 ID（plugin 模式下用于更新 README）
+    base_modelscope_model_id: str = ""
+    base_huggingface_repo_id: str = ""
     # 内部使用
     image_source: str = ""
     image_target_tag: str = ""
@@ -94,6 +97,7 @@ class PipelineConfig:
     container_name: str = ""
     host_workspace_base: str = ""  # /data/flagos-workspace/<model>，由 context.yaml workspace.host_path 填充
     config_persisted: bool = False
+    plugin_image_mode: bool = False  # plugin 模式：镜像 tag 追加 -plugin，仓库名追加 -plugin
 
     # 各阶段配置
     chip: ChipConfig = field(default_factory=ChipConfig)
@@ -225,6 +229,23 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # 宿主机工作目录（数据回传目标，应为 /data/flagos-workspace/<model> 格式）
     config.host_workspace_base = workspace.get('host_path') or ''
 
+    # plugin 模式下读取 plugin_workflow 字段
+    plugin_wf = ctx.get('plugin_workflow', {})
+    if plugin_wf.get('triggered'):
+        # plugin 模式下读取步骤8已发布的仓库信息，用于 README 更新
+        release_section = ctx.get('release', {})
+        ms_url = str(release_section.get('modelscope_url', ''))
+        hf_url = str(release_section.get('huggingface_url', ''))
+        if ms_url:
+            # 从 URL 提取 model_id：https://modelscope.cn/models/FlagRelease/xxx → FlagRelease/xxx
+            parts = ms_url.rstrip('/').split('/models/')
+            if len(parts) == 2:
+                config.publish.base_modelscope_model_id = parts[1]
+        if hf_url:
+            parts = hf_url.rstrip('/').split('huggingface.co/')
+            if len(parts) == 2:
+                config.publish.base_huggingface_repo_id = parts[1]
+
     return config
 
 
@@ -334,7 +355,8 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
             config.model_info.output_name = f"{model_name}-{vendor_name}"
 
     if not config.model_info.flagrelease_name and config.model_info.output_name:
-        config.model_info.flagrelease_name = f"{config.model_info.output_name}-FlagOS"
+        suffix = "-plugin-FlagOS" if config.plugin_image_mode else "-FlagOS"
+        config.model_info.flagrelease_name = f"{config.model_info.output_name}{suffix}"
 
     if not config.model_info.flagrelease_name_pre and model_name:
         match = re.match(r'^([A-Za-z]+\d*)', model_name)
@@ -345,7 +367,8 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
 
     # ==================== 镜像 tag ====================
     if not config.chip.date_tag:
-        config.chip.date_tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        tag = datetime.datetime.now().strftime("%Y%m%d%H%M")
+        config.chip.date_tag = f"{tag}-plugin" if config.plugin_image_mode else tag
 
     if not config.publish.image_target_tag and config.chip.auto_generate_tag:
         from .chip_detector import ChipVersionInfo, generate_image_tag as _generate_tag

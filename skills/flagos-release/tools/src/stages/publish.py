@@ -128,6 +128,16 @@ class PublishStage(BaseStage):
         else:
             self.skip_step("发布到 HuggingFace", "配置跳过")
 
+        # 6. Plugin 模式：更新步骤8已发布仓库的 README
+        if self.config.plugin_image_mode:
+            plugin_image_url = self.config.publish.harbor_path or ""
+            if publish_config.base_modelscope_model_id:
+                self._update_existing_readme(
+                    publish_config.base_modelscope_model_id, "modelscope", plugin_image_url)
+            if publish_config.base_huggingface_repo_id:
+                self._update_existing_readme(
+                    publish_config.base_huggingface_repo_id, "huggingface", plugin_image_url)
+
         # 6. 数据回传到宿主机
         self._sync_to_host()
 
@@ -793,16 +803,19 @@ class PublishStage(BaseStage):
 
         results = []
 
-        # 读取 GPQA 精度结果
+        # 读取 GPQA 精度结果（优先使用调优后 V3 分数）
         gpqa_native_path = os.path.join(results_dir, "gpqa_native.json")
         gpqa_flagos_path = os.path.join(results_dir, "gpqa_flagos.json")
+        gpqa_optimized_path = os.path.join(results_dir, "gpqa_flagos_optimized.json")
 
         native_score = self._read_json_field(gpqa_native_path, "score")
-        flagos_score = self._read_json_field(gpqa_flagos_path, "score")
+        optimized_score = self._read_json_field(gpqa_optimized_path, "score")
+        flagos_score = optimized_score if optimized_score is not None else self._read_json_field(gpqa_flagos_path, "score")
 
         if native_score is not None or flagos_score is not None:
+            metric_label = "GPQA (tuned)" if optimized_score is not None else "GPQA"
             results.append({
-                "metric": "GPQA",
+                "metric": metric_label,
                 "origin": native_score if native_score is not None else "N/A",
                 "flagos": flagos_score if flagos_score is not None else "N/A",
             })
@@ -1209,3 +1222,84 @@ class PublishStage(BaseStage):
                     print(f"  x 上传失败，已达最大重试次数")
 
         return success
+
+    def _update_existing_readme(self, repo_id: str, platform: str, plugin_image_url: str) -> bool:
+        """更新已发布仓库的 README，追加 plugin 镜像地址段落"""
+        import tempfile
+        step_name = f"更新 {platform} 已发布 README"
+        print(f"\n--- {step_name} ---")
+        print(f"  目标仓库: {repo_id}")
+
+        plugin_section = f"""
+
+## Plugin-Enabled Version (vllm-plugin-FL)
+
+Plugin 版本镜像包含 vllm-plugin-FL 组件，提供更优的多芯片推理支持。
+
+### 下载 Plugin 版本镜像
+```bash
+docker pull {plugin_image_url}
+```
+"""
+        output_dir = self._get_upload_directory(self.config.publish.readme_output_path)
+        base_readme_path = os.path.join(output_dir, "README.md") if output_dir else None
+
+        if not base_readme_path or not os.path.exists(base_readme_path):
+            print(f"  x 未找到已发布的 README: {base_readme_path}")
+            return False
+
+        try:
+            with open(base_readme_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            print(f"  x 读取 README 失败: {e}")
+            return False
+
+        if "Plugin-Enabled Version" in content:
+            print(f"  - README 已包含 Plugin 段落，跳过")
+            return True
+
+        updated_content = content + plugin_section
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_readme = os.path.join(tmpdir, "README.md")
+            with open(tmp_readme, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
+
+            if platform == "modelscope":
+                token = self.config.publish.modelscope_token
+                if not token:
+                    print(f"  x 无 ModelScope token，跳过")
+                    return False
+                cmd = f"modelscope upload --model {repo_id} {tmpdir} --include README.md"
+                env_extra = {"MODELSCOPE_API_TOKEN": token}
+            elif platform == "huggingface":
+                token = self.config.publish.huggingface_token
+                if not token:
+                    print(f"  x 无 HuggingFace token，跳过")
+                    return False
+                cmd = f"huggingface-cli upload {repo_id} {tmp_readme} README.md"
+                env_extra = {"HF_TOKEN": token}
+            else:
+                print(f"  x 未知平台: {platform}")
+                return False
+
+            env = os.environ.copy()
+            env.update(env_extra)
+            result, stdout, stderr = self.run_command(
+                cmd=cmd,
+                step_name=step_name,
+                timeout=120,
+                env=env
+            )
+
+            if result:
+                print(f"  + 已更新 {platform} 仓库 README: {repo_id}")
+                with open(base_readme_path, 'w', encoding='utf-8') as f:
+                    f.write(updated_content)
+                return True
+            else:
+                print(f"  x 更新 {platform} README 失败")
+                if stderr:
+                    print(f"    错误: {stderr[:200]}")
+                return False

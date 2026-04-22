@@ -140,6 +140,11 @@ def main():
         help="干运行模式，只打印配置不实际执行"
     )
     parser.add_argument(
+        "--plugin-mode",
+        action="store_true",
+        help="Plugin 发布模式：镜像 tag 追加 -plugin，仓库名追加 -plugin，发布后更新已发布仓库 README"
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="详细输出模式"
@@ -170,6 +175,10 @@ def main():
         config.publish.push_harbor = False
         config.publish.publish_modelscope = False
         config.publish.publish_huggingface = False
+
+    if args.plugin_mode:
+        config.plugin_image_mode = True
+        config.publish.existing_harbor_image = ""
 
     # 自动填充配置
     print("正在检测环境信息...")

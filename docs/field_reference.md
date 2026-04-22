@@ -23,9 +23,9 @@ Skill 间共享状态，每步读写各自负责的字段。YAML 文件内已有
 | | `has_plugin` | 是否存在 vllm plugin |
 | `eval` | `v1_score` | V1 (native) GPQA Diamond 正确率 (%) |
 | | `v2_score` | V2 (flaggems) GPQA Diamond 正确率 (%) |
-| | `deviation` | V1 vs V2 精度偏差百分点 |
-| | `threshold` | 精度偏差阈值（百分点，默认 5.0） |
-| | `accuracy_aligned` | 精度是否达标（deviation <= threshold） |
+| | `deviation` | V1 vs V2 精度下降百分点（正值=V2低于V1） |
+| | `threshold` | 精度下降阈值（百分点，默认 5.0） |
+| | `accuracy_aligned` | 精度是否达标（下降 <= threshold，V2高于V1也算达标） |
 | `gpu` | `count` | GPU 数量 |
 | | `type` | GPU 型号 |
 | | `vendor` | GPU 厂商: nvidia / ascend |
@@ -223,7 +223,7 @@ Skill 间共享状态，每步读写各自负责的字段。YAML 文件内已有
 | 文件 | 记录内容 |
 |------|---------|
 | `issues_startup.log` | 服务启动失败、崩溃、超时 |
-| `issues_accuracy.log` | 精度偏差 >5%、评测报错 |
+| `issues_accuracy.log` | V2精度下降 >5%、评测报错 |
 | `issues_performance.log` | 任一并发级别 V2/V1 < 80% |
 
 每条记录格式：
