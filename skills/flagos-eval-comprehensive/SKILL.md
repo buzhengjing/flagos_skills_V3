@@ -766,3 +766,39 @@ ISSUE_EOF"
   - V1 评测 → 记录在 `traces/04_quick_accuracy.json` 中
   - V2 评测 → 记录在 `traces/04_quick_accuracy.json` 中
 - [ ] `timing.steps.quick_accuracy` 已更新为本步骤的 `duration_seconds`
+
+---
+
+## 编排层指令（步骤4 精度评测 — 固化决策）
+
+主流程步骤4使用**模块 A（本地 GPQA Diamond）+ 模块 C（精度对比）+ 模块 D（错误处理）**，不使用模块 B（远端 flageval）。
+
+执行顺序（固定）：
+1. 关闭 flaggems → 启动服务 → GPQA Diamond V1 精度基线 → 停服务
+2. 开启 flaggems → 启动服务 → GPQA Diamond V2 精度
+3. V1 vs V2 精度对比（偏差阈值 5%）
+4. 结果判定：
+   - 偏差 ≤5% → `workflow.accuracy_ok=true`，进入步骤6
+   - 偏差 >5% → 必须按顺序：① 标记 `accuracy_ok=false` ② issue_reporter.py --type accuracy-degraded ③ 追加 `logs/issues_accuracy.log` → 触发步骤5
+   - 服务崩溃 → issue_reporter.py --type operator-crash（同步骤3）
+
+精度评测+精度调优全部完成后才进入性能测试。
+
+---
+
+## 编排层指令（步骤5 精度算子调优 — 固化决策）
+
+**触发条件**：`workflow.accuracy_ok = false` 且 `env_type ≠ native`
+**跳过条件**：`accuracy_ok = true`（不触发时显示已完成）
+
+固化选择：
+- 使用 `diagnose_ops.py accuracy-groups` 分组排查（不使用逐个排查）
+- **最多 3 轮**（3 组），达标即停
+- 达标标准：禁用某组后偏差 ≤5%
+
+执行后必须完成：
+- 写入 `context.yaml` 的 `eval.excluded_ops_accuracy` 和 `optimization` 字段
+- 写入 `traces/05_accuracy_tuning.json`
+- 保存算子列表：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
+
+**注意**：精度调优禁用的算子会传递给后续步骤6，6在此算子集上采集性能基线。

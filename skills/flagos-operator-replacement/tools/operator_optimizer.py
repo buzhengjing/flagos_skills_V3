@@ -622,7 +622,7 @@ def get_next_action_group(state: Dict[str, Any], state_path: Optional[str] = Non
     elif gs["phase"] == "binary_search":
         # 阶段 2：组内二分定位
         bs = gs["binary_state"]
-        if not bs or bs["low"] >= bs["high"]:
+        if not bs or bs["low"] > bs["high"]:
             # 二分搜索完成，进入下一组
             gs["group_results"][current_group] = "binary_searched"
             gs["current_group_idx"] += 1
@@ -706,7 +706,7 @@ def get_next_action_group_reverse(state: Dict[str, Any],
     elif gs["phase"] == "binary_search":
         # 反向阶段 2：组内二分，逐步启用子集定位问题算子
         bs = gs["binary_state"]
-        if not bs or bs["low"] >= bs["high"]:
+        if not bs or bs["low"] > bs["high"]:
             gs["group_results"][current_group] = "binary_searched"
             gs["current_group_idx"] += 1
             gs["phase"] = "group_test"
@@ -994,8 +994,18 @@ def get_next_action(state_path: Optional[str] = None) -> Dict[str, Any]:
 def _compute_full_blacklist(state: Dict[str, Any], search_disabled: List[str]) -> List[str]:
     """计算完整 flagos 黑名单 = 搜索排除 + 注册表中不在 search_ops 的算子"""
     registered_ops = set(state.get("registered_ops", state.get("all_ops", [])))
+    if not registered_ops:
+        try:
+            import flag_gems
+            if hasattr(flag_gems, "all_registered_ops"):
+                registered_ops = set(flag_gems.all_registered_ops())
+            elif hasattr(flag_gems, "all_ops"):
+                registered_ops = set(flag_gems.all_ops())
+            if registered_ops:
+                print(f"  WARNING: registered_ops 为空，已从 flag_gems 自动收集 {len(registered_ops)} 个算子")
+        except Exception:
+            print("  WARNING: registered_ops 为空且无法自动收集，黑名单可能不完整")
     search_ops = set(state.get("search_ops", state.get("all_ops", [])))
-    # 注册表中有但不在搜索范围的算子 = 必须显式禁用
     unsearched = registered_ops - search_ops
     return sorted(set(search_disabled) | unsearched)
 

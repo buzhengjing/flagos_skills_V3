@@ -144,21 +144,31 @@ docker exec $CONTAINER bash -c "pkill -f 'vllm\|sglang\|flagscale' 2>/dev/null; 
 
 ---
 
-### env_type = vllm_flaggems（通过代码控制 FlagGems 开关）
+### env_type = vllm_flaggems（通过环境变量驱动 FlagGems 开关）
 
-通过注释/取消注释 `import flag_gems` 相关代码行来控制 FlagGems 是否加载。
+环境检测阶段（步骤2）已自动完成一次性代码注入，将原始 `flag_gems.enable()` 替换为环境变量驱动逻辑。后续所有 FlagGems 开关和算子控制通过环境变量 + 配置文件实现，不再修改源码。
+
+**控制机制**：
+- `USE_FLAGGEMS`：控制 FlagGems 开关（`1`=开启，`0`=关闭）
+- `FLAGGEMS_CONTROL_MODE`：控制算子分支模式（`only_enable`=白名单，`unused`=黑名单）
+- `/root/flaggems_ops_control.json`：算子控制配置文件
 
 **Native 模式**（关闭 FlagGems）：
 ```bash
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable --json"
 ```
-注释掉 `import flag_gems` / `flag_gems.enable()` 等代码行，服务启动时 FlagGems 不加载。
+输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=0`），在启动命令中使用 `env_inline` 作为内联前缀。
 
 **FlagOS 模式**（启用 FlagGems）：
 ```bash
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --json"
 ```
-取消注释 `import flag_gems` / `flag_gems.enable()` 等代码行，服务启动时 FlagGems 自动生效。
+输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=1`），同时写入控制文件 `/root/flaggems_ops_control.json`（默认全量开启）。
+
+**服务启动命令**（使用内联环境变量前缀）：
+```bash
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 <startup_command> > /flagos-workspace/logs/startup_flagos.log 2>&1"
+```
 
 **算子列表获取**（启动后）：
 - 读取 `environment.flaggems_txt_path`（由 pre-service-inspection 步骤 2.6 写入）
@@ -167,6 +177,8 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
   docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action find-gems-txt --json"
   ```
   从输出的 `recommended` 字段获取路径，回写 `context.yaml` 的 `environment.flaggems_txt_path`
+
+**未注入兜底**：如果环境检测阶段注入失败（源码格式异常），toggle_flaggems.py 自动降级为原有的注释/取消注释方式。
 
 ---
 
@@ -617,3 +629,14 @@ ISSUE_EOF"
 | 日志活跃但长时间未就绪 | CUDA graph 编译或 Triton 内核编译耗时长 | 正常现象，动态模式会自动延长等待 |
 | Thinking model 评测分数异常低 | max_model_len 过小，推理链被截断 | 重启服务，加大 `--max-model-len` 至 32768+ |
 | OOM: max_model_len 过大 | KV cache 显存预分配超限 | 降低 max-model-len（thinking model 最低 16384） |
+
+---
+
+## 编排层指令（步骤3 — 固化决策）
+
+**FlagGems 模式启动失败处理**（不含超时，超时属于正常等待）：
+- 调用 `issue_reporter.py full --type operator-crash`（参数见上方"失败恢复"章节）
+- 排除操作失误：native 模式也失败 → 环境问题，需人工介入
+- 确认是 FlagGems 问题 → `workflow.service_ok = false` → 跳过4/6 → 直接到8发布（私有）
+
+**算子列表持久化**：flagos 模式首次启动成功后，执行上方"算子列表检查"章节中的 `initial_oplist.txt` 保存（L506）。

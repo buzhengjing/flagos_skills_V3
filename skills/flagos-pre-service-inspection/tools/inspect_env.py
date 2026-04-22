@@ -386,16 +386,19 @@ def extract_flaggems_code_details(integration):
     """从代码扫描结果中提取 flag_gems.enable() 调用详情（仅 vllm_flaggems 场景）
 
     解析 code_locations 中的 flag_gems.enable(...) 调用，提取：
-    - 代码文件路径
-    - enable() 完整调用
+    - 所有包含 enable()/only_enable() 的文件路径列表
+    - 每个文件的 enable() 完整调用
     - txt 文件路径参数（如 unused="/root/gems.txt"）
 
     Returns:
-        dict: {code_path, enable_call, txt_path, auto_detect}
+        dict: {
+            code_paths: [{"file": str, "enable_call": str, "priority": int}],
+            txt_path: str,
+            auto_detect: bool
+        }
     """
     result = {
-        "code_path": "",
-        "enable_call": "",
+        "code_paths": [],
         "txt_path": "",
         "auto_detect": False,
     }
@@ -405,7 +408,7 @@ def extract_flaggems_code_details(integration):
         result["auto_detect"] = True
         return result
 
-    # 从 code_locations 中找 flag_gems.enable 调用
+    # 从 code_locations 中找 flag_gems.enable/only_enable 调用
     enable_locs = []
     import_locs = []
     for loc in code_locs:
@@ -415,7 +418,7 @@ def extract_flaggems_code_details(integration):
         filepath, lineno, content = match.groups()
         content_stripped = content.strip()
 
-        if "flag_gems.enable" in content_stripped and "import" not in content_stripped:
+        if ("flag_gems.enable" in content_stripped or "flag_gems.only_enable" in content_stripped) and "import" not in content_stripped:
             enable_locs.append({
                 "file": filepath,
                 "line": int(lineno),
@@ -428,48 +431,78 @@ def extract_flaggems_code_details(integration):
                 "content": content_stripped,
             })
 
-    # 记录 import 所在文件
-    if import_locs:
-        result["code_path"] = import_locs[0]["file"]
-    elif enable_locs:
-        result["code_path"] = enable_locs[0]["file"]
-
     if not enable_locs:
         result["auto_detect"] = True
         return result
 
-    # 取第一个 enable 调用
-    enable_loc = enable_locs[0]
-    result["enable_call"] = enable_loc["content"]
-    if not result["code_path"]:
-        result["code_path"] = enable_loc["file"]
+    # 按文件分组 enable 调用
+    files_with_enable = {}
+    for loc in enable_locs:
+        filepath = loc["file"]
+        if filepath not in files_with_enable:
+            files_with_enable[filepath] = []
+        files_with_enable[filepath].append(loc)
 
-    # 尝试从 enable() 调用中提取 txt 路径
-    # 支持多种写法:
-    #   flag_gems.enable(unused="/root/gems.txt")
-    #   flag_gems.enable("/root/gems.txt")
-    #   flag_gems.enable(unused='/root/gems.txt')
-    #   flag_gems.enable(record_log="/tmp/gems.txt")
-    call_content = enable_loc["content"]
+    # 为每个文件确定优先级和提取调用详情
+    for filepath, locs in files_with_enable.items():
+        # 优先级判断：包含 .enable( 且不在条件块内的文件优先级最高
+        priority = 0
+        enable_call = locs[0]["content"]
 
-    # 如果单行解析不够，尝试读取文件获取完整调用
-    try:
-        with open(enable_loc["file"], "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        # 从 enable 行开始，拼接到闭合括号
-        start_idx = enable_loc["line"] - 1
-        call_text = ""
-        paren_depth = 0
-        for i in range(start_idx, min(start_idx + 10, len(lines))):
-            call_text += lines[i]
-            paren_depth += lines[i].count("(") - lines[i].count(")")
-            if paren_depth <= 0 and "(" in call_text:
-                break
-        if call_text.strip():
-            call_content = call_text.strip()
-            result["enable_call"] = call_content
-    except Exception:
-        pass
+        # 读取文件检查是否在条件块内
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+
+            # 检查第一个 enable 调用的上下文
+            loc = locs[0]
+            start_idx = max(0, loc["line"] - 10)
+            context_lines = lines[start_idx:loc["line"]]
+
+            # 如果前面有 if/try 等条件语句，降低优先级
+            has_condition = any(
+                re.match(r'^\s*(if|try|with|for|while)\s+', line)
+                for line in context_lines
+            )
+
+            # 提取完整的 enable 调用（可能跨多行）
+            call_start = loc["line"] - 1
+            call_text = ""
+            paren_depth = 0
+            for i in range(call_start, min(call_start + 10, len(lines))):
+                call_text += lines[i]
+                paren_depth += lines[i].count("(") - lines[i].count(")")
+                if paren_depth <= 0 and "(" in call_text:
+                    break
+            if call_text.strip():
+                enable_call = call_text.strip()
+
+            # 优先级：无条件 enable() > 条件 enable() > only_enable()
+            if not has_condition and ".enable(" in enable_call:
+                priority = 3
+            elif ".enable(" in enable_call:
+                priority = 2
+            else:
+                priority = 1
+
+        except Exception:
+            priority = 1
+
+        result["code_paths"].append({
+            "file": filepath,
+            "enable_call": enable_call,
+            "priority": priority
+        })
+
+    # 按优先级排序（高优先级在前）
+    result["code_paths"].sort(key=lambda x: x["priority"], reverse=True)
+
+    # 从第一个（最高优先级）调用中提取 txt 路径
+    if result["code_paths"]:
+        enable_call = result["code_paths"][0]["enable_call"]
+
+    # 从所有 enable 调用中提取 txt 路径
+    call_content = enable_call if result["code_paths"] else ""
 
     # 提取字符串参数中的文件路径
     # 匹配引号内的路径（包含 / 的字符串，以 .txt 结尾）
@@ -489,9 +522,228 @@ def extract_flaggems_code_details(integration):
             break
 
     if not result["txt_path"]:
+        # 尝试从其他 enable 调用中提取 txt 路径
+        for cp in result["code_paths"]:
+            for pattern in txt_patterns:
+                m = re.search(pattern, cp["enable_call"])
+                if m:
+                    result["txt_path"] = m.group(1)
+                    break
+            if result["txt_path"]:
+                break
+
+    if not result["txt_path"]:
         result["auto_detect"] = True
 
+    # 向后兼容：code_path 取最高优先级文件
+    result["code_path"] = result["code_paths"][0]["file"] if result["code_paths"] else ""
+    result["enable_call"] = result["code_paths"][0]["enable_call"] if result["code_paths"] else ""
+
     return result
+
+
+# =========================================================================
+# 环境变量驱动算子控制：一次性注入 + 环境变量写入
+# =========================================================================
+
+OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
+FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
+FLAGGEMS_INJECT_COMMENT = "# FlagGems 环境变量驱动算子控制（由 FlagOS inspect_env 自动注入）"
+
+
+def _extract_extra_kwargs(call_text):
+    """从原始 flag_gems.enable/only_enable 调用中提取 record/once/path 参数"""
+    extras = {}
+    m = re.search(r'record\s*=\s*(True|False)', call_text)
+    if m:
+        extras['record'] = m.group(1)
+    m = re.search(r'once\s*=\s*(True|False)', call_text)
+    if m:
+        extras['once'] = m.group(1)
+    m = re.search(r'path\s*=\s*["\']([^"\']+)["\']', call_text)
+    if m:
+        extras['path'] = m.group(1)
+    return extras
+
+
+def _build_inject_block(caps, indent="", extra_kwargs=None):
+    """构建注入代码块，保留原始调用中的 record/once/path 参数"""
+    has_only_enable = "only_enable" in caps
+    extra_kwargs = extra_kwargs or {}
+
+    extra_parts = []
+    for k in ('record', 'once'):
+        if k in extra_kwargs:
+            extra_parts.append(f"{k}={extra_kwargs[k]}")
+    if 'path' in extra_kwargs:
+        extra_parts.append(f'path="{extra_kwargs["path"]}"')
+    extra_str = ", " + ", ".join(extra_parts) if extra_parts else ""
+
+    lines = [
+        FLAGGEMS_INJECT_COMMENT,
+        "import os as _fgos",
+        'if _fgos.environ.get("USE_FLAGGEMS", "1") == "1":',
+        "    import flag_gems as _fg",
+        '    _fg_mode = _fgos.environ.get("FLAGGEMS_CONTROL_MODE", "unused")',
+        "    _fg_ops = {}",
+        "    try:",
+        "        import json as _fgjson",
+        f'        with open("{OPS_CONTROL_FILE}", "r") as _fgf:',
+        "            _fg_ops = _fgjson.load(_fgf)",
+        "    except (FileNotFoundError, Exception):",
+        "        pass",
+    ]
+    if has_only_enable:
+        lines += [
+            '    if _fg_mode == "only_enable" and hasattr(_fg, "only_enable"):',
+            f'        _fg.only_enable(include=_fg_ops.get("include", []){extra_str})',
+            "    else:",
+            f'        _fg.enable(unused=_fg_ops.get("unused", []){extra_str})',
+        ]
+    else:
+        lines += [
+            f'    _fg.enable(unused=_fg_ops.get("unused", []){extra_str})',
+        ]
+
+    return "\n".join(indent + line for line in lines)
+
+
+def _inject_single_file(code_path, caps):
+    """对单个文件注入环境变量驱动代码，替换 flag_gems.enable()/only_enable() 调用"""
+    if not code_path or not os.path.isfile(code_path):
+        return {"injected": False, "file": code_path, "error": "file not found"}
+
+    content = Path(code_path).read_text(encoding="utf-8", errors="ignore")
+
+    if FLAGGEMS_INJECT_MARKER in content:
+        return {"injected": True, "already": True, "file": code_path}
+
+    # 匹配 flag_gems.enable(...) 或 flag_gems.only_enable(...)（含多行）
+    pattern = re.compile(
+        r"^([ \t]*)(flag_gems\.(?:only_)?enable\s*\(.*?\))",
+        re.MULTILINE | re.DOTALL
+    )
+    match = pattern.search(content)
+    if not match:
+        return {"injected": False, "file": code_path, "error": "flag_gems.enable() pattern not found"}
+
+    indent = match.group(1)
+    original_call = match.group(2)
+    extra_kwargs = _extract_extra_kwargs(original_call)
+    inject_block = _build_inject_block(caps, indent, extra_kwargs=extra_kwargs)
+
+    backup_path = code_path + ".flagos_backup"
+    Path(backup_path).write_text(content, encoding="utf-8")
+
+    new_content = content[:match.start()] + inject_block + content[match.end():]
+    Path(code_path).write_text(new_content, encoding="utf-8")
+
+    print(f"  ✓ 已注入环境变量驱动代码到 {code_path}")
+    print(f"    备份: {backup_path}")
+    return {
+        "injected": True,
+        "file": code_path,
+        "backup": backup_path,
+    }
+
+
+def _inject_control_code(code_details, caps):
+    """注入环境变量驱动的算子控制代码到所有包含 flag_gems.enable() 的文件"""
+    code_paths = code_details.get("code_paths", [])
+
+    # 向后兼容：如果没有 code_paths，使用旧的 code_path
+    if not code_paths:
+        code_path = code_details.get("code_path", "")
+        if code_path:
+            code_paths = [{"file": code_path, "enable_call": "", "priority": 1}]
+
+    if not code_paths:
+        return {"injected": False, "error": "no code_paths found"}
+
+    results = []
+    injected_count = 0
+    already_count = 0
+    errors = []
+
+    for cp in code_paths:
+        filepath = cp["file"]
+        r = _inject_single_file(filepath, caps)
+        results.append(r)
+        if r.get("injected"):
+            if r.get("already"):
+                already_count += 1
+            else:
+                injected_count += 1
+        elif r.get("error"):
+            errors.append(f"{filepath}: {r['error']}")
+
+    # 创建初始控制文件（只需一次）
+    if injected_count > 0:
+        try:
+            import json as _json_init
+            with open(OPS_CONTROL_FILE, 'w', encoding='utf-8') as f:
+                _json_init.dump({"unused": [], "include": []}, f, indent=2)
+            print(f"  ✓ 初始控制文件已创建: {OPS_CONTROL_FILE}")
+        except Exception as e:
+            print(f"  WARN: 创建控制文件失败: {e}")
+
+    total = injected_count + already_count
+    if total == 0:
+        return {"injected": False, "error": "; ".join(errors) if errors else "no files injected"}
+
+    # 向后兼容：file 字段取第一个成功注入的文件
+    first_file = next((r["file"] for r in results if r.get("injected")), "")
+    first_backup = next((r.get("backup", "") for r in results if r.get("injected") and not r.get("already")), "")
+
+    print(f"  ✓ 共处理 {len(code_paths)} 个文件: {injected_count} 新注入, {already_count} 已注入")
+    return {
+        "injected": True,
+        "file": first_file,
+        "backup": first_backup,
+        "files": [r["file"] for r in results if r.get("injected")],
+        "has_only_enable": "only_enable" in caps,
+        "control_file": OPS_CONTROL_FILE,
+    }
+
+
+def _write_control_env_vars(env_type, caps):
+    """根据环境检测结果写入 FlagGems 控制环境变量到 /etc/environment"""
+    if env_type == "native":
+        use_flaggems = "0"
+        control_mode = ""
+    else:
+        use_flaggems = "1"
+        if "only_enable" in caps and "enable_unused" in caps:
+            control_mode = "unused"
+        elif "only_enable" in caps:
+            control_mode = "only_enable"
+        elif "enable_unused" in caps:
+            control_mode = "unused"
+        else:
+            control_mode = ""
+
+    os.environ["USE_FLAGGEMS"] = use_flaggems
+    if control_mode:
+        os.environ["FLAGGEMS_CONTROL_MODE"] = control_mode
+
+    env_path = "/etc/environment"
+    try:
+        existing = ""
+        if os.path.isfile(env_path):
+            with open(env_path, 'r', encoding='utf-8') as f:
+                existing = f.read()
+        lines = [l for l in existing.split('\n')
+                 if not l.startswith("USE_FLAGGEMS=") and not l.startswith("FLAGGEMS_CONTROL_MODE=")]
+        lines.append(f"USE_FLAGGEMS={use_flaggems}")
+        if control_mode:
+            lines.append(f"FLAGGEMS_CONTROL_MODE={control_mode}")
+        with open(env_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(l for l in lines if l is not None) + '\n')
+        print(f"  ✓ 环境变量已写入 {env_path}: USE_FLAGGEMS={use_flaggems}, FLAGGEMS_CONTROL_MODE={control_mode}")
+    except Exception as e:
+        print(f"  WARN: 写入 {env_path} 失败: {e}")
+
+    return {"USE_FLAGGEMS": use_flaggems, "FLAGGEMS_CONTROL_MODE": control_mode}
 
 
 def check_flagtree():
@@ -530,6 +782,19 @@ def collect_all():
     flagtree = check_flagtree()
     env_vars = check_env_vars()
 
+    env_type = classify_env_type(capabilities, integration)
+    code_details = extract_flaggems_code_details(integration)
+    caps = capabilities["capabilities"]
+
+    # 非 plugin 环境：一次性注入环境变量驱动代码 + 写入控制环境变量
+    inject_result = {}
+    control_env = {}
+    if env_type == "vllm_flaggems":
+        inject_result = _inject_control_code(code_details, caps)
+        control_env = _write_control_env_vars(env_type, caps)
+    elif env_type == "native":
+        control_env = _write_control_env_vars(env_type, caps)
+
     return {
         "execution": {
             "mode": exec_mode,
@@ -537,7 +802,7 @@ def collect_all():
         "inspection": {
             "core_packages": core,
             "flag_packages": flag,
-            "flaggems_capabilities": capabilities["capabilities"],
+            "flaggems_capabilities": caps,
             "flaggems_enable_signature": capabilities["enable_signature"],
             "flaggems_enable_params": capabilities["enable_params"],
             "vendor_config_path": capabilities["vendor_config_path"],
@@ -561,10 +826,12 @@ def collect_all():
             "startup_scripts": integration["startup_scripts"],
         },
         "env_classification": {
-            "env_type": classify_env_type(capabilities, integration),
+            "env_type": env_type,
             "has_flagtree": flagtree["installed"],
-            **extract_flaggems_code_details(integration),
+            **code_details,
         },
+        "control_env": control_env,
+        "inject_result": inject_result,
     }
 
 
@@ -597,13 +864,35 @@ def output_report(data):
     if env_cls.get("has_flagtree"):
         report.append(f"  FlagTree:     已安装")
     if env_type == "vllm_flaggems":
-        report.append(f"  代码路径:     {env_cls.get('code_path', '-')}")
+        code_paths = env_cls.get('code_paths', [])
+        if code_paths:
+            report.append(f"  代码路径 ({len(code_paths)} 个文件):")
+            for cp in code_paths:
+                pri_label = {3: "无条件enable", 2: "条件enable", 1: "only_enable"}.get(cp.get("priority", 0), "")
+                report.append(f"    - {cp['file']} [{pri_label}]")
+        else:
+            report.append(f"  代码路径:     {env_cls.get('code_path', '-')}")
         report.append(f"  enable() 调用: {env_cls.get('enable_call', '-')}")
         txt_path = env_cls.get("txt_path", "")
         if txt_path:
             report.append(f"  算子 txt 路径: {txt_path}")
         elif env_cls.get("auto_detect"):
             report.append(f"  算子 txt 路径: 未解析到，需启动服务后自动搜索")
+
+    # 控制环境变量 & 注入结果
+    ctrl_env = data.get("control_env", {})
+    inject_res = data.get("inject_result", {})
+    if ctrl_env:
+        report.append(f"\n## FlagGems 控制环境变量")
+        report.append(f"  USE_FLAGGEMS:          {ctrl_env.get('USE_FLAGGEMS', '-')}")
+        report.append(f"  FLAGGEMS_CONTROL_MODE: {ctrl_env.get('FLAGGEMS_CONTROL_MODE', '-')}")
+    if inject_res:
+        if inject_res.get("already"):
+            report.append(f"  代码注入:  已存在（跳过）")
+        elif inject_res.get("injected"):
+            report.append(f"  代码注入:  ✓ 已注入到 {inject_res.get('file', '-')}")
+        elif inject_res.get("error"):
+            report.append(f"  代码注入:  ✗ {inject_res.get('error', '-')}")
 
     report.append("\n## 核心组件")
     report.append(f"  {'组件':<15} {'版本':<20} {'状态'}")

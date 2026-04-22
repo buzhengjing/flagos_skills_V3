@@ -262,15 +262,18 @@ report_success() {
     python3 -c "
 import json, sys
 phases = [p for p in sys.argv[5].split(',') if p] if sys.argv[5] else []
-print(json.dumps({
+result = {
     'success': True,
     'elapsed_seconds': int(sys.argv[1]),
     'model_id': sys.argv[2],
     'max_model_len': sys.argv[3],
     'endpoint': sys.argv[4],
     'phases_observed': phases,
-}, indent=2))
-" "${ELAPSED}" "${model_id}" "${max_model_len}" "${BASE_URL}" "${PHASES_OBSERVED}"
+}
+if int(sys.argv[1]) == 0 and sys.argv[6] == 'false':
+    result['warning'] = 'instant_response_no_log_confirmation'
+print(json.dumps(result, indent=2))
+" "${ELAPSED}" "${model_id}" "${max_model_len}" "${BASE_URL}" "${PHASES_OBSERVED}" "${LOG_CONFIRMED_READY}"
 }
 
 # ============================================================
@@ -367,48 +370,12 @@ else
     EFFECTIVE_MAX=$TIMEOUT
 fi
 
+# 标记日志中是否观测到 service_ready 信号
+LOG_CONFIRMED_READY=false
+
 while [ "$ELAPSED" -lt "$EFFECTIVE_MAX" ]; do
 
-    # === CHECK 1: 端点检查 ===
-    RESPONSE=$(curl -s --connect-timeout 3 "${MODELS_URL}" 2>/dev/null || true)
-
-    if [ -n "$RESPONSE" ]; then
-        HAS_DATA=$(echo "$RESPONSE" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    models = data.get('data', [])
-    if models:
-        for m in models:
-            print(m.get('id', ''))
-except:
-    pass
-" 2>/dev/null || true)
-
-        if [ -n "$HAS_DATA" ]; then
-            MODEL_ID=$(echo "$HAS_DATA" | head -1)
-
-            if [ -n "$MODEL_NAME" ] && ! echo "$HAS_DATA" | grep -qi "$MODEL_NAME"; then
-                echo "[${ELAPSED}s] 服务已响应，但模型名不匹配: 期望=${MODEL_NAME}, 实际=${MODEL_ID}"
-            fi
-
-            MAX_MODEL_LEN=$(echo "$RESPONSE" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for m in data.get('data', []):
-        print(m.get('max_model_len', 'unknown'))
-        break
-except:
-    print('unknown')
-" 2>/dev/null || echo "unknown")
-
-            report_success "$MODEL_ID" "$MAX_MODEL_LEN"
-            exit 0
-        fi
-    fi
-
-    # === CHECK 2: 日志监控（仅动态模式） ===
+    # === CHECK 1: 日志监控（优先于端口检测，确保致命信号不被跳过） ===
     if [ "$DYNAMIC_MODE" = true ] && [ -f "$LOG_PATH" ]; then
         CURRENT_LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
 
@@ -476,6 +443,70 @@ print(json.dumps({
             # 日志增长本身也算活动（即使没匹配到已知阶段）
             LAST_ACTIVITY_TIME=$(date +%s)
             LAST_LOG_SIZE=$NEW_SIZE
+
+            # 标记日志中是否观测到 service_ready
+            if echo ",$PHASES_OBSERVED," | grep -q ",service_ready,"; then
+                LOG_CONFIRMED_READY=true
+            fi
+        fi
+    fi
+
+    # === CHECK 2: 端点检查 ===
+    RESPONSE=$(curl -s --connect-timeout 3 "${MODELS_URL}" 2>/dev/null || true)
+
+    if [ -n "$RESPONSE" ]; then
+        HAS_DATA=$(echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    models = data.get('data', [])
+    if models:
+        for m in models:
+            print(m.get('id', ''))
+except:
+    pass
+" 2>/dev/null || true)
+
+        if [ -n "$HAS_DATA" ]; then
+            MODEL_ID=$(echo "$HAS_DATA" | head -1)
+
+            if [ -n "$MODEL_NAME" ] && ! echo "$HAS_DATA" | grep -qi "$MODEL_NAME"; then
+                echo "[${ELAPSED}s] 服务已响应，但模型名不匹配: 期望=${MODEL_NAME}, 实际=${MODEL_ID}"
+            fi
+
+            # 残留服务检测：日志未确认 service_ready 时，端口响应视为可疑
+            if [ "$LOG_CONFIRMED_READY" = false ] && [ "$DYNAMIC_MODE" = true ]; then
+                echo "[${ELAPSED}s] ⚠ 端口 ${PORT} 已响应但启动日志未确认 service_ready，疑似残留服务"
+                echo "  响应模型: ${MODEL_ID}"
+                echo "  等待日志确认或致命信号..."
+                sleep "$INTERVAL"
+                ELAPSED=$((ELAPSED + INTERVAL))
+                INTERVAL=$((INTERVAL * 2))
+                if [ "$INTERVAL" -gt "$MAX_INTERVAL" ]; then INTERVAL=$MAX_INTERVAL; fi
+                continue
+            fi
+
+            # 非动态模式下的瞬时响应警告：端口在首次轮询即响应，可能是残留服务
+            if [ "$DYNAMIC_MODE" = false ] && [ "$ELAPSED" -eq 0 ]; then
+                echo ""
+                echo "⚠ 警告: 端口 ${PORT} 在 0s 内响应，可能是残留服务而非新启动的服务"
+                echo "  响应模型: ${MODEL_ID}"
+                echo "  建议使用 --log-path 启用动态模式以获得可靠检测"
+            fi
+
+            MAX_MODEL_LEN=$(echo "$RESPONSE" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for m in data.get('data', []):
+        print(m.get('max_model_len', 'unknown'))
+        break
+except:
+    print('unknown')
+" 2>/dev/null || echo "unknown")
+
+            report_success "$MODEL_ID" "$MAX_MODEL_LEN"
+            exit 0
         fi
     fi
 
