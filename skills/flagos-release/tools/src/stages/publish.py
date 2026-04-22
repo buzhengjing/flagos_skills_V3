@@ -973,21 +973,14 @@ class PublishStage(BaseStage):
     # ==================== ModelScope ====================
 
     def _publish_to_modelscope(self, readme_path: Optional[str]) -> bool:
-        """发布到 ModelScope（CLI 优先，SDK 降级）"""
+        """发布到 ModelScope（CLI 优先，SDK 降级，容器内执行）"""
         publish_config = self.config.publish
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
         model_id = publish_config.modelscope_model_id or f"FlagRelease/{model_name}"
 
-        upload_dir = self._get_upload_directory(readme_path)
-        if not upload_dir or not os.path.exists(upload_dir):
-            print(f"  x 上传目录不存在: {upload_dir}")
-            return False
-
-        files = get_files_in_directory(upload_dir)
-        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
-        print(f"  准备上传目录: {upload_dir}")
-        print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
+        container_upload_dir = self._get_container_upload_dir()
+        print(f"  容器内上传目录: {container_upload_dir}")
         print(f"  目标仓库: {model_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
 
@@ -998,39 +991,57 @@ class PublishStage(BaseStage):
         return self._publish_to_modelscope_sdk(readme_path)
 
     def _publish_to_modelscope_sdk(self, readme_path: Optional[str]) -> bool:
-        """使用 SDK 发布到 ModelScope（降级方案）"""
+        """使用 SDK 发布到 ModelScope（降级方案，容器内执行）"""
         publish_config = self.config.publish
+        container = self.config.container_name
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
         model_id = publish_config.modelscope_model_id or f"FlagRelease/{model_name}"
 
-        upload_dir = self._get_upload_directory(readme_path)
-        if not upload_dir or not os.path.exists(upload_dir):
+        if not container:
+            print("  x 无容器名，无法在容器内执行 SDK 上传")
             return False
 
-        try:
-            from modelscope.hub.api import HubApi
+        if not self._ensure_container_package("modelscope"):
+            print("  x 容器内安装 modelscope 失败")
+            return False
 
-            api = HubApi()
-            if publish_config.modelscope_token:
-                api.login(publish_config.modelscope_token)
+        container_upload_dir = self._get_container_upload_dir()
+        self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
-            print(f"  检查 ModelScope 模型仓库: {model_id}")
-            try:
-                api.get_model(model_id)
-                print(f"    仓库已存在")
-            except Exception:
-                print(f"    仓库不存在，创建中...")
-                try:
-                    visibility = 1 if publish_config.private else 3
-                    api.create_model(model_id=model_id, visibility=visibility)
-                    print(f"    + 仓库创建成功 ({'私有' if publish_config.private else '公开'})")
-                except Exception as e:
-                    print(f"    创建仓库失败: {e}，继续尝试上传...")
+        token = publish_config.modelscope_token or ""
+        visibility = 1 if publish_config.private else 3
+        private_label = '私有' if publish_config.private else '公开'
 
-            print(f"  开始上传...")
-            api.upload_folder(repo_id=model_id, folder_path=upload_dir)
-
+        sdk_script = f"""
+import sys
+from modelscope.hub.api import HubApi
+api = HubApi()
+token = '{token}'
+if token:
+    api.login(token)
+model_id = '{model_id}'
+print(f'检查 ModelScope 模型仓库: {{model_id}}')
+try:
+    api.get_model(model_id)
+    print('仓库已存在')
+except Exception:
+    print('仓库不存在，创建中...')
+    try:
+        api.create_model(model_id=model_id, visibility={visibility})
+        print('仓库创建成功 ({private_label})')
+    except Exception as e:
+        print(f'创建仓库失败: {{e}}，继续尝试上传...')
+print('开始上传...')
+api.upload_folder(repo_id=model_id, folder_path='{container_upload_dir}')
+print(f'已发布到 ModelScope: {{model_id}}')
+"""
+        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
+        result, stdout, stderr = self.run_command(
+            cmd=cmd, step_name="SDK 上传到 ModelScope",
+            timeout=UPLOAD_TIMEOUT, in_container=True
+        )
+        if result:
             print(f"  + 已发布到 ModelScope: {model_id}")
             self.steps.append(StepResult(
                 step_name="发布到 ModelScope",
@@ -1039,56 +1050,100 @@ class PublishStage(BaseStage):
             ))
             return True
 
-        except ImportError:
-            print("  x modelscope SDK 也未安装，无法发布")
-            return False
+        print(f"  x SDK 发布到 ModelScope 失败")
+        return False
 
+    def _ensure_container_package(self, package: str) -> bool:
+        """确保容器内已安装指定 Python 包，未安装则自动安装"""
+        container = self.config.container_name
+        if not container:
+            return False
+        check_cmd = f"PATH=/opt/conda/bin:$PATH python3 -c 'import {package}'"
+        result, _, _ = self.run_command(
+            cmd=check_cmd, step_name=f"检查容器内 {package}",
+            timeout=30, in_container=True
+        )
+        if result:
+            return True
+        print(f"  容器内未安装 {package}，自动安装中...")
+        install_cmd = f"PATH=/opt/conda/bin:$PATH pip install {package} -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com"
+        result, _, _ = self.run_command(
+            cmd=install_cmd, step_name=f"容器内安装 {package}",
+            timeout=300, in_container=True
+        )
+        return result
+
+    def _get_container_upload_dir(self) -> str:
+        """获取容器内上传目录路径（模型权重所在路径）"""
+        weights_dir = self.config.publish.weights_dir
+        if weights_dir:
+            return weights_dir
+        serve_cmd = self.config.model_info.serve_start_cmd or ""
+        if "vllm serve " in serve_cmd:
+            parts = serve_cmd.split("vllm serve ", 1)[1].split()
+            if parts:
+                return parts[0].strip().rstrip("\\")
+        return "/data/models"
+
+    def _docker_cp_readme_to_container(self, readme_path: Optional[str], container_upload_dir: str) -> bool:
+        """将 README 文件 docker cp 到容器内上传目录"""
+        if not readme_path or not os.path.exists(readme_path):
+            return True
+        container = self.config.container_name
+        dest = f"{container}:{container_upload_dir}/README.md"
+        try:
+            subprocess.run(["docker", "cp", readme_path, dest],
+                           capture_output=True, text=True, timeout=30, check=True)
+            print(f"  已复制 README 到容器内 {container_upload_dir}/README.md")
+            return True
         except Exception as e:
-            print(f"  x SDK 发布到 ModelScope 失败: {e}")
+            print(f"  ⚠ 复制 README 到容器失败: {e}")
             return False
 
     def _publish_to_modelscope_cli(self, readme_path: Optional[str]) -> bool:
-        """使用命令行发布到 ModelScope"""
+        """使用命令行发布到 ModelScope（容器内执行，避免宿主机 torch 崩溃）"""
         publish_config = self.config.publish
-
-        if publish_config.modelscope_token:
-            os.environ['MODELSCOPE_API_TOKEN'] = publish_config.modelscope_token
+        container = self.config.container_name
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
         model_id = publish_config.modelscope_model_id or f"FlagRelease/{model_name}"
 
-        upload_dir = self._get_upload_directory(readme_path)
-        if not upload_dir or not os.path.exists(upload_dir):
-            print(f"  x 上传目录不存在: {upload_dir}")
+        if not container:
+            print("  x 无容器名，无法在容器内执行上传")
             return False
 
-        files = get_files_in_directory(upload_dir)
-        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
-        print(f"  准备上传目录: {upload_dir}")
-        print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
+        if not self._ensure_container_package("modelscope"):
+            print("  x 容器内安装 modelscope 失败")
+            return False
+
+        container_upload_dir = self._get_container_upload_dir()
+        self._docker_cp_readme_to_container(readme_path, container_upload_dir)
+
+        token = publish_config.modelscope_token
+        token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
+
         print(f"  目标仓库: {model_id}")
+        print(f"  容器内上传目录: {container_upload_dir}")
 
         visibility = "private" if publish_config.private else "public"
-        create_cmd = f"modelscope create {model_id} --visibility {visibility}"
+        create_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope create {model_id} --visibility {visibility}"
         print(f"  创建/确认仓库: {model_id} ({visibility})")
         result, stdout, stderr = self.run_command(
-            cmd=create_cmd,
-            step_name="创建 ModelScope 仓库",
-            timeout=60
+            cmd=create_cmd, step_name="创建 ModelScope 仓库",
+            timeout=60, in_container=True
         )
         if not result:
             print(f"    创建仓库失败（可能已存在），继续尝试上传...")
 
-        cmd = f"modelscope upload {model_id} {upload_dir}"
+        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}modelscope upload {model_id} {container_upload_dir}"
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
 
         for attempt in range(UPLOAD_MAX_RETRIES):
             result, stdout, stderr = self.run_command(
-                cmd=cmd,
-                step_name="上传到 ModelScope",
-                timeout=UPLOAD_TIMEOUT
+                cmd=upload_cmd, step_name="上传到 ModelScope",
+                timeout=UPLOAD_TIMEOUT, in_container=True
             )
             if result:
                 success = True
@@ -1119,15 +1174,8 @@ class PublishStage(BaseStage):
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
         repo_id = publish_config.huggingface_repo_id or f"FlagRelease/{model_name}"
 
-        upload_dir = self._get_upload_directory(readme_path)
-        if not upload_dir or not os.path.exists(upload_dir):
-            print(f"  x 上传目录不存在: {upload_dir}")
-            return False
-
-        files = get_files_in_directory(upload_dir)
-        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
-        print(f"  准备上传目录: {upload_dir}")
-        print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
+        container_upload_dir = self._get_container_upload_dir()
+        print(f"  容器内上传目录: {container_upload_dir}")
         print(f"  目标仓库: {repo_id}")
         print(f"  可见性: {'私有' if publish_config.private else '公开'}")
 
@@ -1143,40 +1191,55 @@ class PublishStage(BaseStage):
         return self._publish_to_huggingface_sdk(readme_path)
 
     def _publish_to_huggingface_sdk(self, readme_path: Optional[str]) -> bool:
-        """使用 SDK 发布到 HuggingFace（降级方案）"""
+        """使用 SDK 发布到 HuggingFace（降级方案，容器内执行）"""
         publish_config = self.config.publish
+        container = self.config.container_name
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
         repo_id = publish_config.huggingface_repo_id or f"FlagRelease/{model_name}"
 
-        upload_dir = self._get_upload_directory(readme_path)
-        if not upload_dir or not os.path.exists(upload_dir):
+        if not container:
+            print("  x 无容器名，无法在容器内执行 SDK 上传")
             return False
 
-        try:
-            from huggingface_hub import HfApi, login
+        if not self._ensure_container_package("huggingface_hub"):
+            print("  x 容器内安装 huggingface_hub 失败")
+            return False
 
-            if publish_config.huggingface_token:
-                login(token=publish_config.huggingface_token)
+        container_upload_dir = self._get_container_upload_dir()
+        self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
-            api = HfApi()
+        token = publish_config.huggingface_token or ""
+        private_flag = "True" if publish_config.private else "False"
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
 
-            print(f"  检查 HuggingFace 仓库: {repo_id}")
-            try:
-                api.repo_info(repo_id=repo_id)
-                print(f"    仓库已存在")
-            except Exception:
-                print(f"    仓库不存在，创建中...")
-                api.create_repo(
-                    repo_id=repo_id,
-                    private=publish_config.private,
-                    exist_ok=True
-                )
-                print(f"    + 仓库创建成功 ({'私有' if publish_config.private else '公开'})")
-
-            print(f"  开始上传...")
-            api.upload_folder(repo_id=repo_id, folder_path=upload_dir)
-
+        sdk_script = f"""
+import os
+os.environ['HF_ENDPOINT'] = '{hf_endpoint}'
+from huggingface_hub import HfApi, login
+token = '{token}'
+if token:
+    login(token=token)
+api = HfApi()
+repo_id = '{repo_id}'
+print(f'检查 HuggingFace 仓库: {{repo_id}}')
+try:
+    api.repo_info(repo_id=repo_id)
+    print('仓库已存在')
+except Exception:
+    print('仓库不存在，创建中...')
+    api.create_repo(repo_id=repo_id, private={private_flag}, exist_ok=True)
+    print('仓库创建成功')
+print('开始上传...')
+api.upload_folder(repo_id=repo_id, folder_path='{container_upload_dir}')
+print(f'已发布到 HuggingFace: {{repo_id}}')
+"""
+        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
+        result, stdout, stderr = self.run_command(
+            cmd=cmd, step_name="SDK 上传到 HuggingFace",
+            timeout=UPLOAD_TIMEOUT, in_container=True
+        )
+        if result:
             print(f"  + 已发布到 HuggingFace: {repo_id}")
             self.steps.append(StepResult(
                 step_name="发布到 HuggingFace",
@@ -1185,55 +1248,55 @@ class PublishStage(BaseStage):
             ))
             return True
 
-        except ImportError:
-            print("  x huggingface_hub SDK 也未安装，无法发布")
-            return False
-
-        except Exception as e:
-            print(f"  x SDK 发布到 HuggingFace 失败: {e}")
-            return False
+        print(f"  x SDK 发布到 HuggingFace 失败")
+        return False
 
     def _publish_to_huggingface_cli(self, readme_path: Optional[str]) -> bool:
-        """使用命令行发布到 HuggingFace"""
+        """使用命令行发布到 HuggingFace（容器内执行）"""
         publish_config = self.config.publish
+        container = self.config.container_name
 
-        if publish_config.huggingface_token:
-            # 通过环境变量传递 token，避免在命令行参数中暴露
-            os.environ['HF_TOKEN'] = publish_config.huggingface_token
-            login_cmd = "huggingface-cli login --token $HF_TOKEN"
-            success, _, _ = self.run_command(
-                cmd=login_cmd,
-                step_name="HuggingFace 登录",
-                timeout=60
-            )
-            if not success:
-                return False
+        if not container:
+            print("  x 无容器名，无法在容器内执行上传")
+            return False
+
+        if not self._ensure_container_package("huggingface_hub"):
+            print("  x 容器内安装 huggingface_hub 失败")
+            return False
 
         model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name
         repo_id = publish_config.huggingface_repo_id or f"FlagRelease/{model_name}"
 
-        upload_dir = self._get_upload_directory(readme_path)
-        if not upload_dir or not os.path.exists(upload_dir):
-            print(f"  x 上传目录不存在: {upload_dir}")
-            return False
+        container_upload_dir = self._get_container_upload_dir()
+        self._docker_cp_readme_to_container(readme_path, container_upload_dir)
 
-        files = get_files_in_directory(upload_dir)
-        total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
-        print(f"  准备上传目录: {upload_dir}")
-        print(f"  文件数量: {len(files)}, 总大小: {format_file_size(total_size)}")
+        token = publish_config.huggingface_token or ""
+        hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+        token_env = f"HF_TOKEN={token} " if token else ""
+        endpoint_env = f"HF_ENDPOINT={hf_endpoint} "
+
         print(f"  目标仓库: {repo_id}")
+        print(f"  容器内上传目录: {container_upload_dir}")
+
+        if token:
+            login_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli login --token {token}"
+            success, _, _ = self.run_command(
+                cmd=login_cmd, step_name="HuggingFace 登录",
+                timeout=60, in_container=True
+            )
+            if not success:
+                return False
 
         private_flag = "--private" if publish_config.private else ""
-        cmd = f"huggingface-cli upload {repo_id} {upload_dir} {private_flag}".strip()
+        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli upload {repo_id} {container_upload_dir} {private_flag}".strip()
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
 
         for attempt in range(UPLOAD_MAX_RETRIES):
             result, stdout, stderr = self.run_command(
-                cmd=cmd,
-                step_name="上传到 HuggingFace",
-                timeout=UPLOAD_TIMEOUT
+                cmd=upload_cmd, step_name="上传到 HuggingFace",
+                timeout=UPLOAD_TIMEOUT, in_container=True
             )
             if result:
                 success = True
@@ -1252,5 +1315,7 @@ class PublishStage(BaseStage):
                     current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
                 else:
                     print(f"  x 上传失败，已达最大重试次数")
+
+        return success
 
         return success

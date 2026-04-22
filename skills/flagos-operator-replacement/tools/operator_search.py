@@ -77,30 +77,46 @@ GPU_RELEASE_POLL_INTERVAL = 2  # 轮询间隔（秒）
 # =============================================================================
 
 def _parse_gpu_memory() -> List[Dict[str, float]]:
-    """解析 nvidia-smi 输出，返回每张 GPU 的显存信息"""
-    try:
-        result = subprocess.run(
-            "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
-            shell=True, capture_output=True, text=True, timeout=10
-        )
-        if result.returncode != 0:
-            return []
-        gpus = []
-        for line in result.stdout.strip().split('\n'):
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) >= 3:
-                try:
-                    gpus.append({
-                        "index": int(parts[0]),
-                        "used_mib": float(parts[1]),
-                        "total_mib": float(parts[2]),
-                        "free_ratio": 1.0 - float(parts[1]) / float(parts[2]) if float(parts[2]) > 0 else 0,
-                    })
-                except (ValueError, ZeroDivisionError):
-                    continue
-        return gpus
-    except Exception:
-        return []
+    """解析 GPU 显存信息，支持多厂商 SMI 工具（nvidia-smi / mx-smi / npu-smi）"""
+    smi_commands = [
+        ("nvidia-smi", "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
+        ("mx-smi", "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
+    ]
+
+    # 如果环境变量指定了厂商，优先使用对应工具
+    gpu_vendor = os.environ.get('GPU_VENDOR', '').lower()
+    if gpu_vendor == 'metax':
+        smi_commands = [smi_commands[1], smi_commands[0]]
+    elif gpu_vendor == 'nvidia':
+        smi_commands = [smi_commands[0]]
+
+    for name, cmd in smi_commands:
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                continue
+            gpus = []
+            for line in result.stdout.strip().split('\n'):
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 3:
+                    try:
+                        gpus.append({
+                            "index": int(parts[0]),
+                            "used_mib": float(parts[1]),
+                            "total_mib": float(parts[2]),
+                            "free_ratio": 1.0 - float(parts[1]) / float(parts[2]) if float(parts[2]) > 0 else 0,
+                        })
+                    except (ValueError, ZeroDivisionError):
+                        continue
+            if gpus:
+                return gpus
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        except Exception:
+            continue
+    return []
 
 
 def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
@@ -537,7 +553,9 @@ def preflight_framework_check(service_startup_cmd: str,
                                perf_config: str,
                                native_throughput: float,
                                wait_script: str = DEFAULT_WAIT_SCRIPT,
-                               benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT) -> Dict[str, Any]:
+                               benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT,
+                               model_name: Optional[str] = None,
+                               max_timeout: Optional[int] = None) -> Dict[str, Any]:
     """
     Plugin 模式搜索前预检：验证 plugin 框架本身是否有性能开销。
 
@@ -556,7 +574,7 @@ def preflight_framework_check(service_startup_cmd: str,
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
                            env_inline=env_inline, port=svc_port,
-                           model_name=args.model_name, max_timeout=args.max_timeout):
+                           model_name=model_name, max_timeout=max_timeout):
         return {"pass": False, "ratio": 0, "throughput": 0,
                 "message": "ERROR: 框架预检服务启动失败"}
 
@@ -638,7 +656,9 @@ def run_search_step(state_path: str, perf_config: str,
                     benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT,
                     toggle_script: str = DEFAULT_TOGGLE_SCRIPT,
                     wait_script: str = DEFAULT_WAIT_SCRIPT,
-                    apply_config_script: str = DEFAULT_APPLY_CONFIG_SCRIPT) -> Dict[str, Any]:
+                    apply_config_script: str = DEFAULT_APPLY_CONFIG_SCRIPT,
+                    model_name: Optional[str] = None,
+                    max_timeout: Optional[int] = None) -> Dict[str, Any]:
     """执行单轮搜索步骤"""
 
     step_timing = {}
@@ -685,7 +705,7 @@ def run_search_step(state_path: str, perf_config: str,
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
                            env_inline=env_inline, port=svc_port,
-                           model_name=args.model_name, max_timeout=args.max_timeout):
+                           model_name=model_name, max_timeout=max_timeout):
         return {"action": "error", "message": "服务重启失败"}
     step_timing["restart_seconds"] = round(time.time() - t0, 1)
 
@@ -754,6 +774,8 @@ def run_full_search(state_path: str, perf_config: str,
                     gems_txt_path: Optional[str] = None,
                     plugin_mode: bool = False,
                     capabilities: Optional[List[str]] = None,
+                    model_name: Optional[str] = None,
+                    max_timeout: Optional[int] = None,
                     **kwargs) -> Dict[str, Any]:
     """运行完整搜索循环"""
     # 读取状态并检查残留 completed 状态
@@ -797,6 +819,8 @@ def run_full_search(state_path: str, perf_config: str,
                 service_startup_cmd, perf_config, native_tp,
                 wait_script=kwargs.get("wait_script", DEFAULT_WAIT_SCRIPT),
                 benchmark_script=kwargs.get("benchmark_script", DEFAULT_BENCHMARK_SCRIPT),
+                model_name=model_name,
+                max_timeout=max_timeout,
             )
             preflight_elapsed = round(time.time() - t_pf, 1)
             if not framework_check.get("pass") and framework_check.get("ratio", 1.0) < 0.80:
@@ -836,6 +860,8 @@ def run_full_search(state_path: str, perf_config: str,
             gems_txt_path=gems_txt_path,
             plugin_mode=plugin_mode,
             capabilities=capabilities,
+            model_name=model_name,
+            max_timeout=max_timeout,
             **kwargs
         )
 
@@ -955,6 +981,8 @@ def main():
             gems_txt_path=args.gems_txt_path,
             plugin_mode=args.plugin_mode,
             capabilities=caps,
+            model_name=args.model_name,
+            max_timeout=args.max_timeout,
             optimizer_script=args.optimizer_script,
             benchmark_script=args.benchmark_script,
             toggle_script=args.toggle_script,
@@ -971,6 +999,8 @@ def main():
             gems_txt_path=args.gems_txt_path,
             plugin_mode=args.plugin_mode,
             capabilities=caps,
+            model_name=args.model_name,
+            max_timeout=args.max_timeout,
             optimizer_script=args.optimizer_script,
             benchmark_script=args.benchmark_script,
             toggle_script=args.toggle_script,

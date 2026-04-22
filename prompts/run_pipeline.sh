@@ -851,12 +851,25 @@ except Exception as e:
 " 2>/dev/null) || HARBOR_DONE="needed"
 
         if [ "${HARBOR_DONE}" = "needed" ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
-            python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" 2>&1 && \
-                echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
-            # 重新同步 context 和 traces（main.py 可能更新了）
-            docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
-            docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
+            # Issue 3 fix: 检查 service_ok，服务未启动成功的模型不具备发布条件
+            FALLBACK_SERVICE_OK=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('workflow',{}).get('service_ok', False))
+except: print('False')
+" 2>/dev/null) || FALLBACK_SERVICE_OK="False"
+            if [ "${FALLBACK_SERVICE_OK}" != "True" ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底跳过：服务未启动成功，不具备发布条件"
+            else
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
+                python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" --only-harbor 2>&1 && \
+                    echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
+                # 重新同步 context 和 traces（main.py 可能更新了）
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
+            fi
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Harbor 发布已完成，跳过兜底"
         fi

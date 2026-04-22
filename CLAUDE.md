@@ -254,12 +254,21 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 验证失败时：
 - 标记 `workflow.config_persisted=false`
-- 继续发布但标记为私有（`qualified=false`）
+- 继续发布（config_persisted 不影响 qualified 判定）
 - 在 README 中说明需手动配置
 
 验证成功时：
 - 标记 `workflow.config_persisted=true`
 - 更新 context.yaml
+
+**config_persisted 自动设置规则**：
+- 执行了 persist_op_config.py 且验证通过 → config_persisted=true
+- 无需调优（accuracy_ok=true AND performance_ok=true，未触发步骤5/7）→ 自动设置 config_persisted=true（原始配置即为最终配置，无需额外固化）
+- native 场景（无 FlagGems）→ 自动设置 config_persisted=true
+
+**qualified 计算公式（钉死）**：
+`qualified = service_ok AND accuracy_ok AND performance_ok`
+config_persisted 不参与 qualified 计算。config_persisted=false 仅影响 README 中的说明文字，不影响发布可见性。
 
 ### 步骤8 自动发布（flagos-release skill）
 
@@ -1033,7 +1042,9 @@ GPU: <gpu_count>x <gpu_type>
 27. **V1/V2 模式切换前必须先停止当前服务释放 GPU**。每次切换 FlagGems 模式（native↔flagos）前，必须先执行 `docker restart $CONTAINER && sleep 5` 停止当前服务。禁止在旧服务运行时直接启动新服务，否则会导致 GPU 显存泄漏、显卡越用越少
 28. **V1 和 V2 必须使用相同的 GPU 配置**。GPU 检测（步骤2.3）结果写入 context.yaml 后，后续所有模式切换（V1/V2/V3）复用同一 `CUDA_VISIBLE_DEVICES` 和 `TP_SIZE` 配置，禁止重新检测 GPU。重新检测会因旧服务残留导致可用 GPU 数量不一致，使性能对比不公平
 29. **步骤7性能算子调优必须通过 `operator_search.py run` 一次性执行**。禁止编排层手动拼凑 toggle→restart→benchmark 循环。`operator_search.py` 已封装完整的 next→配置→重启→benchmark→update 自动循环，包含 GPU 可用性检查、显存释放验证、断点恢复。手动拼凑会消耗大量 token 且容易在 GPU 资源不足时做出错误决策（如禁用大量算子反而性能更差）。唯一例外：`operator_search.py` 本身报错退出时，编排层可读取 `_last_error.json` 诊断后决定是否重试或终止
-30. **每轮算子搜索前必须验证 GPU 显存已释放**。`operator_search.py` 的 `restart_service()` 在 pkill 后等待 GPU 显存降至空闲水平（<5% 占用），超时 30s 未释放则 pkill -9 强制清理。`run_full_search()` 每轮开始前检查 GPU 可用性，连续清理仍无可用 GPU 则中止搜索并记录错误，禁止在无可用 GPU 时盲目启动服务
+30. **V1 和 V2 精度评测必须使用完全相同的参数**。禁止因 V2 吞吐量低而手动降低 max_tokens、并发数等参数。fast_gpqa.py 自动计算的参数对 V1/V2 统一适用，编排层不得覆盖
+31. **每轮算子搜索前必须验证 GPU 显存已释放**。`operator_search.py` 的 `restart_service()` 在 pkill 后等待 GPU 显存降至空闲水平（<5% 占用），超时 30s 未释放则 pkill -9 强制清理。`run_full_search()` 每轮开始前检查 GPU 可用性，连续清理仍无可用 GPU 则中止搜索并记录错误，禁止在无可用 GPU 时盲目启动服务
+32. **operator_search.py 失败时禁止手动重试循环**。如果 operator_search.py 报 NameError/ImportError 等代码级错误（非业务逻辑错误），编排层应立即标记 performance_ok=false 并继续到步骤8，禁止反复重试浪费 token
 
 ---
 

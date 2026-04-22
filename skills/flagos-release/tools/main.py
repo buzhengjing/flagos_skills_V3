@@ -135,6 +135,11 @@ def main():
         help="只生成 README，不执行其他发布步骤"
     )
     parser.add_argument(
+        "--only-harbor",
+        action="store_true",
+        help="只执行 Harbor 推送（commit→tag→push），跳过 README/ModelScope/HuggingFace"
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="干运行模式，只打印配置不实际执行"
@@ -168,6 +173,12 @@ def main():
         config.stages_to_run = ["publish"]
         config.publish.tag_image = False
         config.publish.push_harbor = False
+        config.publish.publish_modelscope = False
+        config.publish.publish_huggingface = False
+
+    if args.only_harbor:
+        config.stages_to_run = ["publish"]
+        config.publish.generate_readme = False
         config.publish.publish_modelscope = False
         config.publish.publish_huggingface = False
 
