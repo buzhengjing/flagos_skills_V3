@@ -109,32 +109,48 @@ optimization:
 
 纯 vllm 原生环境，无 FlagGems，**不进入算子优化流程**。
 
-## env_type = vllm_flaggems（代码级算子控制）
+## env_type = vllm_flaggems（环境变量驱动算子控制）
+
+环境检测阶段已自动注入环境变量驱动代码，后续算子控制通过修改控制文件 + 环境变量实现，不再修改源码。
 
 - **算子列表来源**：`environment.flaggems_txt_path` 指向的 txt 文件（由 `flag_gems.enable()` 生成）
-- **优化方式**：通过 `toggle_flaggems.py --action modify-enable` 脚本化修改代码中的 `flag_gems.enable()` 调用
-- **自动选择修改策略**（按 capabilities 降级）：
-  1. `only_enable` → 改写为 `flag_gems.only_enable(include=[启用算子列表])`
-  2. `enable_unused` → 改写为 `flag_gems.enable(unused=[禁用算子列表])`
-  3. 兜底 → 直接写 txt 文件
+- **控制机制**：
+  - `USE_FLAGGEMS`：控制 FlagGems 开关（`1`=开启，`0`=关闭）
+  - `FLAGGEMS_CONTROL_MODE`：控制算子分支模式
+    - `only_enable`：白名单模式，从控制文件读取 `include` 列表
+    - `unused`：黑名单模式，从控制文件读取 `unused` 列表
+  - `/root/flaggems_ops_control.json`：算子控制配置文件
+- **优化方式**：通过 `toggle_flaggems.py --action modify-enable` 写入控制文件（已注入场景）或修改源码（未注入兜底）
+
+**控制文件格式**：
+```json
+// only_enable 模式（白名单）
+{"include": ["addmm", "bmm", "mm", "softmax"]}
+
+// unused 模式（黑名单）
+{"unused": ["softmax", "layer_norm"]}
+
+// 全量开启
+{"unused": [], "include": []}
+```
 
 **搜索循环**：
 ```
-modify-enable(调整算子) → 重启服务 → benchmark → 读取 txt 确认生效算子 → 判断是否达标
+写控制文件(调整算子) → 重启服务 → benchmark → 读取 txt 确认生效算子 → 判断是否达标
 ```
 
 **脚本调用示例**：
 ```bash
-# 只启用指定算子
+# 只启用指定算子（写入控制文件 include 列表）
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
     --action modify-enable --enabled-ops 'addmm,mm,bmm,softmax' --json"
 
-# 禁用指定算子
+# 禁用指定算子（写入控制文件 unused 列表）
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py \
     --action modify-enable --disabled-ops 'softmax,layer_norm' --json"
 ```
 
-**`operator_search.py` 集成**：`_apply_non_plugin_config` 可直接调用 `toggle_flaggems.py --action modify-enable`，无需 Claude 编排层手动修改代码。
+**`operator_search.py` 集成**：`_apply_non_plugin_config` 检测到已注入代码后，直接调用 `_apply_via_control_file()` 写控制文件 + 设环境变量，无需修改源码。未注入时降级为 Layer 1-4 策略。
 
 ## env_type = vllm_plugin_flaggems（环境变量算子控制）
 
@@ -949,3 +965,40 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 2. **恢复搜索**：下次调用 `next` 自动从上次位置继续
 3. **回退到可用配置**：应用 `operator_config.json` 中 `enabled_ops` 的上一个快照
 4. **dispatch 层回退**：从 `.bak` 备份文件还原
+
+---
+
+## 编排层指令（步骤7 性能算子调优 — 固化决策）
+
+**触发条件**：`workflow.performance_ok = false` 且 `env_type ≠ native`
+**跳过条件**：`performance_ok = true`（不触发时显示已完成）
+
+固化选择：
+- 搜索策略：`--search-strategy elimination`（逐删，不使用 group/linear）
+- 必须通过 `operator_search.py run` 一次性执行完整自动循环，禁止手动拼凑 toggle→restart→benchmark 循环
+- V3 验证 benchmark 使用 `--strategy quick`，output-name 为 `flagos_optimized`
+- 达标即停，不继续优化
+
+执行顺序（固定）：
+1. `operator_optimizer.py discover` → 发现算子列表
+2. 收集 FlagGems 注册算子列表 → `registered_ops.json`
+3. `operator_optimizer.py init --search-strategy elimination --target-ratio 0.8`
+4. `operator_search.py run`（容器内全自动循环）
+5. 搜索完成 → `benchmark_runner.py --strategy quick --output-name flagos_optimized`
+6. `performance_compare.py` 对比 V3/V1（含 `--flagos-initial` 和 `--flagos-optimized`）
+7. V3/V1 ratio ≥ 80% → `performance_ok=true`；否则 `performance_ok=false`
+
+执行后必须完成：
+- 更新 `context.yaml` 的 `optimization` 和 `operator_replacement` 字段
+- 写入 `traces/07_performance_tuning.json`
+- 保存算子列表：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
+
+### 步骤7完成后：算子配置固化
+
+**强制执行**：无论是否触发了步骤5/7，只要 `env_type` 不是 `native`，都必须执行：
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/persist_op_config.py --auto --verify"
+```
+
+`--verify` 会重启服务检查运行时算子数量是否与预期一致。验证失败时标记 `workflow.config_persisted=false`，继续发布但标记为私有。

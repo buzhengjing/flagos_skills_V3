@@ -119,7 +119,7 @@ python main.py --from-context /flagos-workspace/shared/context.yaml --only-readm
 - `service.port/max_model_len` + `runtime.tp_size` → 服务启动命令
 - `gpu.vendor` → 芯片厂商（自动检测填充）
 - `eval.v1_score/v2_score` → 评测结果（填入 README）
-- `image.tag` → 已有镜像地址（有则跳过 commit/tag/push）
+- `image.registry_url` → 已发布的 Harbor 镜像地址（有则跳过 commit/tag/push）
 
 ## 阶段详情
 
@@ -249,3 +249,77 @@ output/
 | 镜像 tag 生成异常 | 使用 `--dry-run` 检查自动生成的配置 |
 | 已有 Harbor 镜像 | 配置 `publish.existing_harbor_image` 跳过 commit/tag/push |
 | 权重文件过大 | 上传自动重试（5 次，指数退避） |
+
+---
+
+## 编排层指令（步骤8 自动发布 — 固化决策）
+
+### 调用方式
+
+发布步骤通过宿主机工具统一执行，**禁止手动拼 docker commit/tag/push 命令**：
+
+```bash
+# 宿主机执行（不是 docker exec），先同步 context 到宿主机再调用
+MOUNT_MODE=$(docker exec <container> cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+    cp /data/flagos-workspace/<model>/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+else
+    docker cp <container>:/flagos-workspace/shared/context.yaml /data/flagos-workspace/<model>/config/context_snapshot.yaml
+fi
+python3 skills/flagos-release/tools/main.py --from-context /data/flagos-workspace/<model>/config/context_snapshot.yaml
+```
+
+**执行路径强制规则**：release 脚本**必须从项目目录执行**（`python3 skills/flagos-release/tools/main.py`），**严禁**复制到 `/tmp` 或其他临时目录后执行。
+
+### 编排层后续操作
+
+工具执行完成后，编排层仍需完成：
+- 写入 `traces/08_release.json`（记录工具输出、发布 URL、耗时）
+- 更新容器内 context.yaml 的 `image`、`release` 字段和 `workflow_ledger`
+- 更新 `timing.steps.release`
+
+### 容器产出同步到宿主机
+
+步骤8完成后，根据 `workspace.mount_mode` 决定同步策略（读取容器内 `/flagos-workspace/.mount_mode`）：
+
+| mount_mode | 同步策略 |
+|------------|---------|
+| `mounted` / `symlink` | 无需 docker cp，只需同步 context_snapshot |
+| `internal` | 必须 docker cp 回传 results/traces/logs |
+
+```bash
+CONTAINER=<container_name>
+HOST_BASE=/data/flagos-workspace/<model>
+MOUNT_MODE=$(docker exec ${CONTAINER} cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+
+if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+    cp ${HOST_BASE}/shared/context.yaml ${HOST_BASE}/config/context_snapshot.yaml
+else
+    for dir in results traces logs; do
+        docker cp ${CONTAINER}:/flagos-workspace/${dir}/. ${HOST_BASE}/${dir}/
+    done
+    docker cp ${CONTAINER}:/flagos-workspace/shared/context.yaml ${HOST_BASE}/config/context_snapshot.yaml
+fi
+```
+
+**禁止回传到项目源码目录**。`docker cp` 目标必须是 `/data/flagos-workspace/<model>/` 下的子目录。
+
+### 报告生成
+
+每个步骤完成后调用 `generate_report.py` 生成/更新报告：
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
+  --output /flagos-workspace/results/report.md"
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py \
+  --json --output /flagos-workspace/results/report.json"
+```
+
+### 交付物清单
+
+- `results/` — 性能/精度结果文件
+- `results/report.md` — 迁移报告
+- `results/report.json` — 迁移报告 JSON 格式
+- `traces/` — 全流程执行留痕
+- `logs/` — 运行日志（含 `pipeline.log`）
+- `config/context_snapshot.yaml` — 流程结束时的完整 context 快照

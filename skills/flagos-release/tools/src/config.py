@@ -173,7 +173,14 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     config.publish.push_harbor = True
     # 从 workflow.qualified 判定发布可见性：qualified=true → 公开，否则私有
     workflow = ctx.get('workflow', {})
-    config.publish.private = not workflow.get('qualified', False)
+    qualified = workflow.get('qualified', False)
+    if not qualified:
+        svc_ok = workflow.get('service_ok', False)
+        acc_ok = workflow.get('accuracy_ok', False)
+        perf_ok = workflow.get('performance_ok', False)
+        if svc_ok and acc_ok and perf_ok:
+            qualified = True
+    config.publish.private = not qualified
     config.config_persisted = workflow.get('config_persisted', False)
     config.publish.upload_weights = True
     # 优先用 local_path（宿主机路径），其次 container_path（容器内路径）
@@ -183,19 +190,12 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     config.publish.publish_modelscope = False
     config.publish.publish_huggingface = False
 
-    # 如果 context 中已有完整的 Harbor 镜像地址，跳过 commit/tag/push
-    # 优先使用 release.image_tag（完整 URL），其次 image.tag（仅当它是完整 URL 时）
-    release = ctx.get('release', {})
-    existing_tag = release.get('image_tag', '')
-    if not existing_tag or '/' not in existing_tag:
-        image = ctx.get('image', {})
-        candidate = str(image.get('tag', ''))
-        if candidate and '/' in candidate:
-            existing_tag = candidate
-        else:
-            existing_tag = ''
-    if existing_tag:
-        config.publish.existing_harbor_image = existing_tag
+    # 如果 context 中已有已发布的 Harbor 镜像地址，跳过 commit/tag/push
+    # 只读 image.registry_url（步骤8成功后写入），不读 image.tag（源镜像信息）
+    image_section = ctx.get('image', {})
+    existing_registry_url = str(image_section.get('registry_url', ''))
+    if existing_registry_url and '/' in existing_registry_url:
+        config.publish.existing_harbor_image = existing_registry_url
 
     # token 从宿主机环境变量读取，若不存在则尝试从容器内获取
     config.publish.modelscope_token = os.environ.get('MODELSCOPE_TOKEN', '')

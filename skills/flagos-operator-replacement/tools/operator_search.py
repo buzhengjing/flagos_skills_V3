@@ -104,12 +104,18 @@ def _parse_gpu_memory() -> List[Dict[str, float]]:
 
 
 def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
-                            threshold: float = GPU_MEM_FREE_THRESHOLD) -> bool:
+                            threshold: float = GPU_MEM_FREE_THRESHOLD,
+                            required_free: int = 1) -> bool:
     """
     等待 GPU 显存释放。pkill 后进程退出需要时间释放显存。
-    返回 True 表示至少有 1 张 GPU 显存已释放，False 表示超时。
+    返回 True 表示至少有 required_free 张 GPU 显存已释放，False 表示超时。
+
+    Args:
+        timeout: 最大等待时间（秒）
+        threshold: 空闲比例阈值（默认 0.95）
+        required_free: 需要的空闲 GPU 数量（默认 1）
     """
-    print(f"  等待 GPU 显存释放 (最多 {timeout}s)...")
+    print(f"  等待 GPU 显存释放 (最多 {timeout}s, 需要 {required_free} 张)...")
     elapsed = 0
     while elapsed < timeout:
         gpus = _parse_gpu_memory()
@@ -117,8 +123,8 @@ def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
             print("  WARNING: 无法读取 GPU 信息，跳过显存检查")
             return True
         free_gpus = [g for g in gpus if g["free_ratio"] >= threshold]
-        if free_gpus:
-            print(f"  ✓ {len(free_gpus)} 张 GPU 显存已释放 "
+        if len(free_gpus) >= required_free:
+            print(f"  ✓ {len(free_gpus)} 张 GPU 显存已释放 (需要 {required_free} 张) "
                   f"(如 GPU {free_gpus[0]['index']}: {free_gpus[0]['used_mib']:.0f}/{free_gpus[0]['total_mib']:.0f} MiB)")
             return True
         time.sleep(GPU_RELEASE_POLL_INTERVAL)
@@ -282,37 +288,104 @@ def _detect_flaggems_capabilities() -> List[str]:
     return caps
 
 
+OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
+FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
+
+
+def _apply_via_control_file(test_enabled: List[str], test_disabled: List[str],
+                             control_mode: str) -> bool:
+    """已注入场景：写控制文件 + 设置环境变量，不改源码"""
+    data = {}
+    if control_mode == "only_enable":
+        data["include"] = sorted(test_enabled)
+        os.environ["FLAGGEMS_CONTROL_MODE"] = "only_enable"
+    else:
+        data["unused"] = sorted(test_disabled)
+        os.environ["FLAGGEMS_CONTROL_MODE"] = "unused"
+
+    save_json(data, OPS_CONTROL_FILE)
+    print(f"  [env_control] mode={control_mode}, 控制文件: {OPS_CONTROL_FILE}")
+    if control_mode == "only_enable":
+        print(f"    include: {len(test_enabled)} 个算子")
+    else:
+        print(f"    unused: {len(test_disabled)} 个算子")
+    return True
+
+
+def _is_code_injected() -> bool:
+    """检查源码是否已注入环境变量驱动代码"""
+    try:
+        from toggle_flaggems import find_model_runner_files
+        files = find_model_runner_files()
+        for f in files:
+            try:
+                content = Path(f).read_text(encoding="utf-8", errors="ignore")
+                if FLAGGEMS_INJECT_MARKER in content:
+                    return True
+            except Exception:
+                continue
+    except ImportError:
+        pass
+    return False
+
+
 def _apply_non_plugin_config(action: Dict[str, Any],
                               capabilities: Optional[List[str]],
                               gems_txt_path: Optional[str],
                               all_ops: Optional[List[str]] = None,
                               registered_ops: Optional[List[str]] = None) -> bool:
-    """非 plugin 场景：Layer 1-4 分层降级"""
+    """非 plugin 场景：优先使用环境变量驱动（已注入），否则 Layer 1-4 分层降级"""
     test_enabled = action.get("test_enabled_ops", [])
     test_disabled = action.get("test_disabled_ops", [])
 
-    # 始终自动探测 capabilities，忽略外部传入（避免传错导致 Layer 降级失败）
+    # 已注入环境变量驱动代码 → 只写控制文件
+    if _is_code_injected():
+        # 有禁用算子 → only_enable（白名单）；全开 → unused
+        if test_disabled:
+            return _apply_via_control_file(test_enabled, test_disabled, "only_enable")
+        return _apply_via_control_file(test_enabled, test_disabled, "unused")
+
+    # 未注入 → 原有 Layer 1-4 降级逻辑
     caps = _detect_flaggems_capabilities()
     if caps:
         print(f"  [auto-detect] FlagGems capabilities: {caps}")
     if capabilities and set(capabilities) != set(caps):
         print(f"  [auto-detect] 忽略外部传入 capabilities={capabilities}，以自动探测为准")
 
-    # 用注册表（而非 oplist）计算完整禁用列表，确保不在 oplist 中的算子也被显式关闭
     base_ops = registered_ops or all_ops
     if base_ops:
         full_disabled = sorted(set(base_ops) - set(test_enabled))
     else:
         full_disabled = test_disabled
 
+    # 读取环境变量决定控制模式
+    # 规则：有禁用算子 → only_enable（白名单）；全开 → unused
+    control_mode = os.environ.get("FLAGGEMS_CONTROL_MODE", "")
+    if not control_mode:
+        if test_disabled and "only_enable" in caps:
+            control_mode = "only_enable"
+        elif not test_disabled and "enable_unused" in caps:
+            control_mode = "unused"
+        elif "only_enable" in caps:
+            control_mode = "only_enable"
+        elif "enable_unused" in caps:
+            control_mode = "unused"
+
+    # only_enable 模式
+    if control_mode == "only_enable" and "only_enable" in caps:
+        if test_enabled:
+            if "yaml_config" in caps:
+                _apply_yaml_exclude(full_disabled)
+            return _apply_only_enable(test_enabled)
+        elif "enable_unused" in caps:
+            return _apply_enable_unused(full_disabled)
+
+    # unused 模式 / 降级链
     if "yaml_config" in caps:
         return _apply_yaml_exclude(full_disabled)
-    elif "only_enable" in caps:
-        return _apply_only_enable(test_enabled)
     elif "enable_unused" in caps:
         return _apply_enable_unused(full_disabled)
     else:
-        # Layer 4 兜底：写 txt 文件
         return _apply_txt_fallback(test_enabled, gems_txt_path)
 
 
@@ -394,13 +467,13 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     run_cmd(stop_cmd, check=False)
     time.sleep(3)
 
-    # 等待 GPU 显存释放
-    if not wait_gpu_memory_release():
+    # 等待 GPU 显存释放（需要所有服务使用的 GPU 都释放）
+    required_gpus = _read_gpu_count()
+    if not wait_gpu_memory_release(required_free=required_gpus):
         print("  WARNING: GPU 显存未完全释放，尝试强制清理...")
-        # 二次 pkill + 等待
         run_cmd("pkill -9 -f 'vllm\\|sglang' 2>/dev/null", check=False)
         time.sleep(5)
-        if not wait_gpu_memory_release(timeout=15):
+        if not wait_gpu_memory_release(timeout=15, required_free=required_gpus):
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
     # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
@@ -618,6 +691,26 @@ def _read_service_port() -> Optional[int]:
         return None
 
 
+def _read_gpu_count() -> int:
+    """从 context.yaml 读取 GPU 数量，fallback 到 nvidia-smi 探测"""
+    try:
+        import yaml
+        with open("/flagos-workspace/shared/context.yaml", "r") as f:
+            ctx = yaml.safe_load(f) or {}
+        gpu_count = ctx.get("gpu", {}).get("count")
+        if gpu_count:
+            return int(gpu_count)
+    except Exception:
+        pass
+    try:
+        gpus = _parse_gpu_memory()
+        if gpus:
+            return len(gpus)
+    except Exception:
+        pass
+    return 1
+
+
 def run_search_step(state_path: str, perf_config: str,
                     service_startup_cmd: str,
                     gems_txt_path: Optional[str] = None,
@@ -798,17 +891,18 @@ def run_full_search(state_path: str, perf_config: str,
         print(f"{'=' * 60}")
 
         # 每轮开始前检查 GPU 可用性
-        gpu_check = check_gpu_availability(required_gpus=1)
+        required_gpus = _read_gpu_count()
+        gpu_check = check_gpu_availability(required_gpus=required_gpus)
         if not gpu_check["available"]:
             print(f"  ⚠ GPU 不足: {gpu_check['message']}，等待 10s 后重试...")
             time.sleep(10)
-            gpu_check = check_gpu_availability(required_gpus=1)
+            gpu_check = check_gpu_availability(required_gpus=required_gpus)
             if not gpu_check["available"]:
                 # 尝试清理残留进程
                 print("  尝试清理残留推理进程...")
                 run_cmd("pkill -9 -f 'vllm\\|sglang' 2>/dev/null", check=False)
                 time.sleep(10)
-                gpu_check = check_gpu_availability(required_gpus=1)
+                gpu_check = check_gpu_availability(required_gpus=required_gpus)
                 if not gpu_check["available"]:
                     print(f"  FATAL: GPU 资源不可用 ({gpu_check['message']})，搜索中止")
                     search_log.append({

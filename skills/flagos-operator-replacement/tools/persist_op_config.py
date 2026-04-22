@@ -85,10 +85,12 @@ def read_runtime_oplist():
                     ops = [l.strip() for l in f if l.strip()]
                 if ops:
                     print(f"  运行时算子列表: {path} ({len(ops)} 个)")
-                    return ops, path
+                else:
+                    print(f"  运行时算子列表: {path} (空文件，全部算子已禁用)")
+                return ops, path
             except Exception:
                 continue
-    return [], None
+    return None, None
 
 
 def get_disabled_ops_from_config():
@@ -129,8 +131,114 @@ def get_excluded_ops_from_context():
 # 非 Plugin 场景：修改源码
 # =========================================================================
 
+OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
+FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
+
+
+def _is_code_injected():
+    """检查源码是否已注入环境变量驱动代码"""
+    try:
+        from toggle_flaggems import find_model_runner_files
+    except ImportError:
+        sys.path.insert(0, "/flagos-workspace/scripts")
+        from toggle_flaggems import find_model_runner_files
+    files = find_model_runner_files()
+    for f in files:
+        try:
+            content = Path(f).read_text(encoding='utf-8', errors='ignore')
+            if FLAGGEMS_INJECT_MARKER in content:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _persist_control_file_and_env(disabled_ops, enabled_ops):
+    """已注入场景：持久化控制文件和环境变量"""
+    print("\n[环境变量驱动固化] 持久化控制文件和环境变量...")
+
+    # 确定 control_mode：有禁用算子 → only_enable（白名单）；全开 → unused
+    if disabled_ops:
+        control_mode = "only_enable"
+        data = {"include": sorted(enabled_ops) if enabled_ops else []}
+    else:
+        control_mode = "unused"
+        data = {"unused": []}
+
+    # 写入控制文件
+    Path(OPS_CONTROL_FILE).parent.mkdir(parents=True, exist_ok=True)
+    with open(OPS_CONTROL_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"  ✓ 控制文件: {OPS_CONTROL_FILE} (mode={control_mode})")
+
+    # 持久化环境变量到 /etc/environment + /root/.bashrc
+    env_vars = {
+        "USE_FLAGGEMS": "1",
+        "FLAGGEMS_CONTROL_MODE": control_mode,
+    }
+    if disabled_ops:
+        env_vars["VLLM_FL_FLAGOS_BLACKLIST"] = ",".join(sorted(disabled_ops))
+    env_files = []
+
+    try:
+        existing = ""
+        if os.path.isfile(ETC_ENVIRONMENT):
+            with open(ETC_ENVIRONMENT, 'r', encoding='utf-8') as f:
+                existing = f.read()
+        lines = [l for l in existing.split('\n')
+                 if not any(l.startswith(k + "=") for k in env_vars)]
+        for k, v in env_vars.items():
+            lines.append(f"{k}={v}")
+        with open(ETC_ENVIRONMENT, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(l for l in lines if l is not None) + '\n')
+        env_files.append(ETC_ENVIRONMENT)
+        print(f"  ✓ {ETC_ENVIRONMENT} 已更新")
+    except Exception as e:
+        print(f"  WARN: 写入 {ETC_ENVIRONMENT} 失败: {e}")
+
+    try:
+        existing = ""
+        if os.path.isfile(BASHRC):
+            with open(BASHRC, 'r', encoding='utf-8') as f:
+                existing = f.read()
+        if FLAGGEMS_BASHRC_MARKER in existing:
+            pattern = re.compile(
+                re.escape(FLAGGEMS_BASHRC_MARKER) + r".*?" + re.escape(FLAGGEMS_BASHRC_END),
+                re.DOTALL
+            )
+            existing = pattern.sub("", existing).strip()
+        block = f"\n{FLAGGEMS_BASHRC_MARKER}\n"
+        for k, v in env_vars.items():
+            block += f"export {k}={v}\n"
+        block += f"{FLAGGEMS_BASHRC_END}\n"
+        with open(BASHRC, 'w', encoding='utf-8') as f:
+            f.write(existing + block)
+        env_files.append(BASHRC)
+        print(f"  ✓ {BASHRC} 已更新")
+    except Exception as e:
+        print(f"  WARN: 写入 {BASHRC} 失败: {e}")
+
+    yaml_path = _persist_yaml_config(disabled_ops) if disabled_ops else None
+
+    return {
+        "success": len(env_files) > 0,
+        "method": "env_control_persist",
+        "control_mode": control_mode,
+        "control_file": OPS_CONTROL_FILE,
+        "env_vars": env_vars,
+        "env_files": env_files,
+        "yaml_config": yaml_path,
+    }
+
+
 def persist_source_code(disabled_ops, enabled_ops):
-    """修改源码中 flag_gems.enable() 调用"""
+    """固化算子配置到源码（或环境变量驱动模式）"""
+
+    # 已注入环境变量驱动代码 → 持久化控制文件和环境变量
+    if _is_code_injected():
+        return _persist_control_file_and_env(disabled_ops, enabled_ops)
+
+    # 未注入 → 原有源码修改逻辑
     print("\n[源码固化] 修改 flag_gems.enable() 调用...")
 
     try:
@@ -162,7 +270,7 @@ def persist_source_code(disabled_ops, enabled_ops):
     result = modify_enable_call(
         files,
         enabled_ops=enabled_ops if enabled_ops else None,
-        disabled_ops=disabled_ops if disabled_ops else None,
+        disabled_ops=disabled_ops,
     )
 
     modified_files = []
@@ -439,19 +547,18 @@ def run_persist(env_type=None, disabled_ops_override=None, do_verify=False):
         disabled_ops = config_info.get("disabled", [])
 
     # 确定启用算子列表
-    if runtime_ops:
+    if runtime_ops is not None:
         enabled_ops = runtime_ops
     else:
         enabled_ops = config_info.get("enabled", []) or config_info.get("runtime_enabled", [])
 
-    # 如果没有禁用算子且有运行时算子列表，说明全量算子已达标，无需修改源码
+    # 全关场景：有禁用算子但无启用算子 → 显式设置 enabled_ops = []
+    if disabled_ops and not enabled_ops:
+        enabled_ops = []
+
+    # 如果没有禁用算子且有运行时算子列表，全量算子已达标，仍需固化 enable(unused=[]) 到源码
     if not disabled_ops and enabled_ops:
-        print("  无禁用算子，全量算子已达标，记录当前状态")
-        persist_result = {"success": True, "method": "no_change_needed"}
-        record = write_record(env_type, persist_result, enabled_ops, disabled_ops, verified=True,
-                              runtime_count=len(enabled_ops))
-        print(json.dumps({"success": True, "no_change": True, "enabled_count": len(enabled_ops)}, indent=2))
-        return True
+        print("  无禁用算子，全量算子已达标，固化 enable(unused=[]) 到源码")
 
     expected_count = config_info.get("runtime_enabled_count") or (len(enabled_ops) if enabled_ops else None)
 

@@ -400,3 +400,21 @@ ISSUE_EOF"
   - `traces/06_quick_performance.json`（V1/V2 性能测试 + 对比）
   - `traces/07_performance_tuning.json`（算子优化记录，仅触发步骤7时）
 - `timing.steps.quick_performance` 已更新为本步骤的 `duration_seconds`
+
+---
+
+## 编排层指令（步骤6 性能评测 — 固化决策）
+
+**前置条件**：步骤4（及5如触发）已完成，当前算子集为精度对齐后的最终集合。
+
+固化选择：
+- 主流程步骤6使用 `--strategy quick`（4k_input_1k_output 并发 64 单数据点）
+- 性能对比必须通过 `performance_compare.py` 执行，禁止手动计算 ratio
+- output-name 标准命名：V1=`native_performance`，V2=`flagos_performance`
+
+执行顺序（固定）：
+1. 关闭 flaggems → 启动服务 → benchmark V1 → 停服务
+2. 开启 flaggems → 启动服务 → benchmark V2（使用精度调优后的算子集）
+3. `performance_compare.py` 对比，ratio ≥ 80%?
+   - 达标 → `workflow.performance_ok=true`，进入步骤8
+   - 不达标 → 必须按顺序：① 标记 `performance_ok=false` ② issue_reporter.py --type performance-degraded ③ 追加 `logs/issues_performance.log` → 触发步骤7

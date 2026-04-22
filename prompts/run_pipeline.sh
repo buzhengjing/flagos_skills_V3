@@ -581,7 +581,8 @@ ${SEG2_CTX_SUMMARY}
 **执行前**：
 1. 读取容器内 /flagos-workspace/shared/context.yaml 获取模型路径、GPU 配置、FlagGems 状态等关键参数
 2. 读取 skills/flagos-eval-comprehensive/SKILL.md 了解精度评测工具用法
-3. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法（仅在步骤5/7需要时读取）
+3. 读取 skills/flagos-performance-testing/SKILL.md 了解性能评测工具用法
+4. 读取 skills/flagos-operator-replacement/SKILL.md 了解算子调优工具用法（仅在步骤5/7需要时读取）
 
 **算子调优**：
 - 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）

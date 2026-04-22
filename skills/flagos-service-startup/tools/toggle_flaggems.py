@@ -121,14 +121,17 @@ def get_file_status(filepath):
     commented_lines = []
 
     for i, line in enumerate(lines, 1):
-        for pat in FLAGGEMS_PATTERNS:
-            if pat.match(line):
-                active_lines.append({"line": i, "content": line.strip()})
-                break
+        matched = False
         for pat in COMMENTED_PATTERNS:
             if pat.match(line):
                 commented_lines.append({"line": i, "content": line.strip()})
+                matched = True
                 break
+        if not matched:
+            for pat in FLAGGEMS_PATTERNS:
+                if pat.match(line):
+                    active_lines.append({"line": i, "content": line.strip()})
+                    break
 
     status = "unknown"
     if active_lines and not commented_lines:
@@ -357,13 +360,147 @@ def find_gems_txt_files():
     }
 
 
+OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
+FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
+
+
+def _write_ops_control_file(enabled_ops=None, disabled_ops=None):
+    """写入算子控制文件，配合注入的环境变量分支代码使用"""
+    data = {}
+    if enabled_ops is not None:
+        data["include"] = sorted(enabled_ops)
+    if disabled_ops is not None:
+        data["unused"] = sorted(disabled_ops)
+    with open(OPS_CONTROL_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"  ✓ 算子控制文件已写入: {OPS_CONTROL_FILE}")
+    return True
+
+
+ETC_ENVIRONMENT = "/etc/environment"
+BASHRC = "/root/.bashrc"
+FLAGGEMS_BASHRC_MARKER = "# === FlagGems 算子配置（自动生成，勿手动修改）==="
+FLAGGEMS_BASHRC_END = "# === FlagGems 算子配置结束 ==="
+
+
+def _persist_env_vars(env_vars):
+    """持久化环境变量到 /etc/environment + /root/.bashrc"""
+    # 同步到当前进程
+    for k, v in env_vars.items():
+        os.environ[k] = v
+
+    # /etc/environment
+    try:
+        existing = ""
+        if os.path.isfile(ETC_ENVIRONMENT):
+            with open(ETC_ENVIRONMENT, 'r', encoding='utf-8') as f:
+                existing = f.read()
+        lines = [l for l in existing.split('\n')
+                 if not any(l.startswith(k + "=") for k in env_vars)]
+        for k, v in env_vars.items():
+            lines.append(f"{k}={v}")
+        with open(ETC_ENVIRONMENT, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(l for l in lines if l is not None) + '\n')
+        print(f"  ✓ {ETC_ENVIRONMENT} 已更新")
+    except Exception as e:
+        print(f"  WARN: 写入 {ETC_ENVIRONMENT} 失败: {e}")
+
+    # /root/.bashrc
+    try:
+        existing = ""
+        if os.path.isfile(BASHRC):
+            with open(BASHRC, 'r', encoding='utf-8') as f:
+                existing = f.read()
+        if FLAGGEMS_BASHRC_MARKER in existing:
+            pattern = re.compile(
+                re.escape(FLAGGEMS_BASHRC_MARKER) + r".*?" + re.escape(FLAGGEMS_BASHRC_END),
+                re.DOTALL
+            )
+            existing = pattern.sub("", existing).strip()
+        block = f"\n{FLAGGEMS_BASHRC_MARKER}\n"
+        for k, v in env_vars.items():
+            block += f"export {k}={v}\n"
+        block += f"{FLAGGEMS_BASHRC_END}\n"
+        with open(BASHRC, 'w', encoding='utf-8') as f:
+            f.write(existing + block)
+        print(f"  ✓ {BASHRC} 已更新")
+    except Exception as e:
+        print(f"  WARN: 写入 {BASHRC} 失败: {e}")
+
+
+def _compute_enabled_from_disabled(disabled_ops):
+    """从 disabled_ops 反推 enabled_ops（需要全量算子列表）"""
+    all_ops = None
+    candidates = ["/tmp/flaggems_enable_oplist.txt", "/root/gems.txt", "/tmp/gems.txt"]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    ops = [l.strip() for l in f if l.strip()]
+                if ops:
+                    all_ops = ops
+                    break
+            except Exception:
+                continue
+    if not all_ops:
+        try:
+            import flag_gems
+            if hasattr(flag_gems, "all_registered_ops"):
+                all_ops = list(flag_gems.all_registered_ops())
+            elif hasattr(flag_gems, "all_ops"):
+                all_ops = list(flag_gems.all_ops())
+        except Exception:
+            pass
+    if not all_ops:
+        return None
+    return sorted(set(all_ops) - set(disabled_ops))
+
+
+def _replace_enable_call_balanced(content, replacement):
+    """使用括号平衡匹配替换 flag_gems.enable() 调用
+
+    处理嵌套括号场景，如 flag_gems.enable(unused=get_list())
+    """
+    pattern = r"flag_gems\.(?:only_)?enable\s*\("
+    result = []
+    pos = 0
+    count = 0
+
+    for match in re.finditer(pattern, content):
+        result.append(content[pos:match.start()])
+
+        # 从左括号开始计数，找到匹配的右括号
+        start = match.end()
+        depth = 1
+        i = start
+        while i < len(content) and depth > 0:
+            if content[i] == '(':
+                depth += 1
+            elif content[i] == ')':
+                depth -= 1
+            i += 1
+
+        if depth == 0:
+            # 找到匹配的右括号，替换整个调用
+            result.append(replacement)
+            pos = i
+            count += 1
+        else:
+            # 未找到匹配（不应该发生），保留原文
+            result.append(content[match.start():start])
+            pos = start
+
+    result.append(content[pos:])
+    return ''.join(result), count
+
+
 def modify_enable_call(files, enabled_ops=None, disabled_ops=None):
     """修改 flag_gems.enable() 调用以控制算子子集（算子优化用）
 
-    根据 flaggems capabilities 自动选择修改方式：
-    - only_enable → flag_gems.only_enable(include=[...])
-    - enable_unused → flag_gems.enable(unused=[...])
-    - 兜底 → 直接写 txt 文件
+    如果源码已注入环境变量驱动代码（含 FLAGGEMS_CONTROL_MODE），
+    只写控制文件 + 设置环境变量，不再修改源码。
+
+    未注入时保留原有正则替换逻辑（兼容）。
     """
     # 探测 capabilities
     caps = []
@@ -390,46 +527,89 @@ def modify_enable_call(files, enabled_ops=None, disabled_ops=None):
             results.append({"file": filepath, "success": False, "error": str(e)})
             continue
 
+        # 已注入环境变量驱动代码 → 只写控制文件 + 设环境变量，不改源码
+        if FLAGGEMS_INJECT_MARKER in content:
+            # 有禁用算子 → only_enable（白名单）；全开 → unused
+            if disabled_ops and enabled_ops is not None and len(enabled_ops) > 0:
+                control_mode = "only_enable"
+                _write_ops_control_file(enabled_ops=enabled_ops, disabled_ops=None)
+            else:
+                control_mode = "unused"
+                _write_ops_control_file(enabled_ops=None, disabled_ops=disabled_ops if disabled_ops is not None else [])
+            os.environ["FLAGGEMS_CONTROL_MODE"] = control_mode
+            results.append({
+                "file": filepath,
+                "method": f"env_control({control_mode})",
+                "success": True,
+            })
+            continue
+
+        # 未注入 → 保留正则替换逻辑（兼容）
         original = content
         modified = False
         method = "unknown"
 
-        if enabled_ops is not None and "only_enable" in caps:
-            # 改写为 flag_gems.only_enable(include=[...])
-            ops_str = ", ".join(f'"{op}"' for op in sorted(enabled_ops))
+        # 读取环境变量决定控制模式
+        # 规则：有禁用算子 → only_enable（白名单）；全开 → unused
+        control_mode = os.environ.get("FLAGGEMS_CONTROL_MODE", "")
+        if not control_mode:
+            if disabled_ops and "only_enable" in caps:
+                control_mode = "only_enable"
+            elif not disabled_ops and "enable_unused" in caps:
+                control_mode = "unused"
+            elif "only_enable" in caps:
+                control_mode = "only_enable"
+            elif "enable_unused" in caps:
+                control_mode = "unused"
+
+        # 分支1: unused 模式
+        if control_mode == "unused" and "enable_unused" in caps:
+            if disabled_ops is not None:
+                ops_str = ", ".join(f'"{op}"' for op in sorted(disabled_ops))
+            else:
+                ops_str = ""
             content, count = re.subn(
                 r"flag_gems\.(?:only_)?enable\s*\([^)]*\)",
-                f"flag_gems.only_enable(include=[{ops_str}])",
-                content
-            )
-            if count == 0:
-                # 尝试匹配多行
-                content, count = re.subn(
-                    r"flag_gems\.(?:only_)?enable\s*\(.*?\)",
-                    f"flag_gems.only_enable(include=[{ops_str}])",
-                    content,
-                    flags=re.DOTALL
-                )
-            modified = count > 0
-            method = "only_enable"
-
-        elif disabled_ops is not None and "enable_unused" in caps:
-            # 改写为 flag_gems.enable(unused=[...])
-            ops_str = ", ".join(f'"{op}"' for op in sorted(disabled_ops))
-            content, count = re.subn(
-                r"flag_gems\.enable\s*\([^)]*\)",
                 f"flag_gems.enable(unused=[{ops_str}])",
                 content
             )
             if count == 0:
-                content, count = re.subn(
-                    r"flag_gems\.enable\s*\(.*?\)",
-                    f"flag_gems.enable(unused=[{ops_str}])",
-                    content,
-                    flags=re.DOTALL
-                )
+                content, count = _replace_enable_call_balanced(
+                    content, f"flag_gems.enable(unused=[{ops_str}])")
             modified = count > 0
             method = "enable_unused"
+
+        # 分支2: only_enable 模式
+        elif control_mode == "only_enable" and "only_enable" in caps:
+            if enabled_ops is None and disabled_ops is not None:
+                enabled_ops = _compute_enabled_from_disabled(disabled_ops)
+            if enabled_ops is not None and len(enabled_ops) > 0:
+                ops_str = ", ".join(f'"{op}"' for op in sorted(enabled_ops))
+                content, count = re.subn(
+                    r"flag_gems\.(?:only_)?enable\s*\([^)]*\)",
+                    f"flag_gems.only_enable(include=[{ops_str}])",
+                    content
+                )
+                if count == 0:
+                    content, count = _replace_enable_call_balanced(
+                        content, f"flag_gems.only_enable(include=[{ops_str}])")
+                modified = count > 0
+                method = "only_enable"
+            elif "enable_unused" in caps:
+                if disabled_ops is not None:
+                    ops_str = ", ".join(f'"{op}"' for op in sorted(disabled_ops))
+                else:
+                    ops_str = ""
+                content, count = re.subn(
+                    r"flag_gems\.(?:only_)?enable\s*\([^)]*\)",
+                    f"flag_gems.enable(unused=[{ops_str}])",
+                    content
+                )
+                if count == 0:
+                    content, count = _replace_enable_call_balanced(
+                        content, f"flag_gems.enable(unused=[{ops_str}])")
+                modified = count > 0
+                method = "enable_unused_fallback"
 
         if modified and content != original:
             backup_path = backup_file(filepath)
@@ -441,9 +621,7 @@ def modify_enable_call(files, enabled_ops=None, disabled_ops=None):
                 "success": True,
             })
         elif not modified:
-            # 兜底：写 txt 文件
             method = "txt_fallback"
-            # 分析现有 enable 调用找到 txt 路径
             analysis = analyze_flaggems_code()
             txt_path = analysis.get("gems_txt_path")
             if txt_path and enabled_ops is not None:
@@ -608,7 +786,7 @@ def main():
             print(f"  VLLM_FL_PREFER_ENABLED: {prefer}")
         return
 
-    # 非 plugin 模式：原有的源码注释/取消注释逻辑
+    # 非 plugin 模式
 
     # 查找文件
     if args.files:
@@ -624,14 +802,71 @@ def main():
             print("ERROR: 未找到包含 flag_gems 的文件")
         sys.exit(1)
 
+    # 检测是否已注入环境变量驱动代码
+    injected = any(
+        FLAGGEMS_INJECT_MARKER in Path(f).read_text(encoding='utf-8', errors='ignore')
+        for f in files
+        if os.path.isfile(f)
+    )
+
+    # 已注入场景：通过环境变量 + 控制文件控制，不再修改源码
+    if injected and args.action in ("enable", "disable"):
+        env_vars = {}
+        if args.action == "enable":
+            env_vars["USE_FLAGGEMS"] = "1"
+            if not os.path.isfile(OPS_CONTROL_FILE):
+                _write_ops_control_file(enabled_ops=None, disabled_ops=[])
+        else:
+            env_vars["USE_FLAGGEMS"] = "0"
+
+        # 持久化环境变量到 /etc/environment + /root/.bashrc
+        _persist_env_vars(env_vars)
+
+        inline = env_to_inline(env_vars)
+        result = {
+            "action": args.action,
+            "mode": "env_control",
+            "env_vars": env_vars,
+            "env_inline": inline,
+            "control_file": OPS_CONTROL_FILE if args.action == "enable" else None,
+            "success": True,
+            "message": f"环境变量驱动模式: {args.action} (USE_FLAGGEMS={env_vars['USE_FLAGGEMS']})",
+            "timestamp": datetime.now().isoformat(),
+        }
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print(f"\nFlagGems Toggle — {args.action} (环境变量驱动模式)")
+            print("=" * 50)
+            print(f"  env_vars: {env_vars}")
+            print(f"  env_inline: {inline}")
+            if args.action == "enable":
+                print(f"  控制文件: {OPS_CONTROL_FILE}")
+            print(f"  提示: 在启动命令前添加内联环境变量")
+        return
+
     results = []
 
     if args.action == "status":
+        # status 增加注入状态信息
         for f in files:
             status = get_file_status(f)
+            if injected:
+                status["injected"] = True
+                status["use_flaggems"] = os.environ.get("USE_FLAGGEMS", "not_set")
+                status["control_mode"] = os.environ.get("FLAGGEMS_CONTROL_MODE", "not_set")
+                ctrl_data = {}
+                if os.path.isfile(OPS_CONTROL_FILE):
+                    try:
+                        with open(OPS_CONTROL_FILE, 'r', encoding='utf-8') as cf:
+                            ctrl_data = json.load(cf)
+                    except Exception:
+                        pass
+                status["control_file"] = ctrl_data
             results.append(status)
 
     elif args.action == "disable":
+        # 未注入场景：保留原有源码注释逻辑
         for f in files:
             before = get_file_status(f)
             if before.get("status") == "disabled":
@@ -646,6 +881,7 @@ def main():
                 results.append({"file": f, "action": "disabled", "success": False, "warning": "verification failed"})
 
     elif args.action == "enable":
+        # 未注入场景：保留原有源码取消注释逻辑
         for f in files:
             before = get_file_status(f)
             if before.get("status") == "enabled":
