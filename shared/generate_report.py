@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -130,6 +131,7 @@ class ReportData:
         self.issues: Dict[str, List[str]] = {}
         self.issue_files: List[Dict[str, str]] = []
         self.oplists: Dict[str, List[str]] = {}
+        self.op_config: Optional[dict] = None
         self.workflow_complete = False
 
     def collect(self) -> bool:
@@ -181,6 +183,9 @@ class ReportData:
             lines = read_lines(os.path.join(r, f"{name}.txt"))
             if lines:
                 self.oplists[name] = lines
+
+        # operator config (search log from operator_search.py)
+        self.op_config = read_json(os.path.join(r, "operator_config.json"))
 
         return True
 
@@ -235,21 +240,107 @@ def generate_text_report(data: ReportData) -> str:
     lines.append(f"容器: {container}")
     lines.append(f"环境: {env_type}")
 
-    # 算子状态
+    # 算子配置（无论是否调优都输出）
+    wf = data.get("workflow", default={}) or {}
+    env_type = data.get("environment", "env_type", default="")
+    optimization = data.get("optimization", default={}) or {}
+    eval_sec = data.get("eval", default={}) or {}
+    excluded_acc = eval_sec.get("excluded_ops_accuracy") or (optimization.get("excluded_ops_accuracy") if isinstance(optimization, dict) else None)
+    all_disabled = optimization.get("disabled_ops", []) if isinstance(optimization, dict) else []
+    excluded_acc_list = excluded_acc if isinstance(excluded_acc, list) else ([excluded_acc] if excluded_acc else [])
+    excluded_perf_list = [op for op in all_disabled if op not in excluded_acc_list] if all_disabled else []
+
+    initial_ops = data.oplists.get("initial_oplist", [])
+    acc_tuned_ops = data.oplists.get("accuracy_tuned_oplist", [])
+    final_ops = data.oplists.get("final_oplist", [])
     oplist_count = data.get("service", "enable_oplist_count", default=None)
-    if oplist_count is not None:
+    config_persisted = wf.get("config_persisted", False)
+
+    if env_type and env_type != "native":
         lines.append("")
-        lines.append("算子状态:")
-        lines.append(f"  V2 算子数: {oplist_count} 个")
+        lines.append("算子配置:")
+        if initial_ops:
+            lines.append(f"  初始算子数: {len(initial_ops)} 个")
+        elif oplist_count is not None:
+            lines.append(f"  初始算子数: {oplist_count} 个")
+
+        # 精度调优
+        acc_ok = wf.get("accuracy_ok")
+        acc_triggered = bool(excluded_acc_list)
+        v3_score = eval_sec.get("v3_score")
+        acc_diff = eval_sec.get("accuracy_diff")
+        if acc_triggered:
+            status = "达标" if acc_ok else "未达标"
+            detail = ""
+            if acc_diff is not None and v3_score is not None:
+                detail = f" (偏差 {acc_diff}% → V3={v3_score}%)"
+            lines.append(f"  精度调优: 触发 → {status}{detail}")
+            lines.append(f"    禁用算子: {', '.join(str(o) for o in excluded_acc_list)}")
+            if acc_tuned_ops:
+                lines.append(f"    调优后算子数: {len(acc_tuned_ops)} 个")
+        else:
+            deviation = eval_sec.get("deviation") or eval_sec.get("accuracy_diff")
+            threshold = eval_sec.get("accuracy_threshold", 5.0)
+            if deviation is not None:
+                lines.append(f"  精度调优: 未触发 (偏差 {deviation}% ≤ {threshold}%)")
+            else:
+                lines.append(f"  精度调优: 未触发")
+
+        # 性能调优
+        perf_ok = wf.get("performance_ok")
+        perf_triggered = bool(excluded_perf_list)
+        search_log = []
+        if data.op_config and isinstance(data.op_config, dict):
+            search_log = data.op_config.get("search_log", [])
+        if perf_triggered:
+            status = "达标" if perf_ok else "未达标"
+            ratio_info = ""
+            if isinstance(optimization, dict) and optimization.get("current_ratio"):
+                ratio_info = f" (ratio → {optimization['current_ratio']}%)"
+            lines.append(f"  性能调优: 触发 → {status}{ratio_info}")
+            lines.append(f"    禁用算子: {', '.join(str(o) for o in excluded_perf_list)}")
+            if search_log:
+                lines.append(f"    搜索过程 ({len(search_log)} 轮):")
+                for i, entry in enumerate(search_log, 1):
+                    disabled_op = entry.get("disabled_op", entry.get("tested_op", "?"))
+                    ratio = entry.get("ratio") or entry.get("min_ratio")
+                    passed = entry.get("passed", entry.get("met_target", False))
+                    ratio_str = f"{ratio}%" if ratio is not None else "N/A"
+                    result_str = "达标" if passed else "未达标"
+                    lines.append(f"      第{i}轮: 禁用 {disabled_op} → ratio {ratio_str} ({result_str})")
+        else:
+            perf_data = data.get("perf", default={}) or {}
+            cur_ratio = perf_data.get("ratio_pct") or (optimization.get("current_ratio") if isinstance(optimization, dict) else None)
+            if cur_ratio is not None:
+                lines.append(f"  性能调优: 未触发 (ratio {cur_ratio}% ≥ 80%)")
+            else:
+                lines.append(f"  性能调优: 未触发")
+
+        # 最终算子列表
+        best_ops = final_ops or acc_tuned_ops or initial_ops
+        if best_ops:
+            lines.append(f"  最终启用算子 ({len(best_ops)} 个):")
+            ops_str = ", ".join(best_ops)
+            if len(ops_str) > 120:
+                ops_str = ", ".join(best_ops[:15]) + f", ... (共 {len(best_ops)} 个)"
+            lines.append(f"    {ops_str}")
+
+        # 运行时 txt 一致性
+        runtime_count = None
+        if data.op_config and isinstance(data.op_config, dict):
+            runtime_count = data.op_config.get("runtime_enabled_count")
+        if runtime_count is not None and best_ops:
+            match = "与配置一致 ✓" if runtime_count == len(best_ops) else f"不一致 ✗ (配置 {len(best_ops)}, 运行时 {runtime_count})"
+            lines.append(f"  运行时 txt 算子数: {runtime_count} 个 ({match})")
+
+        lines.append(f"  算子配置已固化: {'是' if config_persisted else '否'}")
 
     # 精度评测
-    eval_sec = data.get("eval", default={})
     v1_score = eval_sec.get("v1_score") if isinstance(eval_sec, dict) else None
     v2_score = eval_sec.get("v2_score") if isinstance(eval_sec, dict) else None
-    deviation = eval_sec.get("deviation") if isinstance(eval_sec, dict) else None
-    threshold = eval_sec.get("threshold", 5.0) if isinstance(eval_sec, dict) else 5.0
+    deviation = (eval_sec.get("deviation") or eval_sec.get("accuracy_diff")) if isinstance(eval_sec, dict) else None
+    threshold = eval_sec.get("accuracy_threshold", 5.0) if isinstance(eval_sec, dict) else 5.0
 
-    # 也尝试从 gpqa_result.json 补充
     if data.gpqa_result and v1_score is None:
         v1_score = data.gpqa_result.get("v1_score") or data.gpqa_result.get("native_score")
         v2_score = data.gpqa_result.get("v2_score") or data.gpqa_result.get("flagos_score")
@@ -262,37 +353,9 @@ def generate_text_report(data: ReportData) -> str:
         lines.append(f"  V2: {v2_score}%" if v2_score is not None else "  V2: N/A")
         if deviation is not None:
             lines.append(f"  V1 vs V2 偏差: {deviation}% (阈值 {threshold}%)")
-
-    # 算子调优
-    optimization = data.get("optimization", default={})
-    excluded_acc = data.get("eval", "excluded_ops_accuracy", default=None)
-    excluded_perf = data.get("operator_replacement", "excluded_ops_performance", default=None)
-    # also check optimization section
-    if isinstance(optimization, dict):
-        excluded_acc = excluded_acc or optimization.get("excluded_ops_accuracy")
-        excluded_perf = excluded_perf or optimization.get("excluded_ops_performance")
-
-    has_tuning = excluded_acc or excluded_perf
-    if has_tuning:
-        lines.append("")
-        lines.append("算子调优（如有）:")
-        if excluded_acc:
-            acc_ops = excluded_acc if isinstance(excluded_acc, list) else [excluded_acc]
-            lines.append(f"  精度调优: 关闭 {len(acc_ops)} 个算子 ({', '.join(str(o) for o in acc_ops)})")
-        if excluded_perf:
-            perf_ops = excluded_perf if isinstance(excluded_perf, list) else [excluded_perf]
-            lines.append(f"  性能调优: 关闭 {len(perf_ops)} 个算子 ({', '.join(str(o) for o in perf_ops)})")
-
-        # 最终算子数
-        if data.oplists.get("final_oplist"):
-            lines.append(f"  最终启用算子: {len(data.oplists['final_oplist'])} 个")
-        all_excluded = []
-        if excluded_acc and isinstance(excluded_acc, list):
-            all_excluded.extend(excluded_acc)
-        if excluded_perf and isinstance(excluded_perf, list):
-            all_excluded.extend(excluded_perf)
-        if all_excluded:
-            lines.append(f"  禁用算子: {', '.join(str(o) for o in all_excluded)}")
+        v3_score_val = eval_sec.get("v3_score") if isinstance(eval_sec, dict) else None
+        if v3_score_val is not None:
+            lines.append(f"  V3 (调优后): {v3_score_val}%")
 
     # 性能对比
     if data.perf_compare_table:
@@ -300,8 +363,8 @@ def generate_text_report(data: ReportData) -> str:
         lines.append("性能对比:")
         lines.append(data.perf_compare_table)
     elif data.native_perf or data.flagos_perf:
-        perf = data.get("performance", default={})
-        min_ratio = perf.get("min_ratio") if isinstance(perf, dict) else None
+        perf = data.get("perf", default={}) or {}
+        min_ratio = perf.get("ratio_pct") or perf.get("min_ratio")
         if min_ratio is not None:
             lines.append("")
             lines.append("性能对比:")
@@ -335,8 +398,8 @@ def generate_text_report(data: ReportData) -> str:
         lines.append(f"  总耗时: {format_duration(timing['total_duration_seconds'])}")
 
     # 发布信息
-    release = data.get("release", default={})
-    wf = data.get("workflow", default={})
+    release = data.get("release", default={}) or {}
+    wf = data.get("workflow", default={}) or {}
     if isinstance(release, dict) and release:
         lines.append("")
         lines.append("发布信息:")
@@ -349,14 +412,72 @@ def generate_text_report(data: ReportData) -> str:
 
     qualified = wf.get("qualified") if isinstance(wf, dict) else None
     if qualified is not None:
+        if not (isinstance(release, dict) and release):
+            lines.append("")
+            lines.append("发布信息:")
         visibility = "公开" if qualified else "私有"
         lines.append(f"  发布方式: {visibility}")
         lines.append(f"  qualified: {qualified}")
 
-    # 问题与复现
+    # 服务异常 & 崩溃诊断
+    service_ok = wf.get("service_ok") if isinstance(wf, dict) else None
+    startup_trace = data.traces.get("03_service_startup")
+    startup_issues = data.issues.get("issues_startup", [])
+    has_crash_info = (service_ok is False) or startup_issues or (
+        startup_trace and any(
+            "crash" in str(a.get("action", "")).lower() or "diagnose" in str(a.get("action", "")).lower()
+            for a in (startup_trace.get("actions", []) if isinstance(startup_trace, dict) else [])
+        )
+    )
+    if has_crash_info:
+        lines.append("")
+        lines.append("服务异常:")
+        if startup_trace and isinstance(startup_trace, dict):
+            actions = startup_trace.get("actions", [])
+            crash_actions = [a for a in actions if "crash" in str(a.get("action", "")).lower() or "diagnose" in str(a.get("action", "")).lower()]
+            if crash_actions:
+                for ca in crash_actions:
+                    lines.append(f"  {ca.get('action', '诊断')}: {ca.get('output_summary', ca.get('status', ''))}")
+            else:
+                lines.append(f"  启动状态: {'成功' if service_ok else '失败'}")
+        if startup_issues:
+            lines.append(f"  启动异常记录: {len(startup_issues)} 条")
+            for entry in startup_issues[:3]:
+                lines.append(f"    {entry[:120]}")
+        if service_ok is False:
+            lines.append(f"  最终状态: workflow.service_ok=false")
+
+    # 提交的 Issue
+    submitted_issues = data.get("issues", "submitted", default=[])
+    if submitted_issues and isinstance(submitted_issues, list) and len(submitted_issues) > 0:
+        lines.append("")
+        lines.append("提交的 Issue:")
+        type_label = {
+            "operator-crash": "算子崩溃",
+            "accuracy-zero": "精度归零",
+            "accuracy-degraded": "精度下降",
+            "performance-degraded": "性能下降",
+            "flagtree-error": "FlagTree 错误",
+            "plugin-error": "Plugin 错误",
+        }
+        for i, iss in enumerate(submitted_issues, 1):
+            if isinstance(iss, dict):
+                title = iss.get("title", "未知")
+                itype = type_label.get(iss.get("type", ""), iss.get("type", ""))
+                repo = iss.get("repo", "")
+                url = iss.get("url", "")
+                lines.append(f"  [{i}] {title} ({itype})")
+                if repo:
+                    lines.append(f"      仓库: {repo}")
+                if url:
+                    lines.append(f"      URL: {url}")
+            elif isinstance(iss, str):
+                lines.append(f"  [{i}] {iss}")
+
+    # 问题日志与复现
     if data.issue_files or data.issues:
         lines.append("")
-        lines.append("问题与复现:")
+        lines.append("问题日志与复现:")
 
         # 统计
         if data.issues:
@@ -408,19 +529,87 @@ def generate_text_report(data: ReportData) -> str:
 
 
 # =============================================================================
+# JSON 报告辅助函数
+# =============================================================================
+
+def _build_operator_tuning_json(data: ReportData, wf: dict, eval_sec: dict) -> dict:
+    optimization = data.get("optimization", default={}) or {}
+    excluded_acc = eval_sec.get("excluded_ops_accuracy") or (optimization.get("excluded_ops_accuracy") if isinstance(optimization, dict) else None)
+    excluded_acc_list = excluded_acc if isinstance(excluded_acc, list) else ([excluded_acc] if excluded_acc else [])
+    all_disabled = optimization.get("disabled_ops", []) if isinstance(optimization, dict) else []
+    excluded_perf_list = [op for op in all_disabled if op not in excluded_acc_list] if all_disabled else []
+
+    search_log_summary = []
+    if data.op_config and isinstance(data.op_config, dict):
+        for i, entry in enumerate(data.op_config.get("search_log", []), 1):
+            search_log_summary.append({
+                "round": i,
+                "disabled_op": entry.get("disabled_op", entry.get("tested_op", "")),
+                "ratio": entry.get("ratio") or entry.get("min_ratio"),
+                "passed": entry.get("passed", entry.get("met_target", False)),
+            })
+
+    return {
+        "accuracy_tuning_triggered": bool(excluded_acc_list),
+        "accuracy_tuning_ok": wf.get("accuracy_ok", False),
+        "excluded_accuracy": excluded_acc_list,
+        "performance_tuning_triggered": bool(excluded_perf_list),
+        "performance_tuning_ok": wf.get("performance_ok", False),
+        "excluded_performance": excluded_perf_list,
+        "search_log_summary": search_log_summary,
+        "initial_oplist": data.oplists.get("initial_oplist", []),
+        "accuracy_tuned_oplist": data.oplists.get("accuracy_tuned_oplist", []),
+        "final_oplist": data.oplists.get("final_oplist", []),
+        "config_persisted": wf.get("config_persisted", False),
+    }
+
+
+def _build_service_crash_json(data: ReportData, wf: dict) -> dict:
+    service_ok = wf.get("service_ok")
+    startup_trace = data.traces.get("03_service_startup")
+    crashed_ops = []
+    recovery = None
+
+    if startup_trace and isinstance(startup_trace, dict):
+        for a in startup_trace.get("actions", []):
+            action_str = str(a.get("action", "")).lower()
+            if "crash" in action_str or "diagnose" in action_str:
+                summary = a.get("output_summary", "")
+                if isinstance(summary, str) and summary:
+                    crashed_ops.append(summary)
+                if a.get("status") == "success":
+                    recovery = "success"
+                elif a.get("status") == "failed":
+                    recovery = "failed"
+
+    if service_ok is False and recovery is None:
+        recovery = "failed"
+    elif service_ok is True and crashed_ops and recovery is None:
+        recovery = "success"
+
+    return {
+        "crashed": bool(crashed_ops) or service_ok is False,
+        "crashed_ops": crashed_ops,
+        "recovery": recovery,
+        "service_ok": service_ok,
+    }
+
+
+# =============================================================================
 # JSON 报告生成
 # =============================================================================
 
 def generate_json_report(data: ReportData) -> dict:
     wf = data.get("workflow", default={}) or {}
     eval_sec = data.get("eval", default={}) or {}
-    perf = data.get("performance", default={}) or {}
+    perf = data.get("perf", default={}) or {}
     release = data.get("release", default={}) or {}
+    optimization = data.get("optimization", default={}) or {}
 
     # 精度数据（context 优先，gpqa_result.json 补充）
     v1_score = eval_sec.get("v1_score")
     v2_score = eval_sec.get("v2_score")
-    deviation = eval_sec.get("deviation")
+    deviation = eval_sec.get("deviation") or eval_sec.get("accuracy_diff")
     if data.gpqa_result and v1_score is None:
         v1_score = data.gpqa_result.get("v1_score") or data.gpqa_result.get("native_score")
         v2_score = data.gpqa_result.get("v2_score") or data.gpqa_result.get("flagos_score")
@@ -467,20 +656,16 @@ def generate_json_report(data: ReportData) -> dict:
             "v1_score": v1_score,
             "v2_score": v2_score,
             "deviation": deviation,
-            "threshold": eval_sec.get("threshold", 5.0),
+            "threshold": eval_sec.get("accuracy_threshold", 5.0),
             "ok": wf.get("accuracy_ok"),
         },
         "performance": {
-            "min_ratio": perf.get("min_ratio"),
-            "target_ratio": perf.get("target_ratio", 80.0),
+            "min_ratio": perf.get("ratio_pct") or perf.get("min_ratio"),
+            "target_ratio": optimization.get("target_ratio", 80.0),
             "ok": wf.get("performance_ok"),
         },
-        "operator_tuning": {
-            "excluded_accuracy": data.get("eval", "excluded_ops_accuracy", default=[]),
-            "excluded_performance": data.get("operator_replacement", "excluded_ops_performance", default=[]),
-            "initial_oplist_count": len(data.oplists.get("initial_oplist", [])),
-            "final_oplist_count": len(data.oplists.get("final_oplist", [])) or None,
-        },
+        "operator_tuning": _build_operator_tuning_json(data, wf, eval_sec),
+        "service_crash": _build_service_crash_json(data, wf),
         "release": {
             "qualified": wf.get("qualified"),
             "harbor_image": release.get("harbor_image", ""),
@@ -490,6 +675,7 @@ def generate_json_report(data: ReportData) -> dict:
         "steps": steps_summary,
         "issues": {
             "summary": issues_summary,
+            "submitted": data.get("issues", "submitted", default=[]) or [],
             "details": [
                 {
                     "title": issue["title"],
@@ -506,13 +692,16 @@ def generate_json_report(data: ReportData) -> dict:
             "workflow_complete": "全流程是否已完成",
             "accuracy.ok": "精度是否达标（含调优后结果）",
             "performance.ok": "性能是否达标（含调优后结果）",
+            "operator_tuning": "算子调优详情（含搜索过程、各阶段算子列表）",
+            "service_crash": "服务崩溃诊断（崩溃算子、恢复状态）",
+            "issues.submitted": "已提交到 GitHub 的 issue 列表（含 URL）",
             "release.qualified": "综合判定 = service_ok AND accuracy_ok AND performance_ok",
             "steps[].status": "pending / in_progress / success / failed / skipped",
-            "issues.summary": "各类问题日志的记录条数",
-            "issues.details": "每个 issue 的标题、类型、复现步骤和实际行为",
         },
     }
     return report
+
+
 
 
 # =============================================================================
@@ -528,9 +717,12 @@ def main():
 
     data = ReportData(args.workspace)
     if not data.collect():
-        print("错误: 未找到 context.yaml，无法生成报告", file=sys.stderr)
-        print(f"  已检查: {args.workspace}/shared/context.yaml", file=sys.stderr)
-        print(f"  已检查: {args.workspace}/config/context_snapshot.yaml", file=sys.stderr)
+        if args.output and os.path.exists(args.output):
+            print("警告: 无数据，保留已有报告不覆盖", file=sys.stderr)
+        else:
+            print("错误: 未找到 context.yaml，无法生成报告", file=sys.stderr)
+            print(f"  已检查: {args.workspace}/shared/context.yaml", file=sys.stderr)
+            print(f"  已检查: {args.workspace}/config/context_snapshot.yaml", file=sys.stderr)
         sys.exit(1)
 
     if args.json_mode:
@@ -541,6 +733,10 @@ def main():
 
     if args.output:
         os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+        if os.path.exists(args.output):
+            base, ext = os.path.splitext(args.output)
+            backup_path = f"{base}_prev{ext}"
+            shutil.copy2(args.output, backup_path)
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"报告已写入: {args.output}", file=sys.stderr)

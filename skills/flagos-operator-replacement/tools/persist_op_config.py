@@ -72,11 +72,16 @@ def read_runtime_oplist():
         "/root/gems.txt",
         "/tmp/gems.txt",
     ]
-    # 也从 context.yaml 获取 gems_txt_path
+    # 从 context.yaml 多个可能位置获取 gems_txt_path
     ctx = load_yaml(CONTEXT_YAML)
-    extra = ctx.get("runtime", {}).get("gems_txt_path")
-    if extra and extra not in candidates:
-        candidates.insert(0, extra)
+    for getter in [
+        lambda: ctx.get("service", {}).get("gems_txt_path"),
+        lambda: ctx.get("environment", {}).get("flaggems_txt_path"),
+        lambda: ctx.get("runtime", {}).get("gems_txt_path"),
+    ]:
+        extra = getter()
+        if extra and extra not in candidates:
+            candidates.insert(0, extra)
 
     for path in candidates:
         if os.path.isfile(path):

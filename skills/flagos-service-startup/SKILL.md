@@ -626,6 +626,7 @@ ISSUE_EOF"
   - 步骤4/6中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/06_quick_performance.json` 的 actions 中
 - 启动失败时，`logs/issues_startup.log` 已追加写入问题记录
 - `timing.steps.service_startup` 已更新为本步骤的 `duration_seconds`
+- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ---
 

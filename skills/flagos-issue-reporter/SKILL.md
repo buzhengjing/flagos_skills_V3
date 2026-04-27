@@ -122,7 +122,7 @@ issues:
 |---------|-----------|------|
 | 评测中服务崩溃 | `operator-crash` | 即时提交 |
 | V2/V1 任一并发级别 < 80% | `performance-degraded` | 发现即提交，然后开始算子优化 |
-| 3 轮优化后仍不达标 | `performance-degraded` | 最终汇总提交（含所有禁用算子及原因） |
+| 算子优化后仍不达标 | `performance-degraded` | 最终汇总提交（含所有禁用算子及原因） |
 
 ---
 

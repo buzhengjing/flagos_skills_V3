@@ -77,10 +77,11 @@ GPU_RELEASE_POLL_INTERVAL = 2  # 轮询间隔（秒）
 # =============================================================================
 
 def _parse_gpu_memory() -> List[Dict[str, float]]:
-    """解析 GPU 显存信息，支持多厂商 SMI 工具（nvidia-smi / mx-smi / npu-smi）"""
+    """解析 GPU 显存信息，支持多厂商 SMI 工具"""
     smi_commands = [
         ("nvidia-smi", "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
         ("mx-smi", "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
+        ("npu-smi", None),  # 华为 NPU 需要特殊解析
     ]
 
     # 如果环境变量指定了厂商，优先使用对应工具
@@ -89,9 +90,16 @@ def _parse_gpu_memory() -> List[Dict[str, float]]:
         smi_commands = [smi_commands[1], smi_commands[0]]
     elif gpu_vendor == 'nvidia':
         smi_commands = [smi_commands[0]]
+    elif gpu_vendor == 'huawei':
+        smi_commands = [smi_commands[2]]
 
     for name, cmd in smi_commands:
         try:
+            if name == "npu-smi":
+                gpus = _parse_npu_smi()
+                if gpus:
+                    return gpus
+                continue
             result = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True, timeout=10
             )
@@ -117,6 +125,29 @@ def _parse_gpu_memory() -> List[Dict[str, float]]:
         except Exception:
             continue
     return []
+
+
+def _parse_npu_smi() -> List[Dict[str, float]]:
+    """解析华为 npu-smi info 输出的显存信息"""
+    try:
+        result = subprocess.run(
+            "npu-smi info", shell=True, capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return []
+        import re
+        gpus = []
+        for match in re.finditer(r'(\d+)\s+\d+\s+\w+\s+\w+\s+(\d+)\s*/\s*(\d+)', result.stdout):
+            idx, used, total = int(match.group(1)), float(match.group(2)), float(match.group(3))
+            gpus.append({
+                "index": idx,
+                "used_mib": used,
+                "total_mib": total,
+                "free_ratio": 1.0 - used / total if total > 0 else 0,
+            })
+        return gpus
+    except Exception:
+        return []
 
 
 def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
@@ -176,7 +207,8 @@ def check_gpu_availability(required_gpus: int = 1,
 # =============================================================================
 
 def run_cmd(cmd: str, timeout: int = 600, check: bool = True) -> subprocess.CompletedProcess:
-    """执行命令并实时输出"""
+    """执行命令并实时输出，超时后强制终止"""
+    import threading
     print(f"  $ {cmd}")
     proc = subprocess.Popen(
         cmd, shell=True,
@@ -184,17 +216,30 @@ def run_cmd(cmd: str, timeout: int = 600, check: bool = True) -> subprocess.Comp
         text=True
     )
     output_lines = []
-    for line in proc.stdout:
-        output_lines.append(line)
-        print(f"    | {line.rstrip()}")
-    proc.wait()
+    timed_out = [False]
+
+    def _kill_on_timeout():
+        timed_out[0] = True
+        print(f"  TIMEOUT: 命令超过 {timeout}s，强制终止")
+        proc.kill()
+
+    timer = threading.Timer(timeout, _kill_on_timeout)
+    timer.start()
+    try:
+        for line in proc.stdout:
+            output_lines.append(line)
+            print(f"    | {line.rstrip()}")
+        proc.wait()
+    finally:
+        timer.cancel()
+    returncode = -9 if timed_out[0] else proc.returncode
     result = subprocess.CompletedProcess(
-        cmd, proc.returncode,
+        cmd, returncode,
         stdout="".join(output_lines),
         stderr=""
     )
-    if check and proc.returncode != 0:
-        print(f"  WARN: 命令返回码 {proc.returncode}")
+    if check and returncode != 0:
+        print(f"  WARN: 命令返回码 {returncode}")
     return result
 
 

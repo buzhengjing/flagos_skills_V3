@@ -996,6 +996,7 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
 - 更新 `context.yaml` 的 `optimization` 和 `operator_replacement` 字段
 - 写入 `traces/07_performance_tuning.json`
 - 保存算子列表：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
+- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ### 步骤7完成后：算子配置固化
 

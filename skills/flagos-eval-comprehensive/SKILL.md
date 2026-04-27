@@ -253,7 +253,11 @@ sleep 5
 
 **步骤4 — V2 (FlagGems) 精度**（始终执行）：
 
-1. 启用 FlagGems（调用 service-startup skill 以 flagos 模式启动）。**注意**：如果 context.yaml 的 `optimization.disabled_ops` 非空（步骤3崩溃诊断已禁用部分算子），必须使用 `toggle_flaggems.py --action modify-enable --disabled-ops '<disabled_ops>'` 而非 `--action enable`，否则已禁用算子会被重新加载导致再次崩溃。
+1. 启用 FlagGems（调用 service-startup skill 以 flagos 模式启动）。**注意**：如果 context.yaml 的 `optimization.disabled_ops` 非空（步骤3崩溃诊断已禁用部分算子），必须先写入控制文件再启动：
+   - 从 `results/ops_list.json` 读取全量算子，排除 `disabled_ops`，生成白名单
+   - 写入 `/root/flaggems_ops_control.json`（格式：`{"include": [启用算子列表]}`）
+   - `start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`
+   - 通过 `start_service.sh` 以 flagos 模式启动
 
 2. 运行评测：
 ```bash
@@ -552,9 +556,13 @@ V2精度下降 > 5% 时：
      --ops-file /flagos-workspace/results/ops_list.json \
      --plugin-mode --json
    ```
-3. 按组逐步启用测试，定位问题组
-4. 问题组内逐个算子排查
-5. 关闭问题算子 → 重启服务 → 重新评测
+3. 按组逐轮累积禁用测试：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C
+4. **每轮算子控制方式**（与性能调优 operator_search.py 一致）：
+   - 从 `diagnose_ops.py` 输出的当轮 `cumulative_test_env.control_file` 获取白名单
+   - 写入控制文件 `/root/flaggems_ops_control.json`（格式：`{"include": [启用算子列表]}`）
+   - 通过 `start_service.sh` 启动服务（`start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`，无需手动写 `/etc/environment`）
+   - **不使用** `toggle_flaggems.py --action modify-enable --disabled-ops`
+5. 某轮累积禁用后精度恢复（下降 ≤5%）→ 达标即停，保留所有已累积禁用的算子
 6. **每轮输出算子状态**（见下方格式）
 
 ## 每轮算子状态输出（强制）
@@ -768,6 +776,7 @@ ISSUE_EOF"
   - V1 评测 → 记录在 `traces/04_quick_accuracy.json` 中
   - V2 评测 → 记录在 `traces/04_quick_accuracy.json` 中
 - [ ] `timing.steps.quick_accuracy` 已更新为本步骤的 `duration_seconds`
+- [ ] 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ---
 
@@ -796,11 +805,14 @@ ISSUE_EOF"
 固化选择：
 - 使用 `diagnose_ops.py accuracy-groups` 分组排查（不使用逐个排查）
 - **最多 3 轮**（3 组），达标即停
-- 达标标准：禁用某组后精度下降 ≤5%
+- **累积禁用**：第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C（每轮在上一轮基础上追加禁用）
+- 达标标准：累积禁用后 V2 精度下降 ≤5%（相对 V1）
+- **算子控制方式**：每轮使用 `cumulative_test_env.control_file` 白名单写入 `/root/flaggems_ops_control.json`，设置 `FLAGGEMS_CONTROL_MODE=only_enable`（与性能调优 operator_search.py 一致）
 
 执行后必须完成：
 - 写入 `context.yaml` 的 `eval.excluded_ops_accuracy` 和 `optimization` 字段
 - 写入 `traces/05_accuracy_tuning.json`
 - 保存算子列表：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
+- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 **注意**：精度调优禁用的算子会传递给后续步骤6，6在此算子集上采集性能基线。

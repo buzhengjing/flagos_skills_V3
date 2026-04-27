@@ -296,9 +296,10 @@ def generate_accuracy_groups(
     ops_file: str,
     plugin_mode: bool = True,
 ) -> Dict[str, Any]:
-    """按功能组生成 blacklist 配置，供逐组精度测试
+    """按功能组生成累积禁用配置，供逐组精度测试
 
-    测试策略：全量启用 → 逐组禁用 → 禁用哪组后精度恢复就是问题组 → 达标即停
+    测试策略：全量启用 → 逐组累积禁用 → 累积禁用后精度恢复即达标
+    算子控制方式：与性能调优(operator_search.py)一致，写白名单控制文件
     """
     # 加载算子列表
     all_ops = []
@@ -316,14 +317,14 @@ def generate_accuracy_groups(
     all_ops_set = set(all_ops)
 
     # 将实际算子按组分类
-    groups = []
+    raw_groups = []
     classified_ops = set()
 
     # OOT 组（仅 plugin 模式）
     if plugin_mode:
         oot_actual = [op for op in OOT_OPERATORS if op in all_ops_set]
         if oot_actual:
-            groups.append({
+            raw_groups.append({
                 "name": "oot",
                 "description": "OOT 高层融合算子（silu_and_mul, rms_norm 等）",
                 "ops": oot_actual,
@@ -341,7 +342,7 @@ def generate_accuracy_groups(
         group_actual = [op for op in group_template if op in all_ops_set and op not in classified_ops]
         if not group_actual:
             continue
-        groups.append({
+        raw_groups.append({
             "name": group_name,
             "description": _group_description(group_name),
             "ops": group_actual,
@@ -357,7 +358,7 @@ def generate_accuracy_groups(
     # 未分组算子
     unclassified = sorted(all_ops_set - classified_ops)
     if unclassified:
-        groups.append({
+        raw_groups.append({
             "name": "other",
             "description": "未分类算子",
             "ops": unclassified,
@@ -369,11 +370,39 @@ def generate_accuracy_groups(
             ),
         })
 
+    # 生成累积禁用配置（每轮在上一轮基础上追加禁用）
+    cumulative_disabled = []
+    groups = []
+    for g in raw_groups:
+        cumulative_disabled.extend(g["ops"])
+        cumulative_enabled = sorted(all_ops_set - set(cumulative_disabled))
+        if plugin_mode:
+            cum_env = _build_group_env(
+                disable_group=cumulative_disabled,
+                all_ops=all_ops,
+                plugin_mode=True,
+            )
+            cum_env["control_file"] = {"include": cumulative_enabled}
+            cum_env["control_mode"] = "only_enable"
+        else:
+            cum_env = {
+                "enable_ops": cumulative_enabled,
+                "blacklist_ops": sorted(cumulative_disabled),
+                "control_file": {"include": cumulative_enabled},
+                "control_mode": "only_enable",
+            }
+        g["cumulative_test_env"] = cum_env
+        g["cumulative_disabled_ops"] = sorted(cumulative_disabled)
+        g["cumulative_disabled_count"] = len(cumulative_disabled)
+        groups.append(g)
+
     # 基线 = 全量启用（即步骤4的 V2 配置，已有精度数据）
     baseline_env = {
         "USE_FLAGGEMS": "1",
         "VLLM_FL_PREFER_ENABLED": "true",
     }
+
+    OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
 
     return {
         "total_ops": len(all_ops),
@@ -383,10 +412,16 @@ def generate_accuracy_groups(
         "baseline_env_inline": "USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true",
         "test_procedure": (
             "1. baseline: 全量启用（V2 配置）→ 已有步骤4的 V2 精度数据\n"
-            "2. 逐组禁用: 每次禁用一组，其余全开 → fast_gpqa.py 评测\n"
-            "3. 禁用某组后精度恢复（下降 ≤5%）→ 该组有问题，达标即停\n"
+            "2. 逐组累积禁用: 第1轮禁用组A，第2轮禁用组A+B，第3轮禁用组A+B+C → 每轮 fast_gpqa.py 评测\n"
+            "3. 某轮累积禁用后精度恢复（下降 ≤5%）→ 达标即停，保留所有已累积禁用的算子\n"
             "4. 问题组内逐个算子排查（可选，缩小禁用范围）"
         ),
+        "apply_method": (
+            f"每轮使用 cumulative_test_env.control_file 写入 {OPS_CONTROL_FILE}，"
+            "设置 FLAGGEMS_CONTROL_MODE=only_enable，通过 start_service.sh 启动服务"
+            "（与性能调优 operator_search.py 一致的白名单控制路径）"
+        ),
+        "control_file_path": OPS_CONTROL_FILE,
     }
 
 
@@ -406,9 +441,10 @@ def _build_group_env(
     all_ops: List[str],
     plugin_mode: bool,
 ) -> Dict[str, str]:
-    """生成"禁用指定组、其余全开"的环境变量配置
+    """生成"禁用指定组、其余全开"的单组独立配置
 
-    策略：全量启用 FlagGems，只把当前组的算子 blacklist
+    注意：此函数生成单组独立配置（test_env），累积禁用配置由
+    accuracy_groups() 的 cumulative_test_env 字段提供。
     """
     blacklist = sorted(disable_group)
 

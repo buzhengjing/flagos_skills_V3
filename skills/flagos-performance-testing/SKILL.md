@@ -400,6 +400,7 @@ ISSUE_EOF"
   - `traces/06_quick_performance.json`（V1/V2 性能测试 + 对比）
   - `traces/07_performance_tuning.json`（算子优化记录，仅触发步骤7时）
 - `timing.steps.quick_performance` 已更新为本步骤的 `duration_seconds`
+- 更新报告：`docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"`
 
 ---
 

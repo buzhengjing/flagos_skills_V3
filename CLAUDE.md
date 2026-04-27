@@ -250,7 +250,13 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 | Skill 失败 | `status: "failed"`, `finished_at`, `duration_seconds`, `fail_reason` |
 | Skill 跳过 | `status: "skipped"`, `skip_reason` |
 
-四者互补：台账、trace、timing、report。遇到步骤完成时四个都要更新。report 通过 `generate_report.py` 生成。
+四者互补：台账、trace、timing、report。遇到步骤完成时四个都要更新。
+
+**强制规则**：每个 Skill 完成后，必须调用 `generate_report.py` 更新报告（覆盖写入，脚本自动备份上一版）：
+
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/generate_report.py --output /flagos-workspace/results/report.md"
+```
 
 ---
 
@@ -333,7 +339,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 21. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
 22. **工具脚本必须从项目目录或容器内 `/flagos-workspace` 执行**，禁止复制到 `/tmp`
 23. **步骤5与4、7与6严禁同时进行（GPU 互斥）**。整体串行：4 → 5 → 6 → 7
-24. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。任何需要启动 FlagGems 服务的步骤，如果 `optimization.disabled_ops` 非空，必须使用 `toggle_flaggems.py --action modify-enable --disabled-ops` 而非 `--action enable`（后者在 control file 不存在时会重置为全量开启）
+24. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。任何需要启动 FlagGems 服务的步骤，如果 `optimization.disabled_ops` 非空，必须通过白名单控制文件启动：将启用算子写入 `/root/flaggems_ops_control.json`（`{"include": [启用算子]}`），`start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`。禁止使用 `toggle_flaggems.py --action enable`（会重置为全量开启）
 25. **步骤7性能算子调优 elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
 26. **步骤5/7的 trace 文件独立**，不混入步骤4/6的 trace
 27. **Claude Code Bash 工具受沙箱限制**。外部路径文件读写必须通过 `docker exec` 或 `docker cp`。禁止直接操作 `/data/...` 等宿主机路径

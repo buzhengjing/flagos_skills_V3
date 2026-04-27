@@ -18,7 +18,7 @@ MODE="flagos"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --mode=*) MODE="${1#--mode=}"; shift ;;
-        --mode)   MODE="${2:-flagos}"; shift 2 ;;
+        --mode)   MODE="${2:-flagos}"; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
     esac
 done

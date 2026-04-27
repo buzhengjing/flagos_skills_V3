@@ -322,15 +322,18 @@ echo "  依赖检查完成"
 # 4.5. 写入 Token 到容器 .env（供脚本 fallback 读取）
 echo "[4.5/6] 写入 Token 到容器 .env..."
 ENV_LINES=""
+ENV_COUNT=0
 for VAR_NAME in GITHUB_TOKEN MODELSCOPE_TOKEN HF_TOKEN HARBOR_USER HARBOR_PASSWORD; do
     VAR_VAL="${!VAR_NAME:-}"
     if [ -n "${VAR_VAL}" ]; then
-        ENV_LINES="${ENV_LINES}${VAR_NAME}=${VAR_VAL}\n"
+        ENV_LINES="${ENV_LINES}${VAR_NAME}=${VAR_VAL}
+"
+        ENV_COUNT=$((ENV_COUNT + 1))
     fi
 done
 if [ -n "${ENV_LINES}" ]; then
-    docker exec "${CONTAINER}" bash -c "printf '${ENV_LINES}' > /flagos-workspace/.env && chmod 600 /flagos-workspace/.env"
-    echo "  ✓ /flagos-workspace/.env 已写入 ($(echo -e "${ENV_LINES}" | grep -c '=') 个 token)"
+    echo "${ENV_LINES}" | docker exec -i "${CONTAINER}" bash -c "cat > /flagos-workspace/.env && chmod 600 /flagos-workspace/.env"
+    echo "  ✓ /flagos-workspace/.env 已写入 (${ENV_COUNT} 个 token)"
 else
     echo "  ⚠ 宿主机未设置任何 token 环境变量，跳过 .env 写入"
 fi
