@@ -624,8 +624,33 @@ SEG_ENV=$(echo "$CTX_INFO" | cut -d'|' -f2)
 SEG_LAST=$(echo "$CTX_INFO" | cut -d'|' -f3)
 
 if [ -z "$SEG_CTR" ]; then
-    echo "错误：段1未产出容器名，终止"
-    exit 1
+    echo "  ⚠ context 中容器名为空，尝试从日志兜底提取..."
+    # 兜底1：从 setup_workspace 输出中提取（格式：容器: xxx）
+    SEG_CTR=$(grep -oP '容器: \K\S+' "${FULL_LOG}" 2>/dev/null | tail -1)
+    # 兜底2：从 docker run 命令中提取 --name= 参数
+    [ -z "$SEG_CTR" ] && SEG_CTR=$(grep -oP -- '--name[= ]\K[^ ]+' "${FULL_LOG}" 2>/dev/null | tail -1)
+    if [ -z "$SEG_CTR" ]; then
+        echo "错误：段1未产出容器名且日志兜底失败，终止"
+        exit 1
+    fi
+    echo "  ✓ 从日志兜底提取容器名: ${SEG_CTR}"
+    # 验证容器存在
+    if ! docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        echo "错误：兜底容器 ${SEG_CTR} 不存在，终止"
+        exit 1
+    fi
+    # 补写 context 并重新同步 snapshot
+    docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+        --set container.name=${SEG_CTR} --set container.status=running --json" 2>/dev/null || true
+    MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+    if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "${CTX_FILE}" 2>/dev/null
+    else
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null
+    fi
+    CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || true
+    SEG_ENV=$(echo "$CTX_INFO" | cut -d'|' -f2)
+    SEG_LAST=$(echo "$CTX_INFO" | cut -d'|' -f3)
 fi
 
 echo "  容器名: ${SEG_CTR}"

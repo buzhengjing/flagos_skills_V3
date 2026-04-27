@@ -364,6 +364,17 @@ fi
 # 写入标记文件供后续脚本读取
 docker exec "${CONTAINER}" bash -c "echo '${MOUNT_MODE}' > /flagos-workspace/.mount_mode"
 
+# 7. 写入基础 context 字段（确保段间传递不依赖 Claude 后续写入）
+# 即使 Claude 会话中途断连，容器名等关键信息也已持久化到 context.yaml
+echo ""
+echo "[7/7] 写入基础 context 字段..."
+CTX_SET_ARGS="--set container.name=${CONTAINER} --set container.status=running"
+[ -n "${HOST_WORKSPACE}" ] && CTX_SET_ARGS="${CTX_SET_ARGS} --set workspace.host_path=${HOST_WORKSPACE}"
+[ -n "${MODEL_NAME}" ] && CTX_SET_ARGS="${CTX_SET_ARGS} --set model.name=${MODEL_NAME}"
+docker exec "${CONTAINER}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py ${CTX_SET_ARGS} --json" >/dev/null 2>&1 && \
+    echo "  ✓ 基础 context 已写入 (container.name, status, workspace, model)" || \
+    echo "  ⚠ 基础 context 写入失败（非致命，Claude 会补写）"
+
 echo ""
 echo "=========================================="
 echo "工作区初始化完成"
