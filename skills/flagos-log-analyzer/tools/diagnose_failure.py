@@ -64,6 +64,11 @@ STEP_NAMES = {
     "06_quick_performance": ("6", "性能评测"),
     "07_performance_tuning": ("7", "性能算子调优"),
     "08_release": ("8", "自动发布"),
+    "09_plugin_install": ("9", "Plugin安装"),
+    "10_plugin_service_startup": ("10", "Plugin启服务"),
+    "11_plugin_accuracy": ("11", "Plugin精度评测"),
+    "12_plugin_performance": ("12", "Plugin性能评测"),
+    "13_plugin_release": ("13", "Plugin发布"),
 }
 
 
@@ -132,28 +137,20 @@ def check_processes() -> Dict[str, Any]:
 
 
 def check_gpu() -> Dict[str, Any]:
-    """检查 GPU 状态。"""
+    """检查 GPU 状态（多厂商统一，通过 detect_gpu.py）。"""
     result = {"available": False, "count": 0, "memory_used_pct": 0, "oom_likely": False, "details": ""}
     try:
-        nv = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,memory.used,memory.total,utilization.gpu",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if nv.returncode == 0:
-            lines = [l.strip() for l in nv.stdout.strip().splitlines() if l.strip()]
+        from detect_gpu import check_gpu_free
+        free_info = check_gpu_free()
+        if free_info and free_info.get("total", 0) > 0:
             result["available"] = True
-            result["count"] = len(lines)
-            total_used = 0
-            total_mem = 0
-            for line in lines:
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
-                    total_used += float(parts[1])
-                    total_mem += float(parts[2])
+            result["count"] = free_info["total"]
+            details = free_info.get("details", [])
+            total_used = sum(d.get("used_mib", 0) for d in details)
+            total_mem = sum(d.get("total_mib", 0) for d in details)
             if total_mem > 0:
                 result["memory_used_pct"] = round(total_used / total_mem * 100, 1)
-            result["details"] = nv.stdout.strip()
+            result["details"] = json.dumps(details)
     except Exception:
         pass
     return result

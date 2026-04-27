@@ -77,15 +77,48 @@ GPU_RELEASE_POLL_INTERVAL = 2  # 轮询间隔（秒）
 # =============================================================================
 
 def _parse_gpu_memory() -> List[Dict[str, float]]:
-    """解析 GPU 显存信息，支持多厂商 SMI 工具"""
+    """解析 GPU 显存信息，优先通过 detect_gpu.py 统一接口"""
+    # 优先使用 detect_gpu.py 统一接口
+    try:
+        from detect_gpu import check_gpu_free
+        vendor = None
+        try:
+            import yaml
+            with open("/flagos-workspace/shared/context.yaml") as f:
+                vendor = yaml.safe_load(f).get("gpu", {}).get("vendor")
+        except Exception:
+            pass
+        info = check_gpu_free(vendor=vendor)
+        if info and info.get("details"):
+            return [{
+                "index": d["index"],
+                "used_mib": d["used_mib"],
+                "total_mib": d["total_mib"],
+                "free_ratio": 1.0 - d["used_mib"] / d["total_mib"] if d["total_mib"] > 0 else 0,
+            } for d in info["details"]]
+    except ImportError:
+        pass
+    # fallback: detect_gpu.py 不可用时使用本地实现
+    return _parse_gpu_memory_fallback()
+
+
+def _parse_gpu_memory_fallback() -> List[Dict[str, float]]:
+    """fallback: 直接调用各厂商 SMI 工具"""
     smi_commands = [
         ("nvidia-smi", "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
         ("mx-smi", "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
-        ("npu-smi", None),  # 华为 NPU 需要特殊解析
+        ("npu-smi", None),
     ]
 
-    # 如果环境变量指定了厂商，优先使用对应工具
-    gpu_vendor = os.environ.get('GPU_VENDOR', '').lower()
+    # 从 context.yaml 读取厂商（替代未设置的 GPU_VENDOR 环境变量）
+    gpu_vendor = ""
+    try:
+        import yaml
+        with open("/flagos-workspace/shared/context.yaml") as f:
+            gpu_vendor = yaml.safe_load(f).get("gpu", {}).get("vendor", "")
+    except Exception:
+        pass
+
     if gpu_vendor == 'metax':
         smi_commands = [smi_commands[1], smi_commands[0]]
     elif gpu_vendor == 'nvidia':
@@ -565,14 +598,14 @@ def restart_service(stop_cmd: str, startup_cmd: str,
             print("  WARNING: 强制清理后 GPU 显存仍未释放，继续启动（可能使用其他空闲 GPU）")
 
     # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
+    log_path = "/flagos-workspace/logs/startup_search.log"
     if env_inline:
-        actual_cmd = f"{env_inline} {startup_cmd}"
+        # env_inline 必须在 nohup 前面，否则 nohup 会把 VAR=val 当命令名
+        bg_cmd = f"{env_inline} nohup {startup_cmd} > {log_path} 2>&1 &"
         print(f"  启动服务（内联 env vars，后台）...")
     else:
-        actual_cmd = startup_cmd
+        bg_cmd = f"nohup {startup_cmd} > {log_path} 2>&1 &"
         print("  启动服务（后台）...")
-    log_path = "/flagos-workspace/logs/startup_search.log"
-    bg_cmd = f"nohup {actual_cmd} > {log_path} 2>&1 &"
     run_cmd(bg_cmd, check=False)
 
     # 传递 --log-path 启用动态超时模式（监控日志活动而非固定超时）
@@ -791,7 +824,7 @@ def _read_service_port() -> Optional[int]:
 
 
 def _read_gpu_count() -> int:
-    """从 context.yaml 读取 GPU 数量，fallback 到 nvidia-smi 探测"""
+    """从 context.yaml 读取 GPU 数量，fallback 到 SMI 工具探测"""
     try:
         import yaml
         with open("/flagos-workspace/shared/context.yaml", "r") as f:

@@ -3,3 +3,4 @@ __pycache__/
 *.lock
 output/
 *.log
+nohup.out

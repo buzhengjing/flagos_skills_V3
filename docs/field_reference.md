@@ -29,7 +29,7 @@ Skill 间共享状态，每步读写各自负责的字段。YAML 文件内已有
 | `gpu` | `count` | GPU 数量 |
 | | `type` | GPU 型号 |
 | | `vendor` | GPU 厂商: nvidia / ascend |
-| | `visible_devices_env` | CUDA_VISIBLE_DEVICES 值（空=全部） |
+| | `visible_devices_env` | 指定卡的环境变量名（如 CUDA_VISIBLE_DEVICES、ASCEND_RT_VISIBLE_DEVICES） |
 | `model` | `name` | HuggingFace 模型标识 |
 | | `container_path` | 容器内模型路径 |
 | | `local_path` | 宿主机模型路径 |

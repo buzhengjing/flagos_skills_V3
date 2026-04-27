@@ -12,16 +12,28 @@
 set -euo pipefail
 
 CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
-MODE="flagos"
+MODE=""
 
 # 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
 while [[ $# -gt 0 ]]; do
     case $1 in
         --mode=*) MODE="${1#--mode=}"; shift ;;
-        --mode)   MODE="${2:-flagos}"; shift; shift 2>/dev/null || true ;;
+        --mode)   MODE="${2:-}"; shift; shift 2>/dev/null || true ;;
         *)        shift ;;
     esac
 done
+
+# 如果未传 --mode，从环境变量 USE_FLAGGEMS 推断
+if [ -z "$MODE" ]; then
+    if [ "${USE_FLAGGEMS:-}" = "0" ]; then
+        MODE="native"
+    elif [ "${USE_FLAGGEMS:-}" = "1" ]; then
+        MODE="flagos"
+    else
+        MODE="flagos"
+    fi
+    echo "[start_service.sh] --mode 未指定，从环境推断 mode=${MODE}"
+fi
 
 # flagos_optimized 也是 FlagGems 启用模式
 case "$MODE" in
@@ -45,6 +57,7 @@ gpu_count = ctx.get('runtime', {}).get('gpu_count', ctx.get('gpu', {}).get('coun
 max_model_len = ctx.get('service', {}).get('max_model_len', 8192)
 framework = ctx.get('runtime', {}).get('framework', 'vllm')
 cuda_visible = ctx.get('runtime', {}).get('cuda_visible_devices', '')
+visible_devices_env = ctx.get('gpu', {}).get('visible_devices_env', 'CUDA_VISIBLE_DEVICES')
 thinking = ctx.get('runtime', {}).get('thinking_model', False)
 
 # TP fallback: 如果为 0，使用 GPU 数量
@@ -59,6 +72,7 @@ print(json.dumps({
     'max_model_len': max_model_len,
     'framework': framework,
     'cuda_visible': cuda_visible,
+    'visible_devices_env': visible_devices_env,
     'thinking': thinking,
 }))
 "
@@ -73,6 +87,7 @@ TP_SIZE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.std
 MAX_MODEL_LEN=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['max_model_len'])")
 FRAMEWORK=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['framework'])")
 CUDA_VISIBLE=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['cuda_visible'])")
+VISIBLE_ENV=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['visible_devices_env'])")
 THINKING=$(echo "$CONFIG_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['thinking'])")
 
 if [ -z "$MODEL_PATH" ]; then
@@ -80,9 +95,9 @@ if [ -z "$MODEL_PATH" ]; then
     exit 1
 fi
 
-# 设置 CUDA_VISIBLE_DEVICES（如有）
+# 设置 GPU 可见设备（根据厂商使用对应环境变量名）
 if [ -n "$CUDA_VISIBLE" ]; then
-    export CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE"
+    export "${VISIBLE_ENV}=${CUDA_VISIBLE}"
 fi
 
 # 确保 conda 环境在 PATH 中
@@ -112,6 +127,11 @@ fi
 
 # 根据 mode 强制覆盖 USE_FLAGGEMS（确保 native/flagos 模式正确）
 export USE_FLAGGEMS="$USE_FLAGGEMS_FLAG"
+
+# native 模式下清除 FlagGems 控制变量，避免残留配置干扰
+if [ "$MODE" = "native" ]; then
+    unset FLAGGEMS_CONTROL_MODE 2>/dev/null || true
+fi
 
 LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
 

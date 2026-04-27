@@ -435,6 +435,7 @@ def run_fast_gpqa(
     dataset_dir: Optional[str] = None,
     dataset_hub: str = 'modelscope',
     limit: Optional[int] = 50,
+    output_path: Optional[str] = None,
 ) -> Dict:
     """
     GPQA Diamond 快速评测主流程。
@@ -624,10 +625,17 @@ def run_fast_gpqa(
     }
 
     # 写 JSON 报告
-    os.makedirs('.', exist_ok=True)
     report_path = 'gpqa_result.json'
     with open(report_path, 'w', encoding='utf-8') as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
+
+    # 如果指定了 output_path，额外写一份到目标路径
+    if output_path:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        report_path = str(out)
 
     # 终端打印
     print()
@@ -675,6 +683,8 @@ def main():
                         help='数据集缓存目录 (覆盖 config)')
     parser.add_argument('--limit', type=int, default=50,
                         help='限制评测题数（默认 50 题，传 0 或 198 为全量）')
+    parser.add_argument('--output', type=str, default=None,
+                        help='结果 JSON 输出路径（如 /flagos-workspace/results/gpqa_native.json）')
     args = parser.parse_args()
 
     # 加载配置
@@ -725,7 +735,9 @@ def main():
 
     # 运行
     try:
-        write_checkpoint("04_accuracy_eval", "精度评测", "running_fast_gpqa",
+        step_id = os.environ.get("FLAGOS_STEP_ID", "04_accuracy_eval")
+        step_title = os.environ.get("FLAGOS_STEP_TITLE", "精度评测")
+        write_checkpoint(step_id, step_title, "running_fast_gpqa",
                          action_detail=f"fast_gpqa.py --model-name {model_name} --api-base {api_base}")
         report = run_fast_gpqa(
             model_name=model_name,
@@ -734,6 +746,7 @@ def main():
             dataset_dir=dataset_dir,
             dataset_hub=dataset_hub,
             limit=args.limit or None,
+            output_path=args.output,
         )
         sys.exit(0 if report.get('score') is not None else 1)
     except Exception as e:

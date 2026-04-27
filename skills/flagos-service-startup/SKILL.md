@@ -159,6 +159,11 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ```
 输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=0`），在启动命令中使用 `env_inline` 作为内联前缀。
 
+**Native 模式服务启动命令**（使用 `start_service.sh --mode native`）：
+```bash
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+```
+
 **FlagOS 模式**（启用 FlagGems）：
 ```bash
 docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action enable --json"
@@ -204,34 +209,27 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 
 服务启动前检测各 GPU 的显存占用情况，**只使用空闲 GPU，不清理其他进程。**
 
+使用统一检测脚本（自动适配 NVIDIA / 华为昇腾 / 沐曦等厂商）：
+
 ```bash
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
-import subprocess, json
-result = subprocess.run(['nvidia-smi', '--query-gpu=index,memory.used,memory.total,memory.free', '--format=csv,noheader,nounits'], capture_output=True, text=True)
-gpus = []
-for line in result.stdout.strip().split('\n'):
-    idx, used, total, free = [x.strip() for x in line.split(',')]
-    usage_pct = float(used) / float(total) * 100
-    gpus.append({'index': int(idx), 'used_mb': float(used), 'total_mb': float(total), 'free_mb': float(free), 'usage_pct': round(usage_pct, 1)})
-free_gpus = [g for g in gpus if g['usage_pct'] < 5]
-busy_gpus = [g for g in gpus if g['usage_pct'] >= 5]
-print(json.dumps({'free_gpus': [g['index'] for g in free_gpus], 'busy_gpus': [g['index'] for g in busy_gpus], 'total': len(gpus), 'details': gpus}))
-\""
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/detect_gpu.py --check-free --vendor \$(python3 -c \"import yaml; print(yaml.safe_load(open('/flagos-workspace/shared/context.yaml')).get('gpu',{}).get('vendor',''))\")"
 ```
+
+输出 JSON 格式：`{vendor, free_gpus: [idx...], busy_gpus: [idx...], total, details: [{index, used_mib, total_mib, free_mib, usage_pct}...], visible_devices_env}`
 
 **处理逻辑**：
 
 | 情况 | 操作 |
 |------|------|
-| 全部 GPU 空闲 | 正常使用全部 GPU，不设 `CUDA_VISIBLE_DEVICES` |
-| 部分 GPU 空闲 | 设置 `CUDA_VISIBLE_DEVICES=<空闲GPU列表>`，TP 按空闲 GPU 数重新推算 |
+| 全部 GPU 空闲 | 正常使用全部 GPU，不设 VISIBLE_DEVICES |
+| 部分 GPU 空闲 | 设置对应厂商的 VISIBLE_DEVICES 环境变量（从输出的 `visible_devices_env` 字段获取），TP 按空闲 GPU 数重新推算 |
 | 无空闲 GPU | 记录警告，仍尝试启动（小模型可能共享显存），OOM 后报错 |
 
 **部分 GPU 空闲时**：
 1. 将空闲 GPU 索引写入 `runtime.cuda_visible_devices`（如 `"2,3,4,5,6,7"`）
 2. 更新 `runtime.gpu_count` 为空闲 GPU 数量
 3. 步骤 2.5 的 TP 推算基于空闲 GPU 数量
-4. 服务启动命令加入 `CUDA_VISIBLE_DEVICES` 环境变量
+4. `start_service.sh` 会自动从 `gpu.visible_devices_env` 读取正确的环境变量名并设置
 5. 输出提示并记录到 trace
 
 ```
@@ -244,7 +242,7 @@ print(json.dumps({'free_gpus': [g['index'] for g in free_gpus], 'busy_gpus': [g[
 ```yaml
 runtime:
   gpu_count: 6                          # 实际使用的 GPU 数量
-  cuda_visible_devices: "2,3,4,5,6,7"   # 实际使用的 GPU 索引（空则使用全部）
+  cuda_visible_devices: "2,3,4,5,6,7"   # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
   total_gpus: 8                          # 机器总 GPU 数
   gpu_selection_reason: "GPU 0,1 被其他进程占用，使用剩余 6 张空闲 GPU"
 ```
@@ -342,19 +340,19 @@ service:
 
 ## 步骤 3 — 启动服务
 
-**GPU 选择适配**：如果步骤 2.4 检测到部分 GPU 被占用（`runtime.cuda_visible_devices` 非空），启动命令需注入 `CUDA_VISIBLE_DEVICES` 环境变量。
+**GPU 选择适配**：如果步骤 2.4 检测到部分 GPU 被占用（`runtime.cuda_visible_devices` 非空），启动命令需注入对应厂商的 VISIBLE_DEVICES 环境变量（`start_service.sh` 会自动从 `gpu.visible_devices_env` 读取正确的变量名）。
 
 **非 plugin 场景**：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-} <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && ${VISIBLE_DEVICES_ENV}=${VISIBLE_DEVICES:-} <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
 ```
 
 **Plugin 场景**（内联环境变量前缀）：
 ```bash
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-} PATH=/opt/conda/bin:\$PATH <env_inline> <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && ${VISIBLE_DEVICES_ENV}=${VISIBLE_DEVICES:-} PATH=/opt/conda/bin:\$PATH <env_inline> <startup_command> > /flagos-workspace/logs/startup_<mode>.log 2>&1"
 ```
 
-其中 `<mode>` 为 `default`、`native` 或 `flagos`，`<env_inline>` 来自 `toggle_flaggems.py --json` 输出的 `env_inline` 字段。
+其中 `${VISIBLE_DEVICES_ENV}` 从 context.yaml 的 `gpu.visible_devices_env` 获取（如 `CUDA_VISIBLE_DEVICES`、`ASCEND_RT_VISIBLE_DEVICES` 等），`${VISIBLE_DEVICES}` 从 `runtime.cuda_visible_devices` 获取。
 
 ### Plugin 场景 vllm 服务启动模板
 

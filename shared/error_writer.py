@@ -166,34 +166,38 @@ def clear_checkpoint():
 
 
 def _sync_error_to_context(record: dict, log_dir: str):
-    """best-effort 将错误信息同步到 context.yaml。"""
-    try:
-        import yaml
-    except ImportError:
+    """best-effort 将错误信息同步到 context.yaml（通过 update_context.py 避免破坏 YAML 格式）。"""
+    import subprocess
+
+    update_script = None
+    candidates = [
+        os.path.join(log_dir, "..", "scripts", "update_context.py"),
+        "/flagos-workspace/scripts/update_context.py",
+    ]
+    for p in candidates:
+        p = os.path.realpath(p)
+        if os.path.isfile(p):
+            update_script = p
+            break
+
+    if not update_script:
         return
 
-    # 尝试多个可能的 context.yaml 路径
-    candidates = [
-        os.path.join(log_dir, "..", "shared", "context.yaml"),
-        "/flagos-workspace/shared/context.yaml",
-    ]
-    for ctx_path in candidates:
-        ctx_path = os.path.realpath(ctx_path)
-        if os.path.isfile(ctx_path):
-            try:
-                with open(ctx_path, "r", encoding="utf-8") as f:
-                    ctx = yaml.safe_load(f) or {}
-                wf = ctx.setdefault("workflow", {})
-                wf["last_error"] = {
-                    "step": record.get("tool", ""),
-                    "action": "",
-                    "error_type": record.get("error_type", ""),
-                    "error_message": record.get("error_message", ""),
-                    "timestamp": record.get("timestamp", ""),
-                    "recoverable": True,
-                }
-                with open(ctx_path, "w", encoding="utf-8") as f:
-                    yaml.dump(ctx, f, default_flow_style=False, allow_unicode=True)
-            except Exception:
-                pass
-            break
+    error_json = json.dumps({
+        "step": record.get("tool", ""),
+        "action": "",
+        "error_type": record.get("error_type", ""),
+        "error_message": record.get("error_message", ""),
+        "timestamp": record.get("timestamp", ""),
+        "recoverable": True,
+    }, ensure_ascii=False)
+
+    try:
+        subprocess.run(
+            ["python3", update_script,
+             "--json-set", f"workflow.last_error={error_json}",
+             "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass

@@ -235,14 +235,21 @@ docker restart $CONTAINER
 sleep 5
 ```
 
-2. 关闭 FlagGems（调用 service-startup skill 以 native 模式启动）
+2. 关闭 FlagGems，以 native 模式启动服务：
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+```
+等待服务就绪：
+```bash
+docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 120 --max-timeout 900 --log-path /flagos-workspace/logs/startup_native.log --mode native"
+```
 
 3. 运行评测：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
-# 保存结果
-docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_native.json
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml \
+    --output /flagos-workspace/results/gpqa_native.json"
 ```
 
 4. **V1 评测完成后，必须停止服务释放 GPU**：
@@ -262,9 +269,8 @@ sleep 5
 2. 运行评测：
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace/scripts && \
-    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml"
-# 保存结果
-docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json
+    PATH=/opt/conda/bin:\$PATH python3 fast_gpqa.py --config fast_gpqa_config.yaml \
+    --output /flagos-workspace/results/gpqa_flagos.json"
 ```
 
 **强制规则**：V1 和 V2 必须使用相同的 GPU 配置（`CUDA_VISIBLE_DEVICES` 和 `TP_SIZE`），复用 context.yaml 中首次启动时写入的值，禁止重新检测 GPU。

@@ -941,8 +941,9 @@ V2 (Full) → V3 (Optimized) 性能比: 95.2% of V1 (Native)
   - 精度调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/accuracy_tuned_oplist.txt`
   - 性能调优完成后：`docker exec $CONTAINER cp /tmp/flaggems_enable_oplist.txt /flagos-workspace/results/final_oplist.txt`
 - **精度调优后精度结果保存**（步骤5达标时必须执行）：
-  - 将达标轮次的 GPQA 评测结果保存为 V3 精度文件：`docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_flagos_optimized.json`
-  - 同时覆盖 V2 精度文件（最终发布版本即调优后版本）：`docker exec $CONTAINER cp /flagos-workspace/scripts/gpqa_result.json /flagos-workspace/results/gpqa_flagos.json`
+  - 评测时直接通过 `--output` 指定输出路径，无需事后 cp：
+    - V3 精度文件：`fast_gpqa.py ... --output /flagos-workspace/results/gpqa_flagos_optimized.json`
+    - 同时覆盖 V2 精度文件：`docker exec $CONTAINER cp /flagos-workspace/results/gpqa_flagos_optimized.json /flagos-workspace/results/gpqa_flagos.json`
   - 更新 context.yaml：`eval.v3_score` 设为调优后分数，`eval.accuracy_diff` 更新为调优后偏差
 
 ---

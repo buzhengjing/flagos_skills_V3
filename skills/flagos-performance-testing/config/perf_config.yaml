@@ -9,7 +9,7 @@ model:
   name: ""
   tokenizer_path: ""
 
-test_cases:
+test_matrix:
   - name: 4k_input_1k_output
     input_len: 4096
     output_len: 1024
@@ -23,6 +23,7 @@ test_cases:
     output_len: 1024
     enabled: true
 
-concurrency_levels: [1, 4, 16, 64, 128, 256]
+concurrency:
+  levels: [1, 4, 16, 64, 128, 256]
 
 warmup_requests: 2

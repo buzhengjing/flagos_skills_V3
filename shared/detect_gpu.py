@@ -6,11 +6,14 @@
 
 Usage:
     python detect_gpu.py                                    # 输出 JSON 到 stdout
+    python detect_gpu.py --check-free                       # 输出 per-GPU 空闲/占用 JSON
+    python detect_gpu.py --check-free --vendor nvidia       # 指定厂商，跳过探测
     python detect_gpu.py --output /path/to/gpu_info.json    # 同时写入文件
 
 作为模块导入:
-    from detect_gpu import detect_gpu
+    from detect_gpu import detect_gpu, check_gpu_free
     info = detect_gpu()
+    free_info = check_gpu_free(vendor="nvidia")
 """
 
 import argparse
@@ -248,25 +251,147 @@ def detect_gpu() -> Optional[Dict[str, Any]]:
 
 
 # =============================================================================
+# GPU 空闲检测（per-GPU used/free）
+# =============================================================================
+
+# 各厂商的 per-GPU 显存查询命令
+_FREE_QUERY_CMDS = {
+    "nvidia":    "nvidia-smi --query-gpu=index,memory.used,memory.total,memory.free --format=csv,noheader,nounits",
+    "metax":     "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
+}
+
+FREE_THRESHOLD_PCT = 5.0  # 显存占用低于此百分比视为空闲
+
+
+def _parse_csv_gpu_memory(output: str, has_free_col: bool = True) -> List[Dict[str, Any]]:
+    """解析 CSV 格式的 per-GPU 显存输出（nvidia-smi / mx-smi 等）"""
+    gpus = []
+    for line in output.strip().split('\n'):
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) < 3:
+            continue
+        try:
+            idx = int(parts[0])
+            used = float(parts[1])
+            total = float(parts[2])
+            free = float(parts[3]) if has_free_col and len(parts) >= 4 else total - used
+            usage_pct = round(used / total * 100, 1) if total > 0 else 0
+            gpus.append({
+                "index": idx, "used_mib": used, "total_mib": total,
+                "free_mib": round(free, 1), "usage_pct": usage_pct,
+            })
+        except (ValueError, ZeroDivisionError):
+            continue
+    return gpus
+
+
+def _parse_npu_smi_free(output: str) -> List[Dict[str, Any]]:
+    """解析华为 npu-smi info 输出的 per-GPU 显存信息"""
+    import re
+    gpus = []
+    for match in re.finditer(r'(\d+)\s+\d+\s+\w+\s+\w+\s+(\d+)\s*/\s*(\d+)', output):
+        idx, used, total = int(match.group(1)), float(match.group(2)), float(match.group(3))
+        free = total - used
+        usage_pct = round(used / total * 100, 1) if total > 0 else 0
+        gpus.append({
+            "index": idx, "used_mib": used, "total_mib": total,
+            "free_mib": round(free, 1), "usage_pct": usage_pct,
+        })
+    return gpus
+
+
+def _query_gpu_free_for_vendor(vendor: str) -> List[Dict[str, Any]]:
+    """查询指定厂商的 per-GPU 显存信息"""
+    # CSV 格式厂商
+    if vendor in _FREE_QUERY_CMDS:
+        output = _run_cmd(_FREE_QUERY_CMDS[vendor])
+        if output:
+            has_free = vendor == "nvidia"
+            return _parse_csv_gpu_memory(output, has_free_col=has_free)
+
+    # 华为昇腾
+    if vendor == "huawei":
+        output = _run_cmd("npu-smi info")
+        if output:
+            return _parse_npu_smi_free(output)
+
+    return []
+
+
+def check_gpu_free(vendor: str = None) -> Dict[str, Any]:
+    """检测各 GPU 的显存占用情况（多厂商统一接口）
+
+    Args:
+        vendor: 指定厂商（如 "nvidia"），跳过自动探测。
+                传 None 则自动探测（先 detect_gpu 确定厂商，再查询）。
+
+    Returns:
+        {
+            "vendor": str,
+            "free_gpus": [int, ...],
+            "busy_gpus": [int, ...],
+            "total": int,
+            "details": [{index, used_mib, total_mib, free_mib, usage_pct}, ...],
+            "visible_devices_env": str,
+        }
+        details 为空列表表示该厂商暂不支持 per-GPU 检测。
+    """
+    # 确定厂商
+    if not vendor:
+        info = detect_gpu()
+        vendor = info["vendor"] if info else "unknown"
+
+    # 查询 per-GPU 显存
+    details = _query_gpu_free_for_vendor(vendor)
+
+    # 如果指定厂商的 SMI 不支持 per-GPU 查询，尝试遍历所有厂商
+    if not details and not vendor:
+        for v, cli_cmd, _, _ in GPU_VENDORS:
+            if _cli_exists(cli_cmd):
+                details = _query_gpu_free_for_vendor(v)
+                if details:
+                    vendor = v
+                    break
+
+    free_gpus = [d["index"] for d in details if d["usage_pct"] < FREE_THRESHOLD_PCT]
+    busy_gpus = [d["index"] for d in details if d["usage_pct"] >= FREE_THRESHOLD_PCT]
+
+    return {
+        "vendor": vendor,
+        "free_gpus": free_gpus,
+        "busy_gpus": busy_gpus,
+        "total": len(details),
+        "details": details,
+        "visible_devices_env": _get_visible_devices_env(vendor),
+    }
+
+
+# =============================================================================
 # CLI 入口
 # =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="多厂商 GPU 统一检测")
     parser.add_argument("--output", "-o", help="输出 JSON 文件路径")
+    parser.add_argument("--check-free", action="store_true", help="检测 per-GPU 显存占用")
+    parser.add_argument("--vendor", help="指定厂商（跳过自动探测）")
     args = parser.parse_args()
 
-    info = detect_gpu()
-
-    if info is None:
-        print("ERROR: 未检测到 GPU", file=sys.stderr)
-        result = {"error": "no GPU detected"}
+    if args.check_free:
+        result = check_gpu_free(vendor=args.vendor or None)
+        print(f"GPU 空闲检测: {result['vendor']} | "
+              f"{len(result['free_gpus'])} free / {result['total']} total",
+              file=sys.stderr)
     else:
-        # 清理 raw_output（不写入最终输出）
-        result = {k: v for k, v in info.items() if k != "raw_output"}
-        print(f"GPU: {result['vendor']} | {result['name']} | "
-              f"{result['count']}x {result['memory_gb']}GB | "
-              f"source={result['source']}", file=sys.stderr)
+        info = detect_gpu()
+        if info is None:
+            print("ERROR: 未检测到 GPU", file=sys.stderr)
+            result = {"error": "no GPU detected"}
+        else:
+            result = {k: v for k, v in info.items() if k != "raw_output"}
+            print(f"GPU: {result['vendor']} | {result['name']} | "
+                  f"{result['count']}x {result['memory_gb']}GB | "
+                  f"source={result['source']}", file=sys.stderr)
 
     # 输出 JSON
     json_str = json.dumps(result, indent=2, ensure_ascii=False)

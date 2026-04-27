@@ -33,6 +33,7 @@ else:
 
 import argparse
 import json
+import os
 import time
 import traceback
 from datetime import datetime
@@ -53,7 +54,7 @@ except ImportError:
 # 配置
 # =============================================================================
 
-DEFAULT_PLATFORM = "http://110.43.160.159:5050"
+DEFAULT_PLATFORM = os.environ.get("FLAGOS_EVAL_PLATFORM", "http://110.43.160.159:5050")
 
 # 轮询策略: (次数区间, 间隔秒数)
 # 优化：缩短间隔提升感知速度，同时增加轮询次数保持总覆盖时间

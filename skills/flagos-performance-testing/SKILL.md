@@ -163,7 +163,18 @@ docker exec $CONTAINER cp /flagos-workspace/scripts/config/perf_config.yaml /fla
 
 ## 步骤 3：运行 V1 基线测试
 
-此时服务已以 native 模式启动（FlagGems 关闭）。
+**前置条件**：关闭 FlagGems，以 native 模式启动服务。
+
+```bash
+# 关闭 FlagGems
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/toggle_flaggems.py --action disable"
+# 以 native 模式启动服务
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 bash /flagos-workspace/scripts/start_service.sh --mode native > /flagos-workspace/logs/startup_native.log 2>&1"
+# 等待服务就绪
+docker exec $CONTAINER bash -c "bash /flagos-workspace/scripts/wait_for_service.sh --port $PORT --model-name '$MODEL_NAME' --timeout 120 --max-timeout 900 --log-path /flagos-workspace/logs/startup_native.log --mode native"
+```
+
+运行 V1 基线 benchmark：
 
 ```bash
 docker exec $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/benchmark_runner.py \

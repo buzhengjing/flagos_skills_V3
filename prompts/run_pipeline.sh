@@ -646,8 +646,15 @@ if isinstance(ledger, list):
             continue
         step = s.get('step', '')
         status = s.get('status', '')
-        # 步骤04及之后，如果不是 pending 状态，说明段1越界执行了
-        if step >= '04' and status != 'pending':
+        if step >= '04' and status not in ('pending', ''):
+            overflow_steps.append(f'{step}={status}')
+elif isinstance(ledger, dict):
+    for key, s in ledger.items():
+        if not isinstance(s, dict):
+            continue
+        step = str(s.get('step', key))
+        status = s.get('status', '')
+        if step >= '04' and status not in ('pending', ''):
             overflow_steps.append(f'{step}={status}')
 print(','.join(overflow_steps) if overflow_steps else '')
 " 2>/dev/null) || SEG1_OVERFLOW=""
@@ -667,14 +674,19 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 07_performance_tuning --ledger-status pending --ledger-notes '段1越界回滚' \
         --json" >/dev/null 2>&1
+    docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+        --ledger-update 08_release --ledger-status pending --ledger-notes '段1越界回滚' \
+        --json" >/dev/null 2>&1
     # 回滚 workflow 状态字段
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --set workflow.accuracy_ok=false --set workflow.performance_ok=false \
+        --set workflow.qualified=false --set workflow.all_done=false \
         --json" >/dev/null 2>&1
     # 回滚 timing 中越界步骤的计时
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --set-timing steps.quick_accuracy=0 --set-timing steps.accuracy_tuning=0 \
         --set-timing steps.quick_performance=0 --set-timing steps.performance_tuning=0 \
+        --set-timing steps.release=0 \
         --json" >/dev/null 2>&1
     # 同步回滚后的 context 到宿主机快照
     MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
@@ -699,7 +711,7 @@ env = ctx.get('environment', {})
 mdl = ctx.get('model', {})
 fc = ctx.get('flaggems_control', {})
 print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
-- GPU: {gpu.get('count','')}x {gpu.get('type','')}, CUDA_VISIBLE_DEVICES={rt.get('cuda_visible_devices', gpu.get('cuda_visible_devices',''))}
+- GPU: {gpu.get('count','')}x {gpu.get('type','')}, {gpu.get('visible_devices_env','CUDA_VISIBLE_DEVICES')}={rt.get('cuda_visible_devices', gpu.get('cuda_visible_devices',''))}
 - TP: {rt.get('tp_size','')}
 - 端口: {svc.get('port','')}
 - FlagGems 算子数: {svc.get('enable_oplist_count','')}

@@ -130,6 +130,10 @@ if [ "${HAS_HISTORY}" = "1" ]; then
         rm -f /tmp/flaggems_enable_oplist.txt
         rm -f /root/gems.txt
 
+        # 清理残留的评测结果文件（避免被误 cp 为新结果）
+        rm -f /workspace/gpqa_result.json
+        rm -f /flagos-workspace/scripts/gpqa_result.json
+
         # 停止可能残留的 vllm/sglang 服务进程
         pkill -f 'vllm.entrypoints' 2>/dev/null || true
         pkill -f 'sglang' 2>/dev/null || true

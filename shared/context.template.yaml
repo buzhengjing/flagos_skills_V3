@@ -202,7 +202,7 @@ runtime:
   tp_reason: ""           # TP 推算原因
   gpu_count: 0            # 实际使用的 GPU 数量
   total_gpus: 0           # 宿主机总 GPU 数量
-  cuda_visible_devices: "" # CUDA_VISIBLE_DEVICES 值
+  cuda_visible_devices: "" # 指定卡的索引值（环境变量名由 gpu.visible_devices_env 决定）
   gpu_selection_reason: "" # GPU 选择原因
   thinking_model: false   # 是否为 thinking model
 
