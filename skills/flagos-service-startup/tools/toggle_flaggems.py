@@ -26,12 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def env_to_inline(env_dict):
     """将 env dict 转为内联前缀字符串: VAR1=val1 VAR2=val2"""
+    import shlex
     parts = []
     for k, v in env_dict.items():
-        if " " in v or "'" in v:
-            parts.append(f"{k}='{v}'")
-        else:
-            parts.append(f"{k}={v}")
+        parts.append(f"{k}={shlex.quote(str(v))}")
     return " ".join(parts)
 
 
@@ -439,6 +437,7 @@ def _compute_enabled_from_disabled(disabled_ops):
                     ops = [l.strip() for l in f if l.strip()]
                 if ops:
                     all_ops = ops
+                    print(f"  ✓ 全量算子列表来源: {path} ({len(ops)} 个)")
                     break
             except Exception:
                 continue
@@ -449,9 +448,35 @@ def _compute_enabled_from_disabled(disabled_ops):
                 all_ops = list(flag_gems.all_registered_ops())
             elif hasattr(flag_gems, "all_ops"):
                 all_ops = list(flag_gems.all_ops())
+            if all_ops:
+                print(f"  ✓ 全量算子列表来源: flag_gems API ({len(all_ops)} 个)")
+        except Exception:
+            pass
+    # 静态 fallback：从 flag_gems 包的 OPS_REGISTRY 或 __init__ 中提取
+    if not all_ops:
+        try:
+            import flag_gems
+            # 尝试从 flag_gems 的内部注册表获取
+            for attr in ("OPS_REGISTRY", "_ops_registry", "REGISTERED_OPS", "_registered_ops"):
+                reg = getattr(flag_gems, attr, None)
+                if reg and hasattr(reg, '__iter__'):
+                    all_ops = sorted(set(str(k) for k in reg))
+                    if all_ops:
+                        print(f"  ✓ 全量算子列表来源: flag_gems.{attr} ({len(all_ops)} 个)")
+                        break
+            # 尝试从 enable 函数的默认参数或文档中提取
+            if not all_ops and hasattr(flag_gems, 'enable'):
+                import inspect as _insp
+                src = _insp.getsource(flag_gems.enable)
+                # 搜索源码中的算子列表定义
+                op_match = re.findall(r'"(\w+)"', src)
+                if len(op_match) > 5:
+                    all_ops = sorted(set(op_match))
+                    print(f"  ✓ 全量算子列表来源: flag_gems.enable() 源码解析 ({len(all_ops)} 个)")
         except Exception:
             pass
     if not all_ops:
+        print("  ✗ 无法获取全量算子列表（运行时文件为空/不存在，flag_gems API 无可用接口）")
         return None
     return sorted(set(all_ops) - set(disabled_ops))
 
@@ -529,14 +554,30 @@ def modify_enable_call(files, enabled_ops=None, disabled_ops=None):
 
         # 已注入环境变量驱动代码 → 只写控制文件 + 设环境变量，不改源码
         if FLAGGEMS_INJECT_MARKER in content:
-            # 有禁用算子 → only_enable（白名单）；全开 → unused
-            if disabled_ops and enabled_ops is not None and len(enabled_ops) > 0:
-                control_mode = "only_enable"
-                _write_ops_control_file(enabled_ops=enabled_ops, disabled_ops=None)
+            if disabled_ops:
+                # 有禁用算子 → only_enable 白名单模式（从 txt 全量列表减去禁用）
+                if not enabled_ops:
+                    enabled_ops = _compute_enabled_from_disabled(disabled_ops)
+                if enabled_ops:
+                    control_mode = "only_enable"
+                    _write_ops_control_file(enabled_ops=enabled_ops, disabled_ops=None)
+                elif "enable_unused" in caps:
+                    # fallback: 全量列表不可用但 enable(unused=) 可用
+                    control_mode = "unused"
+                    _write_ops_control_file(enabled_ops=None, disabled_ops=disabled_ops)
+                    print(f"  ⚠ 全量算子列表不可用，降级到 unused 模式（禁用 {disabled_ops}）")
+                else:
+                    # 最终 fallback: 既无全量列表也无 unused 能力，写空控制文件让 enable() 全量启动
+                    control_mode = "unused"
+                    _write_ops_control_file(enabled_ops=None, disabled_ops=disabled_ops)
+                    print(f"  ⚠ 全量算子列表不可用且无 unused 能力，算子控制可能不生效")
             else:
+                # 全量开启 → unused 模式（无禁用）
                 control_mode = "unused"
-                _write_ops_control_file(enabled_ops=None, disabled_ops=disabled_ops if disabled_ops is not None else [])
+                _write_ops_control_file(enabled_ops=None, disabled_ops=[])
             os.environ["FLAGGEMS_CONTROL_MODE"] = control_mode
+            # modify-enable 隐含 FlagGems 应开启，确保 USE_FLAGGEMS=1
+            _persist_env_vars({"FLAGGEMS_CONTROL_MODE": control_mode, "USE_FLAGGEMS": "1"})
             results.append({
                 "file": filepath,
                 "method": f"env_control({control_mode})",
@@ -816,6 +857,17 @@ def main():
             env_vars["USE_FLAGGEMS"] = "1"
             if not os.path.isfile(OPS_CONTROL_FILE):
                 _write_ops_control_file(enabled_ops=None, disabled_ops=[])
+            # 自动继承已有 control file 的模式，避免丢失 disabled_ops 配置
+            if os.path.isfile(OPS_CONTROL_FILE):
+                try:
+                    with open(OPS_CONTROL_FILE, 'r', encoding='utf-8') as cf:
+                        ctrl = json.load(cf)
+                    if ctrl.get("include"):
+                        env_vars["FLAGGEMS_CONTROL_MODE"] = "only_enable"
+                    elif ctrl.get("unused"):
+                        env_vars["FLAGGEMS_CONTROL_MODE"] = "unused"
+                except (json.JSONDecodeError, OSError):
+                    pass
         else:
             env_vars["USE_FLAGGEMS"] = "0"
 

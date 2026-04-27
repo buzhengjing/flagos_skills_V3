@@ -165,6 +165,8 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 ```
 输出 JSON 包含 `env_vars` 和 `env_inline` 字段（`USE_FLAGGEMS=1`），同时写入控制文件 `/root/flaggems_ops_control.json`（默认全量开启）。
 
+**注意**：如果 `optimization.disabled_ops` 非空（之前已禁用部分算子），应改用 `--action modify-enable --disabled-ops '<list>'`，确保已禁用算子不被重新加载。`--action enable` 会自动检测已有 control file 并继承 `FLAGGEMS_CONTROL_MODE`，但显式使用 `modify-enable` 更可靠。
+
 **服务启动命令**（使用内联环境变量前缀）：
 ```bash
 docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 <startup_command> > /flagos-workspace/logs/startup_flagos.log 2>&1"
@@ -572,9 +574,21 @@ environment:
 # 失败恢复
 
 如果 flagos 模式启动失败：
-1. 保存失败日志
-2. 自动切回 Native 验证
-3. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
+1. **备份崩溃日志**（避免重试时被覆盖）：`cp startup_default.log startup_default_crashed.log`
+2. **算子级诊断重试**（最多 2 轮）：
+   ```bash
+   ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
+     --log-path /flagos-workspace/logs/startup_default_crashed.log --json
+   ```
+   - `crashed_ops` 非空 → 禁用问题算子 → 重启服务（仍为 FlagGems 模式）：
+     ```bash
+     ${CMD_PREFIX} python3 /flagos-workspace/scripts/toggle_flaggems.py \
+       --action modify-enable --disabled-ops "<crashed_op1>,<crashed_op2>" --json
+     ```
+   - 重启成功 → 记录 `disabled_ops` 到 context.yaml，继续正常流程
+   - 重启仍失败 → 再次 crash-log 解析，累积禁用算子，最多 2 轮
+3. `crashed_ops` 为空或 2 轮重试全部失败 → 切回 Native 验证
+4. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
 
 ### 问题日志写入
 
@@ -635,8 +649,23 @@ ISSUE_EOF"
 ## 编排层指令（步骤3 — 固化决策）
 
 **FlagGems 模式启动失败处理**（不含超时，超时属于正常等待）：
-- 调用 `issue_reporter.py full --type operator-crash`（参数见上方"失败恢复"章节）
-- 排除操作失误：native 模式也失败 → 环境问题，需人工介入
-- 确认是 FlagGems 问题 → `workflow.service_ok = false` → 跳过4/6 → 直接到8发布（私有）
+1. 备份崩溃日志：`cp startup_default.log startup_default_crashed.log`
+2. 调用 `diagnose_ops.py crash-log` 解析崩溃日志
+3. `crashed_ops` 非空 → 禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（最多 2 轮）
+4. 重试成功 → 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
+5. 重试全部失败或 `crashed_ops` 为空 → 调用 `issue_reporter.py full --type operator-crash`
+6. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
+7. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
+
+**崩溃重试时的服务启动方式**：禁用算子后重启服务时，**必须使用 `start_service.sh`**（而非直接 `docker exec -d` 拼接 vllm 命令），确保 `FLAGGEMS_CONTROL_MODE` 等环境变量被正确加载：
+```bash
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 bash /flagos-workspace/scripts/start_service.sh --mode flagos"
+```
+如果必须使用 `docker exec -d` 直接启动，则需内联传递环境变量：
+```bash
+docker exec -d $CONTAINER bash -c "source /etc/environment && export USE_FLAGGEMS=1 && cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH vllm serve ..."
+```
+
+**关键判定**：`workflow.service_ok` 表示"FlagGems 模式可用"，不是"native 模式可用"。native 能启动但 FlagGems 不能 → `service_ok = false`。只有 FlagGems 模式（含禁用部分算子后）能正常启动 → `service_ok = true`。
 
 **算子列表持久化**：flagos 模式首次启动成功后，执行上方"算子列表检查"章节中的 `initial_oplist.txt` 保存（L506）。

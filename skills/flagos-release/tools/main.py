@@ -145,6 +145,11 @@ def main():
         help="Plugin 发布模式：镜像 tag 追加 -plugin，仓库名追加 -plugin，发布后更新已发布仓库 README"
     )
     parser.add_argument(
+        "--only-harbor",
+        action="store_true",
+        help="只执行 Harbor 推送（commit→tag→push），跳过 README/ModelScope/HuggingFace"
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="详细输出模式"
@@ -179,6 +184,12 @@ def main():
     if args.plugin_mode:
         config.plugin_image_mode = True
         config.publish.existing_harbor_image = ""
+
+    if args.only_harbor:
+        config.stages_to_run = ["publish"]
+        config.publish.generate_readme = False
+        config.publish.publish_modelscope = False
+        config.publish.publish_huggingface = False
 
     # 自动填充配置
     print("正在检测环境信息...")

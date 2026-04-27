@@ -567,7 +567,11 @@ def _extract_extra_kwargs(call_text):
 
 
 def _build_inject_block(caps, indent="", extra_kwargs=None):
-    """构建注入代码块，保留原始调用中的 record/once/path 参数"""
+    """构建注入代码块，保留原始调用中的 record/once/path 参数
+
+    添加 plugin 场景检测：如果存在 VLLM_FL_PREFER_ENABLED 环境变量，
+    跳过注入逻辑，让 plugin 的 dispatch 机制接管算子控制。
+    """
     has_only_enable = "only_enable" in caps
     extra_kwargs = extra_kwargs or {}
 
@@ -582,9 +586,11 @@ def _build_inject_block(caps, indent="", extra_kwargs=None):
     lines = [
         FLAGGEMS_INJECT_COMMENT,
         "import os as _fgos",
-        'if _fgos.environ.get("USE_FLAGGEMS", "1") == "1":',
+        "# Plugin 场景检测：如果存在 plugin 环境变量，跳过注入逻辑，让 plugin dispatch 接管",
+        'if _fgos.environ.get("VLLM_FL_PREFER_ENABLED") is not None:',
+        "    pass  # Plugin 场景，跳过注入逻辑",
+        'elif _fgos.environ.get("USE_FLAGGEMS", "1") == "1":',
         "    import flag_gems as _fg",
-        '    _fg_mode = _fgos.environ.get("FLAGGEMS_CONTROL_MODE", "unused")',
         "    _fg_ops = {}",
         "    try:",
         "        import json as _fgjson",
@@ -592,6 +598,9 @@ def _build_inject_block(caps, indent="", extra_kwargs=None):
         "            _fg_ops = _fgjson.load(_fgf)",
         "    except (FileNotFoundError, Exception):",
         "        pass",
+        '    _fg_mode = _fgos.environ.get("FLAGGEMS_CONTROL_MODE", "")',
+        "    if not _fg_mode:",
+        '        _fg_mode = "only_enable" if _fg_ops.get("include") else "unused"',
     ]
     if has_only_enable:
         lines += [

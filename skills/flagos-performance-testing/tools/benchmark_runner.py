@@ -25,6 +25,7 @@ else:
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import time
@@ -37,11 +38,22 @@ import yaml
 
 # error_writer 集成
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# service_monitor: 性能测试期间服务活性监控（容器内 scripts/ 同目录，repo 内跨 skill）
+_this_dir_bm = Path(__file__).resolve().parent
+for _p in [_this_dir_bm, _this_dir_bm.parent.parent.parent / "flagos-service-startup" / "tools"]:
+    if (_p / "service_monitor.py").is_file():
+        sys.path.insert(0, str(_p)); break
 try:
     from error_writer import write_last_error, write_checkpoint
 except ImportError:
     def write_last_error(*a, **kw): pass
     def write_checkpoint(*a, **kw): pass
+
+try:
+    from service_monitor import ServiceMonitor, find_latest_startup_log
+except ImportError:
+    ServiceMonitor = None
+    find_latest_startup_log = None
 
 # =============================================================================
 # 配置加载
@@ -49,8 +61,7 @@ except ImportError:
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config" / "perf_config.yaml"
 
-# 超时已禁用（设为 None），benchmark 将等待子进程自然结束
-DEFAULT_TIMEOUT = None
+DEFAULT_TIMEOUT = 1800  # 30 minutes
 
 
 def load_yaml(path: Path) -> Dict[str, Any]:
@@ -565,11 +576,32 @@ def main():
     print(f"测试用例: {[tc['name'] for tc in test_matrix]}")
     print(f"模式: {args.mode}")
 
+    # 启动服务活性监控
+    monitor = None
+    if ServiceMonitor is not None:
+        log_path = find_latest_startup_log() if find_latest_startup_log else None
+        monitor = ServiceMonitor(log_path=log_path)
+        monitor.start()
+        if log_path:
+            print(f"[MONITOR] 服务活性监控已启动 (日志: {log_path})")
+        else:
+            print(f"[MONITOR] 服务活性监控已启动 (仅进程检测)")
+
     # 执行测试
     all_results = {}
     tc_timings = {}
     total_start = time.time()
+    service_crashed = False
     for tc in test_matrix:
+        # 每个用例前检查服务状态
+        if monitor and monitor.is_dead():
+            reason = monitor.death_reason()
+            print(f"\n[MONITOR] 服务崩溃: {reason.get('detail', '未知')}")
+            if reason.get('log_line'):
+                print(f"[MONITOR] 日志: {reason['log_line']}")
+            print(f"[MONITOR] 跳过剩余测试用例")
+            service_crashed = True
+            break
         print(f"\n{'='*50}")
         print(f"测试用例: {tc['name']} (input={tc['input_len']}, output={tc['output_len']})")
         print('='*50)
@@ -579,6 +611,16 @@ def main():
         )
         tc_timings[tc["name"]] = all_results[tc["name"]].get("_elapsed_seconds", 0)
     total_elapsed = round(time.time() - total_start, 1)
+
+    if monitor:
+        if not service_crashed and monitor.is_dead():
+            reason = monitor.death_reason()
+            print(f"\n[MONITOR] ⚠ 测试期间服务崩溃: {reason.get('detail', '未知')}")
+            if reason.get('log_line'):
+                print(f"[MONITOR] 日志: {reason['log_line']}")
+            print("[MONITOR] 性能测试结果可能不完整")
+            service_crashed = True
+        monitor.stop()
 
     # 打印摘要
     if not args.dry_run:
@@ -592,6 +634,9 @@ def main():
             "timestamp_start": datetime.fromtimestamp(total_start).isoformat(),
             "timestamp_end": datetime.now().isoformat(),
         }
+        if service_crashed and monitor:
+            timing["service_crashed"] = True
+            timing["crash_reason"] = monitor.death_reason()
         output_path = save_results(
             all_results, config,
             output_name=args.output_name,
@@ -606,7 +651,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        write_checkpoint("05_perf_eval", "性能评测", "running_benchmark",
+        step_id = os.environ.get("FLAGOS_STEP_ID", "06_quick_performance")
+        step_title = os.environ.get("FLAGOS_STEP_TITLE", "性能评测")
+        write_checkpoint(step_id, step_title, "running_benchmark",
                          action_detail=" ".join(sys.argv))
         main()
     except Exception as e:

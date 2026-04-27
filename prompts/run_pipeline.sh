@@ -261,14 +261,29 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
+**步骤3 FlagGems 启动崩溃算子诊断**：
+- FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
+  docker exec \${CONTAINER} bash -c \"cp /flagos-workspace/logs/startup_default.log /flagos-workspace/logs/startup_default_crashed.log 2>/dev/null; true\"
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \\
+    --log-path /flagos-workspace/logs/startup_default_crashed.log --json\"
+- crashed_ops 非空 → 禁用问题算子（toggle_flaggems.py --action modify-enable --disabled-ops \"算子列表\"）→ 重启服务 → 最多重试 2 轮
+- 重试成功 → 记录 disabled_ops 到 context.yaml 的 optimization.disabled_ops，正常继续
+- 重试全部失败或 crashed_ops 为空 → 走下方 Issue 强制规则
+
 **步骤3 Issue 强制规则**：
 - FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
   docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
-    --type operator-crash --log-path /flagos-workspace/logs/startup_flagos.log \\
+    --type operator-crash --log-path /flagos-workspace/logs/startup_default_crashed.log \\
     --context-yaml /flagos-workspace/shared/context.yaml --repo flagos-ai/FlagGems \\
     --output-dir /flagos-workspace/results/ --json\"
 - 生成的 issue 文件路径写入 context.yaml 的 issues.submitted[]
 - 追加写入 logs/issues_startup.log（格式见 CLAUDE.md 问题日志规范）
+
+**步骤3 FlagGems 崩溃后流程控制**：
+- 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
+- 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
+- service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
+- service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
 
 完成步骤3后，通过 docker cp 同步 context 到宿主机：
   docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
@@ -299,14 +314,29 @@ ${STEP1}
 
 步骤2/3 按 CLAUDE.md 工作流定义执行。GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 
+**步骤3 FlagGems 启动崩溃算子诊断**：
+- FlagGems 模式启动崩溃时（不含超时），先备份崩溃日志再诊断：
+  docker exec \${CONTAINER} bash -c \"cp /flagos-workspace/logs/startup_default.log /flagos-workspace/logs/startup_default_crashed.log 2>/dev/null; true\"
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \\
+    --log-path /flagos-workspace/logs/startup_default_crashed.log --json\"
+- crashed_ops 非空 → 禁用问题算子（toggle_flaggems.py --action modify-enable --disabled-ops \"算子列表\"）→ 重启服务 → 最多重试 2 轮
+- 重试成功 → 记录 disabled_ops 到 context.yaml 的 optimization.disabled_ops，正常继续
+- 重试全部失败或 crashed_ops 为空 → 走下方 Issue 强制规则
+
 **步骤3 Issue 强制规则**：
 - FlagGems 模式启动崩溃（不含超时）→ 必须调用 issue_reporter.py：
   docker exec -e GITHUB_TOKEN=${GITHUB_TOKEN} ${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/issue_reporter.py full \\
-    --type operator-crash --log-path /flagos-workspace/logs/startup_flagos.log \\
+    --type operator-crash --log-path /flagos-workspace/logs/startup_default_crashed.log \\
     --context-yaml /flagos-workspace/shared/context.yaml --repo flagos-ai/FlagGems \\
     --output-dir /flagos-workspace/results/ --json\"
 - 生成的 issue 文件路径写入 context.yaml 的 issues.submitted[]
 - 追加写入 logs/issues_startup.log（格式见 CLAUDE.md 问题日志规范）
+
+**步骤3 FlagGems 崩溃后流程控制**：
+- 算子诊断重试全部失败或 crashed_ops 为空 → 提交 issue 后设置 workflow.service_ok=false
+- 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
+- service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
+- service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
 
 完成步骤3后，通过 docker cp 同步 context 到宿主机：
   docker cp ${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
@@ -427,7 +457,7 @@ elif isinstance(ledger, list):
         if isinstance(s, dict) and s.get('status') == 'success':
             last = s.get('step','')
 print(f'{ctr}|{env}|{last}')
-" 2>&1
+" 2>/dev/null
 }
 
 # ===== GPU 服务清理（脚本退出时自动执行） =====
@@ -465,7 +495,70 @@ except: pass
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 未找到有效容器，跳过 GPU 服务清理"
     fi
 }
-trap cleanup_gpu_services EXIT
+trap 'cleanup_gpu_services' EXIT
+
+# ===== 段间完成性校验 =====
+# 检查 context_snapshot.yaml 中 workflow_ledger 的步骤完成状态
+# 用法: check_seg_complete <model> <keyword1> [keyword2...]
+# 返回: "complete" 或 "incomplete"
+check_seg_complete() {
+    local model="$1"
+    shift
+    local keywords_csv=""
+    for kw in "$@"; do
+        [ -n "$keywords_csv" ] && keywords_csv="${keywords_csv},"
+        keywords_csv="${keywords_csv}${kw}"
+    done
+    python3 - "$model" "$keywords_csv" <<'PYEOF'
+import yaml, sys
+model = sys.argv[1]
+keywords = [k.lower() for k in sys.argv[2].split(",") if k]
+try:
+    with open(f"/data/flagos-workspace/{model}/config/context_snapshot.yaml") as f:
+        ctx = yaml.safe_load(f)
+except:
+    print("incomplete")
+    sys.exit(0)
+ledger = ctx.get("workflow_ledger", {}).get("steps", {})
+found = set()
+items = ledger.items() if isinstance(ledger, dict) else [(i, s) for i, s in enumerate(ledger)] if isinstance(ledger, list) else []
+for key, step_data in items:
+    if not isinstance(step_data, dict):
+        continue
+    step_name = str(step_data.get("step", key)).lower()
+    status = step_data.get("status", "")
+    if status in ("success", "failed", "skipped"):
+        for kw in keywords:
+            if kw in step_name:
+                found.add(kw)
+if all(kw in found for kw in keywords):
+    print("complete")
+else:
+    print("incomplete")
+PYEOF
+}
+
+# 输出 ledger 状态摘要
+print_ledger_summary() {
+    local ctx_file="$1"
+    python3 - "$ctx_file" <<'PYEOF'
+import yaml, sys
+try:
+    with open(sys.argv[1]) as f:
+        ctx = yaml.safe_load(f)
+    ledger = ctx.get("workflow_ledger", {}).get("steps", {})
+    if isinstance(ledger, dict):
+        for k, v in ledger.items():
+            if isinstance(v, dict):
+                print(f'    {v.get("step",k)}: {v.get("status","unknown")}')
+    elif isinstance(ledger, list):
+        for s in ledger:
+            if isinstance(s, dict):
+                print(f'    {s.get("step","?")}: {s.get("status","unknown")}')
+except Exception as e:
+    print(f"    (ledger 读取失败: {e})")
+PYEOF
+}
 
 # ===== 全流程计时 =====
 PIPELINE_START_TS=$(date +%s)
@@ -550,9 +643,27 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 - gems_txt_path: {env.get('flaggems_txt_path', svc.get('gems_txt_path',''))}
 - max_model_len: {svc.get('max_model_len','')}
 - thinking_model: {rt.get('thinking_model','')}
-- integration_type: {fc.get('integration_type','')}''')
+- integration_type: {fc.get('integration_type','')}
+- disabled_ops: {ctx.get('optimization',{}).get('disabled_ops',[])}
+- service_ok: {ctx.get('workflow',{}).get('service_ok','')}''')
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
+# 检查 service_ok：FlagGems 崩溃且无法恢复时跳过精度/性能评测，直接到发布
+SERVICE_OK=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+print(ctx.get('workflow',{}).get('service_ok', True))
+" 2>/dev/null) || SERVICE_OK="True"
+
+SKIP_SEG2=false
+if [ "${SERVICE_OK}" = "False" ]; then
+    echo "⚠ service_ok=false（FlagGems 不可用），跳过段2（步骤4-7），直接进入段3发布"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段2 跳过：service_ok=false"
+    SKIP_SEG2=true
+fi
+
+if [ "${SKIP_SEG2}" = "false" ]; then
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
 PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
 ${COMMON_TOKENS}
@@ -579,6 +690,7 @@ ${SEG2_CTX_SUMMARY}
 - [步骤7] 性能算子调优（条件触发：performance_ok=false 时执行）
 
 **执行前**：
+0. 检查 workflow.service_ok：如果为 false，输出 \"[段2] service_ok=false，FlagGems 不可用，跳过步骤4-7\" 后立即停止
 1. 读取容器内 /flagos-workspace/shared/context.yaml 获取模型路径、GPU 配置、FlagGems 状态等关键参数
 2. 读取 skills/flagos-eval-comprehensive/SKILL.md 了解精度评测工具用法
 3. 读取 skills/flagos-performance-testing/SKILL.md 了解性能评测工具用法
@@ -588,6 +700,11 @@ ${SEG2_CTX_SUMMARY}
 - 步骤4完成后如 accuracy_ok=false → 立即执行步骤5（5完成后再进入6）
 - 步骤6完成后如 performance_ok=false → 执行步骤7（elimination 逐删策略）
 - 调优后产出 V3 结果（flagos_optimized.json），更新 context.yaml
+
+**V2 服务启动时保留已禁用算子**：
+- 如果 context.yaml 中 optimization.disabled_ops 非空（步骤3算子诊断已禁用部分算子），V2 启动时必须使用 toggle_flaggems.py --action modify-enable --disabled-ops 而非 --action enable
+- --action enable 会在 control file 不存在时重置为全量开启，--action modify-enable 保证禁用列表生效
+- 步骤5/7 的算子调优在此基础上累加禁用
 
 **算子调优硬性约束**：
 - 步骤7性能算子调优**必须**通过容器内 operator_search.py run 执行完整自动化循环
@@ -675,7 +792,39 @@ CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || {
 }
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
+
+# 段2 完成性校验：步骤4（精度评测）必须有明确结果
+echo "  段2 ledger 状态:"
+print_ledger_summary "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+
+SEG2_STATUS=$(check_seg_complete "${MODEL}" "04" "accuracy")
+if [ "$SEG2_STATUS" != "complete" ]; then
+    echo ""
+    echo "  ⚠ 段2 未正常完成（步骤4精度评测无结果），重新执行段2..."
+    SEG2_START_TS=$(date +%s)
+    claude -p "${PROMPT_SEG2}" \
+        --permission-mode auto \
+        --output-format stream-json \
+        --verbose \
+        --debug-file "${DEBUG_FILE}.seg2_retry" \
+        --max-turns 250 \
+        2>&1 | tee -a "${LOG_FILE}" \
+             | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 4 --cost-file "${LOG_DIR}/seg2_retry_cost.txt" ${FILTER_FLAGS} || true
+    # 重试后再次同步 context
+    CTX_FILE="/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+    SHARED_CTX="/data/flagos-workspace/${MODEL}/shared/context.yaml"
+    if [ -f "${SHARED_CTX}" ]; then
+        cp "${SHARED_CTX}" "${CTX_FILE}"
+    elif [ -n "${SEG_CTR}" ] && docker inspect --type=container "${SEG_CTR}" &>/dev/null; then
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "${CTX_FILE}" 2>/dev/null || true
+    fi
+    echo "  段2 重试后 ledger 状态:"
+    print_ledger_summary "${CTX_FILE}"
+fi
 echo ""
+
+fi  # end SKIP_SEG2 check
 
 # 从 context_snapshot 提取段3所需的关键参数
 SEG3_CTX_SUMMARY=$(python3 -c "
@@ -684,19 +833,20 @@ with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
 wf = ctx.get('workflow', {})
 ev = ctx.get('eval', {})
-perf = ctx.get('perf', {})
+perf = ctx.get('performance', {})
 svc = ctx.get('service', {})
 gpu = ctx.get('gpu', {})
 mdl = ctx.get('model', {})
 ws = ctx.get('workspace', {})
 print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 - GPU: {gpu.get('count','')}x {gpu.get('type','')}
+- mount_mode: {ws.get('mount_mode','')}
 - service_ok: {wf.get('service_ok','')}
 - accuracy_ok: {wf.get('accuracy_ok','')}
 - performance_ok: {wf.get('performance_ok','')}
 - qualified: {wf.get('qualified','')}
 - V1 精度: {ev.get('v1_score','')}%, V2 精度: {ev.get('v2_score','')}%, 偏差: {ev.get('accuracy_diff','')}%
-- 性能 ratio: {perf.get('ratio_pct','')}%
+- 性能 ratio: {perf.get('min_ratio','')}%
 - 宿主机路径: {ws.get('host_path','')}''')
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
@@ -807,7 +957,7 @@ gpu = ctx.get('gpu', {})
 ws = ctx.get('workspace', {})
 wf = ctx.get('workflow', {})
 ev = ctx.get('eval', {})
-perf = ctx.get('perf', {})
+perf = ctx.get('performance', {})
 rt = ctx.get('runtime', {})
 env = ctx.get('environment', {})
 image = ctx.get('image', {})
@@ -872,6 +1022,7 @@ ${SEG4_CTX_SUMMARY}
 - 所有 issue 提交到 flagos-ai/vllm-plugin-FL（非 FlagGems）
 - 算子集复用主流程已达标版本，不重新调优
 - 启动环境变量：USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true + 已有 blacklist
+- 如果 disabled_ops 非空，启动时必须使用 toggle_flaggems.py --action modify-enable --disabled-ops 保留禁用列表
 
 **进度输出**：步骤开始/完成时输出 [步骤N] 标记，关键命令后输出 ✓/✗ 结果摘要。
 
@@ -1010,12 +1161,26 @@ except Exception as e:
 " 2>/dev/null) || HARBOR_DONE="needed"
 
         if [ "${HARBOR_DONE}" = "needed" ]; then
+            # D1: 兜底发布前检查 service_ok，服务未启动成功则跳过
+            FALLBACK_SERVICE_OK=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    print(ctx.get('workflow',{}).get('service_ok', False))
+except:
+    print('False')
+" 2>/dev/null) || FALLBACK_SERVICE_OK="False"
+            if [ "${FALLBACK_SERVICE_OK}" != "True" ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底跳过：服务未启动成功，不具备发布条件"
+            else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
-            python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" 2>&1 && \
+            python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" --only-harbor 2>&1 && \
                 echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
             # 重新同步 context 和 traces（main.py 可能更新了）
             docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
             docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
+            fi
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Harbor 发布已完成，跳过兜底"
         fi
@@ -1115,7 +1280,7 @@ except: print('True')
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底生成性能对比文件..."
         python3 skills/flagos-performance-testing/tools/performance_compare.py \
             --native "${NATIVE_PERF}" \
-            --flagos-full "${FLAGOS_PERF}" \
+            --flagos-initial "${FLAGOS_PERF}" \
             --output "${COMPARE_CSV}" 2>&1 && \
             echo "  ✓ performance_compare.csv 已生成" || echo "  ⚠ 性能对比文件生成失败"
     fi
@@ -1127,7 +1292,7 @@ except: print('True')
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底生成 V3 性能对比文件..."
         python3 skills/flagos-performance-testing/tools/performance_compare.py \
             --native "${NATIVE_PERF}" \
-            --flagos-full "${FLAGOS_PERF}" \
+            --flagos-initial "${FLAGOS_PERF}" \
             --flagos-optimized "${OPTIMIZED_PERF}" \
             --output "${COMPARE_V3_CSV}" 2>&1 && \
             echo "  ✓ performance_compare_v3.csv 已生成" || echo "  ⚠ V3 性能对比文件生成失败"

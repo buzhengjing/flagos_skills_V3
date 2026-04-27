@@ -209,6 +209,8 @@ SCRIPT_MAP=(
     "skills/flagos-service-startup/tools/toggle_flaggems.py:scripts/toggle_flaggems.py"
     # 服务就绪检测
     "skills/flagos-service-startup/tools/wait_for_service.sh:scripts/wait_for_service.sh"
+    # 服务活性监控（评测/性能测试期间）
+    "skills/flagos-service-startup/tools/service_monitor.py:scripts/service_monitor.py"
     # 服务启动（供 operator_search.py 调用）
     "skills/flagos-service-startup/tools/start_service.sh:scripts/start_service.sh"
     # TP 推算

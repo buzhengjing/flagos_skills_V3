@@ -82,15 +82,29 @@ def install_plugin(repo_url=DEFAULT_REPO, branch="main", proxy=None, editable=Fa
             "command": clone_cmd,
         }
 
-    # install
+    # install (with pip mirror fallback)
     edit_flag = "-e " if editable else ""
-    install_cmd = f"pip install --no-build-isolation {edit_flag}{CLONE_DIR}"
-    code, out, err = run_cmd(install_cmd, timeout=600, env=env)
-    if code != 0:
+    pip_mirrors = [
+        None,
+        "https://mirrors.aliyun.com/pypi/simple/",
+        "https://pypi.tuna.tsinghua.edu.cn/simple/",
+        "https://mirrors.cloud.tencent.com/pypi/simple/",
+    ]
+    last_err = ""
+    for mirror in pip_mirrors:
+        index_flag = f" -i {mirror}" if mirror else ""
+        install_cmd = f"pip install --no-build-isolation{index_flag} {edit_flag}{CLONE_DIR}"
+        code, out, err = run_cmd(install_cmd, timeout=600, env=env)
+        if code == 0:
+            break
+        last_err = err
+        if mirror:
+            print(f"  pip install 失败 (mirror={mirror})，尝试下一个镜像源...")
+    else:
         return {
             "success": False,
             "action": "install",
-            "error": f"pip install 失败: {err}",
+            "error": f"pip install 失败 (所有镜像源均失败): {last_err}",
             "command": install_cmd,
         }
 

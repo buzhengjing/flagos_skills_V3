@@ -65,7 +65,7 @@ DEFAULT_OPTIMIZER_SCRIPT = "/flagos-workspace/scripts/operator_optimizer.py"
 DEFAULT_WAIT_SCRIPT = "/flagos-workspace/scripts/wait_for_service.sh"
 DEFAULT_APPLY_CONFIG_SCRIPT = "/flagos-workspace/scripts/apply_op_config.py"
 
-SERVICE_STOP_CMD = "pkill -f 'vllm\\|sglang'"
+SERVICE_STOP_CMD = "pkill -f 'vllm.entrypoints|sglang.launch_server'"
 SERVICE_WAIT_TIMEOUT = 300  # 秒
 GPU_MEM_FREE_THRESHOLD = 0.95  # GPU 显存空闲比例阈值（>95% 视为已释放）
 GPU_RELEASE_TIMEOUT = 30       # GPU 显存释放等待超时（秒）
@@ -77,30 +77,46 @@ GPU_RELEASE_POLL_INTERVAL = 2  # 轮询间隔（秒）
 # =============================================================================
 
 def _parse_gpu_memory() -> List[Dict[str, float]]:
-    """解析 nvidia-smi 输出，返回每张 GPU 的显存信息"""
-    try:
-        result = subprocess.run(
-            "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
-            shell=True, capture_output=True, text=True, timeout=10
-        )
-        if result.returncode != 0:
-            return []
-        gpus = []
-        for line in result.stdout.strip().split('\n'):
-            parts = [p.strip() for p in line.split(',')]
-            if len(parts) >= 3:
-                try:
-                    gpus.append({
-                        "index": int(parts[0]),
-                        "used_mib": float(parts[1]),
-                        "total_mib": float(parts[2]),
-                        "free_ratio": 1.0 - float(parts[1]) / float(parts[2]) if float(parts[2]) > 0 else 0,
-                    })
-                except (ValueError, ZeroDivisionError):
-                    continue
-        return gpus
-    except Exception:
-        return []
+    """解析 GPU 显存信息，支持多厂商 SMI 工具（nvidia-smi / mx-smi / npu-smi）"""
+    smi_commands = [
+        ("nvidia-smi", "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
+        ("mx-smi", "mx-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits"),
+    ]
+
+    # 如果环境变量指定了厂商，优先使用对应工具
+    gpu_vendor = os.environ.get('GPU_VENDOR', '').lower()
+    if gpu_vendor == 'metax':
+        smi_commands = [smi_commands[1], smi_commands[0]]
+    elif gpu_vendor == 'nvidia':
+        smi_commands = [smi_commands[0]]
+
+    for name, cmd in smi_commands:
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                continue
+            gpus = []
+            for line in result.stdout.strip().split('\n'):
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 3:
+                    try:
+                        gpus.append({
+                            "index": int(parts[0]),
+                            "used_mib": float(parts[1]),
+                            "total_mib": float(parts[2]),
+                            "free_ratio": 1.0 - float(parts[1]) / float(parts[2]) if float(parts[2]) > 0 else 0,
+                        })
+                    except (ValueError, ZeroDivisionError):
+                        continue
+            if gpus:
+                return gpus
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        except Exception:
+            continue
+    return []
 
 
 def wait_gpu_memory_release(timeout: int = GPU_RELEASE_TIMEOUT,
@@ -290,6 +306,28 @@ def _detect_flaggems_capabilities() -> List[str]:
 
 OPS_CONTROL_FILE = "/root/flaggems_ops_control.json"
 FLAGGEMS_INJECT_MARKER = "FLAGGEMS_CONTROL_MODE"
+ETC_ENVIRONMENT = "/etc/environment"
+
+
+def _persist_control_mode(control_mode: str):
+    """持久化 FLAGGEMS_CONTROL_MODE + USE_FLAGGEMS 到 /etc/environment
+
+    _apply_via_control_file() 只在 FlagGems 启用路径调用，所以 USE_FLAGGEMS=1 始终正确。
+    同时写入避免中断恢复场景下 /etc/environment 残留 USE_FLAGGEMS=0。
+    """
+    try:
+        existing = ""
+        if os.path.isfile(ETC_ENVIRONMENT):
+            with open(ETC_ENVIRONMENT, 'r', encoding='utf-8') as f:
+                existing = f.read()
+        lines = [l for l in existing.split('\n')
+                 if not l.startswith("FLAGGEMS_CONTROL_MODE=") and not l.startswith("USE_FLAGGEMS=")]
+        lines.append(f"USE_FLAGGEMS=1")
+        lines.append(f"FLAGGEMS_CONTROL_MODE={control_mode}")
+        with open(ETC_ENVIRONMENT, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(l for l in lines if l is not None) + '\n')
+    except Exception as e:
+        print(f"  WARN: 持久化环境变量失败: {e}")
 
 
 def _apply_via_control_file(test_enabled: List[str], test_disabled: List[str],
@@ -302,6 +340,9 @@ def _apply_via_control_file(test_enabled: List[str], test_disabled: List[str],
     else:
         data["unused"] = sorted(test_disabled)
         os.environ["FLAGGEMS_CONTROL_MODE"] = "unused"
+
+    # 持久化到 /etc/environment，确保 start_service.sh 启动的新进程能读到
+    _persist_control_mode(control_mode)
 
     save_json(data, OPS_CONTROL_FILE)
     print(f"  [env_control] mode={control_mode}, 控制文件: {OPS_CONTROL_FILE}")
@@ -453,7 +494,9 @@ def _apply_txt_fallback(enabled_ops: List[str], gems_txt_path: Optional[str]) ->
 def restart_service(stop_cmd: str, startup_cmd: str,
                     wait_script: str, wait_timeout: int = SERVICE_WAIT_TIMEOUT,
                     env_inline: Optional[str] = None,
-                    port: Optional[int] = None) -> bool:
+                    port: Optional[int] = None,
+                    model_name: Optional[str] = None,
+                    max_timeout: Optional[int] = None) -> bool:
     """重启服务：停止 → 启动 → 等待就绪"""
     print("\n[重启服务]")
 
@@ -487,14 +530,22 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     bg_cmd = f"nohup {actual_cmd} > {log_path} 2>&1 &"
     run_cmd(bg_cmd, check=False)
 
-    # 等待就绪（传递端口号，避免非默认端口时超时）
+    # 传递 --log-path 启用动态超时模式（监控日志活动而非固定超时）
     wait_cmd = f"bash {wait_script} --timeout {wait_timeout}"
+    wait_cmd += f" --log-path {log_path}"
+    if max_timeout:
+        wait_cmd += f" --max-timeout {max_timeout}"
+    else:
+        wait_cmd += f" --max-timeout 1800"
     if port:
         wait_cmd += f" --port {port}"
-    print(f"  等待服务就绪 (最多 {wait_timeout}s, port={port or 8000})...")
+    if model_name:
+        wait_cmd += f" --model-name '{model_name}'"
+    effective_max = max_timeout or 1800
+    print(f"  等待服务就绪 (动态模式, 无活动超时={wait_timeout}s, 绝对上限={effective_max}s, port={port or 8000})...")
     result = run_cmd(
         wait_cmd,
-        timeout=wait_timeout + 30,
+        timeout=effective_max + 30,
         check=False
     )
     if result.returncode != 0:
@@ -600,7 +651,9 @@ def preflight_framework_check(service_startup_cmd: str,
                                perf_config: str,
                                native_throughput: float,
                                wait_script: str = DEFAULT_WAIT_SCRIPT,
-                               benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT) -> Dict[str, Any]:
+                               benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT,
+                               model_name: Optional[str] = None,
+                               max_timeout: Optional[int] = None) -> Dict[str, Any]:
     """
     Plugin 模式搜索前预检：验证 plugin 框架本身是否有性能开销。
 
@@ -618,7 +671,8 @@ def preflight_framework_check(service_startup_cmd: str,
     env_inline = "USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false"
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline, port=svc_port):
+                           env_inline=env_inline, port=svc_port,
+                           model_name=model_name, max_timeout=max_timeout):
         return {"pass": False, "ratio": 0, "throughput": 0,
                 "message": "ERROR: 框架预检服务启动失败"}
 
@@ -720,7 +774,9 @@ def run_search_step(state_path: str, perf_config: str,
                     benchmark_script: str = DEFAULT_BENCHMARK_SCRIPT,
                     toggle_script: str = DEFAULT_TOGGLE_SCRIPT,
                     wait_script: str = DEFAULT_WAIT_SCRIPT,
-                    apply_config_script: str = DEFAULT_APPLY_CONFIG_SCRIPT) -> Dict[str, Any]:
+                    apply_config_script: str = DEFAULT_APPLY_CONFIG_SCRIPT,
+                    model_name: Optional[str] = None,
+                    max_timeout: Optional[int] = None) -> Dict[str, Any]:
     """执行单轮搜索步骤"""
 
     step_timing = {}
@@ -766,7 +822,8 @@ def run_search_step(state_path: str, perf_config: str,
     t0 = time.time()
     svc_port = _read_service_port()
     if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline, port=svc_port):
+                           env_inline=env_inline, port=svc_port,
+                           model_name=model_name, max_timeout=max_timeout):
         return {"action": "error", "message": "服务重启失败"}
     step_timing["restart_seconds"] = round(time.time() - t0, 1)
 
@@ -835,6 +892,8 @@ def run_full_search(state_path: str, perf_config: str,
                     gems_txt_path: Optional[str] = None,
                     plugin_mode: bool = False,
                     capabilities: Optional[List[str]] = None,
+                    model_name: Optional[str] = None,
+                    max_timeout: Optional[int] = None,
                     **kwargs) -> Dict[str, Any]:
     """运行完整搜索循环"""
     # 读取状态并检查残留 completed 状态
@@ -878,6 +937,8 @@ def run_full_search(state_path: str, perf_config: str,
                 service_startup_cmd, perf_config, native_tp,
                 wait_script=kwargs.get("wait_script", DEFAULT_WAIT_SCRIPT),
                 benchmark_script=kwargs.get("benchmark_script", DEFAULT_BENCHMARK_SCRIPT),
+                model_name=model_name,
+                max_timeout=max_timeout,
             )
             preflight_elapsed = round(time.time() - t_pf, 1)
             if not framework_check.get("pass") and framework_check.get("ratio", 1.0) < 0.80:
@@ -918,6 +979,8 @@ def run_full_search(state_path: str, perf_config: str,
             gems_txt_path=gems_txt_path,
             plugin_mode=plugin_mode,
             capabilities=capabilities,
+            model_name=model_name,
+            max_timeout=max_timeout,
             **kwargs
         )
 
@@ -1012,6 +1075,8 @@ def main():
     common.add_argument("--toggle-script", default=DEFAULT_TOGGLE_SCRIPT)
     common.add_argument("--wait-script", default=DEFAULT_WAIT_SCRIPT)
     common.add_argument("--apply-config-script", default=DEFAULT_APPLY_CONFIG_SCRIPT)
+    common.add_argument("--model-name", help="模型名称（传递给 wait_for_service.sh 精确验证）")
+    common.add_argument("--max-timeout", type=int, default=1800, help="服务启动绝对超时上限（秒）")
 
     # run — 完整搜索
     run_parser = subparsers.add_parser("run", parents=[common], help="运行完整搜索循环")
@@ -1035,6 +1100,8 @@ def main():
             gems_txt_path=args.gems_txt_path,
             plugin_mode=args.plugin_mode,
             capabilities=caps,
+            model_name=args.model_name,
+            max_timeout=args.max_timeout,
             optimizer_script=args.optimizer_script,
             benchmark_script=args.benchmark_script,
             toggle_script=args.toggle_script,
@@ -1051,6 +1118,8 @@ def main():
             gems_txt_path=args.gems_txt_path,
             plugin_mode=args.plugin_mode,
             capabilities=caps,
+            model_name=args.model_name,
+            max_timeout=args.max_timeout,
             optimizer_script=args.optimizer_script,
             benchmark_script=args.benchmark_script,
             toggle_script=args.toggle_script,
@@ -1087,7 +1156,9 @@ def main():
 
 if __name__ == "__main__":
     try:
-        write_checkpoint("05_perf_eval", "算子优化", "running_operator_search",
+        step_id = os.environ.get("FLAGOS_STEP_ID", "07_perf_tuning")
+        step_title = os.environ.get("FLAGOS_STEP_TITLE", "算子优化")
+        write_checkpoint(step_id, step_title, "running_operator_search",
                          action_detail=" ".join(sys.argv))
         main()
     except Exception as e:

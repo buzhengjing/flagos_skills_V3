@@ -70,12 +70,10 @@ from ops_constants import (
 
 def env_to_inline(env_dict):
     """将 env dict 转为内联前缀字符串: VAR1=val1 VAR2=val2"""
+    import shlex
     parts = []
     for k, v in env_dict.items():
-        if " " in v or "'" in v:
-            parts.append(f"{k}='{v}'")
-        else:
-            parts.append(f"{k}={v}")
+        parts.append(f"{k}={shlex.quote(str(v))}")
     return " ".join(parts)
 
 

@@ -287,32 +287,32 @@ write_error_json() {
     local signal_line="$5"
 
     python3 -c "
-import json, os
+import json, os, sys
 from datetime import datetime
 log_dir = '/flagos-workspace/logs' if os.path.isdir('/flagos-workspace/logs') else '/tmp'
 record = {
     'tool': 'wait_for_service.sh',
     'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
     'exit_code': 1,
-    'error_type': '${error_type}',
-    'error_message': '''${error_message}''',
+    'error_type': sys.argv[1],
+    'error_message': sys.argv[2],
     'context': {
-        'port': ${PORT},
-        'host': '${HOST}',
-        'timeout': ${TIMEOUT},
-        'max_timeout': ${MAX_TIMEOUT},
-        'elapsed_seconds': ${ELAPSED},
-        'phase_at_failure': '${phase}',
-        'failure_signal': '${signal}',
-        'failure_line': '''${signal_line}''',
-        'mode': '${MODE}',
+        'port': int(sys.argv[3]),
+        'host': sys.argv[4],
+        'timeout': int(sys.argv[5]),
+        'max_timeout': int(sys.argv[6]),
+        'elapsed_seconds': int(sys.argv[7]),
+        'phase_at_failure': sys.argv[8],
+        'failure_signal': sys.argv[9],
+        'failure_line': sys.argv[10],
+        'mode': sys.argv[11],
     },
 }
 with open(os.path.join(log_dir, '_last_error.json'), 'w') as f:
     json.dump(record, f, ensure_ascii=False, indent=2)
 with open(os.path.join(log_dir, '_error_history.jsonl'), 'a') as f:
     f.write(json.dumps(record, ensure_ascii=False) + '\n')
-" 2>/dev/null || true
+" "$error_type" "$error_message" "$PORT" "$HOST" "$TIMEOUT" "$MAX_TIMEOUT" "$ELAPSED" "$phase" "$signal" "$signal_line" "$MODE" 2>/dev/null || true
 }
 
 # ============================================================

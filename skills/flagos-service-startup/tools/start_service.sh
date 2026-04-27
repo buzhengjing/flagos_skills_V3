@@ -12,12 +12,23 @@
 set -euo pipefail
 
 CONTEXT_YAML="/flagos-workspace/shared/context.yaml"
-MODE="${1:-}"
-if [ "$MODE" = "--mode" ]; then
-    MODE="${2:-flagos}"
-else
-    MODE="flagos"
-fi
+MODE="flagos"
+
+# 解析参数（支持 --mode flagos / --mode=flagos / 裸值）
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --mode=*) MODE="${1#--mode=}"; shift ;;
+        --mode)   MODE="${2:-flagos}"; shift 2 ;;
+        *)        shift ;;
+    esac
+done
+
+# flagos_optimized 也是 FlagGems 启用模式
+case "$MODE" in
+    native)       USE_FLAGGEMS_FLAG=0 ;;
+    flagos|flagos_optimized|flagos_full)  USE_FLAGGEMS_FLAG=1 ;;
+    *)            USE_FLAGGEMS_FLAG=1 ;;
+esac
 
 # 从 context.yaml 读取启动参数
 read_context() {
@@ -74,30 +85,48 @@ if [ -n "$CUDA_VISIBLE" ]; then
     export CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE"
 fi
 
-# FlagGems 开关：native 模式关闭，flagos 模式开启
-if [ "$MODE" = "native" ]; then
-    export USE_FLAGGEMS=0
-else
-    export USE_FLAGGEMS=1
-fi
-
 # 确保 conda 环境在 PATH 中
 export PATH=/opt/conda/bin:$PATH
+
+# 加载持久化的环境变量（FLAGGEMS_CONTROL_MODE 等）
+if [ -f /etc/environment ]; then
+    set -a
+    . /etc/environment
+    set +a
+fi
+
+# 从控制文件推断 FLAGGEMS_CONTROL_MODE（兜底：docker exec 不继承宿主进程环境变量）
+if [ -z "${FLAGGEMS_CONTROL_MODE:-}" ] && [ -f /root/flaggems_ops_control.json ]; then
+    HAS_INCLUDE=$(PATH=/opt/conda/bin:$PATH python3 -c "
+import json
+try:
+    d = json.load(open('/root/flaggems_ops_control.json'))
+    print('only_enable' if d.get('include') else 'unused')
+except: print('')
+" 2>/dev/null)
+    if [ -n "$HAS_INCLUDE" ]; then
+        export FLAGGEMS_CONTROL_MODE="$HAS_INCLUDE"
+        echo "[start_service.sh] FLAGGEMS_CONTROL_MODE=$HAS_INCLUDE (从控制文件推断)"
+    fi
+fi
+
+# 根据 mode 强制覆盖 USE_FLAGGEMS（确保 native/flagos 模式正确）
+export USE_FLAGGEMS="$USE_FLAGGEMS_FLAG"
 
 LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
 
 # 构建启动命令
 if [ "$FRAMEWORK" = "vllm" ]; then
-    CMD="vllm serve ${MODEL_PATH} \
+    CMD="vllm serve '${MODEL_PATH}' \
         --host 0.0.0.0 \
         --port ${PORT} \
-        --served-model-name ${MODEL_NAME} \
+        --served-model-name '${MODEL_NAME}' \
         --tensor-parallel-size ${TP_SIZE} \
         --max-model-len ${MAX_MODEL_LEN} \
         --trust-remote-code"
 
     # Thinking model 添加 reasoning parser
-    if [ "$THINKING" = "True" ]; then
+    if [ "$THINKING" = "true" ]; then
         # 根据模型名推断 parser
         MODEL_LOWER=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
         if echo "$MODEL_LOWER" | grep -qE 'qwen3|qwq'; then
@@ -109,16 +138,17 @@ if [ "$FRAMEWORK" = "vllm" ]; then
 else
     # sglang
     CMD="python3 -m sglang.launch_server \
-        --model-path ${MODEL_PATH} \
+        --model-path '${MODEL_PATH}' \
         --host 0.0.0.0 \
         --port ${PORT} \
         --tp ${TP_SIZE} \
+        --context-length ${MAX_MODEL_LEN} \
         --trust-remote-code"
 fi
 
-echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}, USE_FLAGGEMS=${USE_FLAGGEMS}"
+echo "[start_service.sh] mode=${MODE}, framework=${FRAMEWORK}, port=${PORT}, tp=${TP_SIZE}"
 echo "[start_service.sh] CMD: ${CMD}"
 
-# 后台启动，日志写入文件（USE_FLAGGEMS 通过 export 传递给子进程）
-nohup bash -c "cd /flagos-workspace && USE_FLAGGEMS=${USE_FLAGGEMS} ${CMD}" > "${LOG_FILE}" 2>&1 &
+# 后台启动，日志写入文件
+nohup bash -c "cd /flagos-workspace && ${CMD}" > "${LOG_FILE}" 2>&1 &
 echo "[start_service.sh] PID=$!, log=${LOG_FILE}"

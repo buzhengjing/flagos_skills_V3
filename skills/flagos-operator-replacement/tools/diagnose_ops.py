@@ -38,6 +38,14 @@ from ops_constants import OOT_OPERATORS, OPERATOR_GROUPS
 # 场景 1：崩溃日志解析
 # =============================================================================
 
+# vLLM 日志前缀清理：
+#   完整格式: (EngineCore pid=711) ERROR 04-23 03:21:46 [core.py:1108] ...
+#   简短格式: (APIServer pid=331) RuntimeError: ...
+VLLM_PREFIX_RE = re.compile(
+    r'^\([^)]+\)\s+'
+    r'(?:(?:ERROR|INFO|WARNING)\s+\S+\s+\S+\s+\[\S+\] ?)?'
+)
+
 # 已知错误模式（对应 SKILL.md 5 个已知模式 + 扩展）
 CRASH_PATTERNS = [
     # 模式 1: SM 架构不支持
@@ -119,6 +127,8 @@ OP_EXTRACT_PATTERNS = [
     re.compile(r"(?:operator|op|算子)[:\s]+['\"]?(\w+)['\"]?", re.IGNORECASE),
     # File "xxx/flag_gems/xxx/softmax.py"
     re.compile(r'File\s+"[^"]*flag_gems[^"]*?/(\w+)\.py"'),
+    # Triton 内联代码中的 FlagGems 函数调用: xxx_func_tensor_scalar / xxx_func
+    re.compile(r"(\w+?)_func(?:_tensor_scalar|_scalar_tensor|_tensor_tensor)?\s*\("),
 ]
 
 
@@ -130,10 +140,15 @@ def extract_ops_from_text(text: str, known_ops: set) -> List[str]:
             op_name = match.group(1).lower().strip("_")
             if op_name in known_ops:
                 found.add(op_name)
-            # 尝试原始大小写
             op_raw = match.group(1)
             if op_raw in known_ops:
                 found.add(op_raw)
+            # fallback: xxx_func_tensor_scalar 等 FlagGems 特征模式，即使不在 known_ops 中也提取
+            # 仅限带 _tensor_scalar/_scalar_tensor/_tensor_tensor 后缀的匹配，避免 compile_func 等误报
+            if "_func" in match.re.pattern and op_name and len(op_name) > 2:
+                full_match = match.group(0)
+                if any(s in full_match for s in ("_tensor_scalar", "_scalar_tensor", "_tensor_tensor")):
+                    found.add(op_name)
     return sorted(found)
 
 
@@ -164,26 +179,42 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
 
     log_lines = log_content.split("\n")
 
-    # 提取 traceback 块
+    # 提取 traceback 块（支持 vLLM 带前缀的日志格式）
+    # RuntimeError 的多行内容也纳入 traceback 块
     traceback_blocks = []
     current_tb = []
     in_traceback = False
+    in_error_body = False
     for i, line in enumerate(log_lines):
-        if "Traceback" in line and "most recent call" in line.lower():
+        stripped = VLLM_PREFIX_RE.sub('', line)
+        is_tb_start = "Traceback" in stripped and "most recent call" in stripped.lower()
+        # 新 traceback 开始时，先保存当前块
+        if is_tb_start:
+            if current_tb:
+                traceback_blocks.append(current_tb)
             in_traceback = True
-            current_tb = [(i + 1, line)]
+            in_error_body = False
+            current_tb = [(i + 1, stripped)]
         elif in_traceback:
-            current_tb.append((i + 1, line))
-            # traceback 结束标志：非空、非缩进行（Error 行）
-            if line and not line.startswith(" ") and not line.startswith("\t") and "Error" in line:
+            current_tb.append((i + 1, stripped))
+            if stripped and not stripped.startswith(" ") and not stripped.startswith("\t") and "Error" in stripped:
+                in_traceback = False
+                in_error_body = True
+        elif in_error_body:
+            # RuntimeError 多行内容：缩进行、空行、带引号的内联代码
+            if not stripped or stripped.startswith(" ") or stripped.startswith("\t") or stripped.startswith("'"):
+                current_tb.append((i + 1, stripped))
+            else:
                 traceback_blocks.append(current_tb)
                 current_tb = []
-                in_traceback = False
-        # 防止无限累积
-        if in_traceback and len(current_tb) > 100:
+                in_error_body = False
+        if (in_traceback or in_error_body) and len(current_tb) > 100:
             traceback_blocks.append(current_tb)
             current_tb = []
             in_traceback = False
+            in_error_body = False
+    if current_tb:
+        traceback_blocks.append(current_tb)
 
     # 分析每个 traceback 块
     evidence = []
@@ -218,12 +249,12 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
 
     # 也扫描非 traceback 区域的单行错误
     for i, line in enumerate(log_lines):
+        stripped = VLLM_PREFIX_RE.sub('', line)
         for cp in CRASH_PATTERNS:
-            if cp["pattern"].search(line):
-                ops_found = extract_ops_from_text(line, known_ops)
+            if cp["pattern"].search(stripped):
+                ops_found = extract_ops_from_text(stripped, known_ops)
                 if ops_found:
                     crashed_ops.update(ops_found)
-                    # 避免与 traceback 重复
                     already_covered = any(
                         e["line_start"] <= i + 1 <= e["line_end"] for e in evidence
                     )
@@ -234,7 +265,7 @@ def analyze_crash_log(log_path: str, ops_file: Optional[str] = None) -> Dict[str
                             "line_end": i + 1,
                             "error_type": cp["type"],
                             "error_description": cp["description"],
-                            "error_message": line.strip()[:200],
+                            "error_message": stripped.strip()[:200],
                         })
 
     return {

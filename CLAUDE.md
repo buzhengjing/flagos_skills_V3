@@ -322,7 +322,7 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 10. **算子列表以运行时 txt（`flaggems_enable_oplist.txt` 或 `gems.txt`）为唯一权威来源**。每次服务启动后必须检查该文件。不在此文件中的算子必须被显式关闭。算子调优中的关闭列表只是控制输入，实际生效以运行时 txt 为准
 11. **容器内 Python 必须用 conda 环境**。所有 `docker exec` 中的 python3/pip 命令必须加 `PATH=/opt/conda/bin:$PATH` 前缀
 12. **宿主机 mkdir/ls 严禁使用花括号展开**。`mkdir -p /path/{a,b,c}` 会被 sandbox 拦截。容器内不受此限制
-13. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：步骤 9-10 中 plugin 安装失败或服务崩溃允许终止（写 issue 后停止）
+13. **流程不可中途终止**。精度/性能不达标不是终止理由，标记 `ok=false` 继续下一步，最终走到步骤8（私有发布）。唯一允许终止：Claude API 本身不可用。**例外**：①步骤3 FlagGems 启动崩溃（算子诊断重试仍失败或非算子原因），设 `workflow.service_ok=false` → 提交 issue 后跳过步骤4-7，直接到步骤8（私有发布）；②步骤 9-10 中 plugin 安装失败或服务崩溃允许终止（写 issue 后停止）
 14. **workflow 状态字段必须与实际数据一致**。`accuracy_ok=true` 仅当V2精度下降 ≤ 阈值；`performance_ok=true` 仅当 min_ratio ≥ target_ratio
 15. **中间文件禁止写入项目源码目录**。只能写入 `/data/flagos-workspace/<model>/config/` 或容器内 `/flagos-workspace/config/`
 16. **工具脚本失败后必须读取 `/flagos-workspace/logs/_last_error.json`**，将错误同步到 context.yaml
@@ -333,8 +333,8 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 21. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
 22. **工具脚本必须从项目目录或容器内 `/flagos-workspace` 执行**，禁止复制到 `/tmp`
 23. **步骤5与4、7与6严禁同时进行（GPU 互斥）**。整体串行：4 → 5 → 6 → 7
-24. **步骤5禁用的算子必须传递给步骤6和7**。禁用算子逐步累计
-25. **elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停
+24. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。任何需要启动 FlagGems 服务的步骤，如果 `optimization.disabled_ops` 非空，必须使用 `toggle_flaggems.py --action modify-enable --disabled-ops` 而非 `--action enable`（后者在 control file 不存在时会重置为全量开启）
+25. **步骤7性能算子调优 elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
 26. **步骤5/7的 trace 文件独立**，不混入步骤4/6的 trace
 27. **Claude Code Bash 工具受沙箱限制**。外部路径文件读写必须通过 `docker exec` 或 `docker cp`。禁止直接操作 `/data/...` 等宿主机路径
 28. **每个 segment 结束时必须停止推理服务释放 GPU 显存**
@@ -346,6 +346,8 @@ bash skills/flagos-container-preparation/tools/setup_workspace.sh $CONTAINER
 34. **步骤 9 安装失败或步骤 10 服务崩溃必须停止任务**。写 issue 后设置 `plugin_workflow.crash_stopped=true`，不继续后续步骤
 35. **步骤 10-12 复用主流程 GPU 配置和算子集**。禁止重新检测 GPU，禁止重新调优算子
 36. **Plugin 镜像 tag 在原 date_tag 后追加 `-plugin`**。如 `202603301143-plugin`
+37. **V1 和 V2 精度评测必须使用完全相同的参数**。包括 max_tokens、题目数量、评测脚本版本，禁止任何一方使用不同配置
+38. **`operator_search.py` 失败时禁止手动重试循环**。编排层不得在 operator_search.py 返回失败后自行构造重试逻辑，应直接标记失败并继续流程
 
 ---
 

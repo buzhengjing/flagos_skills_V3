@@ -1,0 +1,40 @@
+[pre-flight] 搜索宿主机模型路径: google/gemma-3-1b-it ...
+  ✓ 找到: /data/models/models/gemma-3-1b-it
+============================================================
+  FlagOS 全自动迁移流程
+============================================================
+  目标: nv_gems_tree (镜像，自动识别)
+  模型: google/gemma-3-1b-it
+  模型路径: /data/models/models/gemma-3-1b-it (自动检测)
+  模式: V1 + V2 + V3（不达标时自动算子优化）
+  权限: --permission-mode auto + settings.local.json allowlist (89 rules)
+============================================================
+
+  ✓ 已注入 google/gemma-3-1b-it 模型特定权限规则
+[2026-04-27 10:40:13] 启动 Claude Code 全自动流程...
+
+  宿主机历史数据已归档到: /data/flagos-workspace/google/gemma-3-1b-it/archive/20260427_104013/
+日志文件:
+  原始事件流: /data/flagos-workspace/google/gemma-3-1b-it/logs/claude_pipeline_20260427_104013.log
+  可读执行记录: /data/flagos-workspace/google/gemma-3-1b-it/logs/claude_full_20260427_104013.log
+  流水线日志: /data/flagos-workspace/google/gemma-3-1b-it/logs/pipeline.log
+  内部 debug: /data/flagos-workspace/google/gemma-3-1b-it/logs/claude_debug_20260427_104013.log
+
+
+╔══════════════════════════════════════════════════════════════╗
+║  段1/3  容器准备 + 环境检测 + 服务启动  (步骤 1→2→3)       ║
+╚══════════════════════════════════════════════════════════════╝
+[2026-04-27 10:40:13] 段1 开始
+  ⏱ ●[1](0s) ○[2] ○[3] ○[4] ○[5] ○[6] ○[7] ○[8] ○[9] ○[10] ○[11] ○[12] ○[13]  0% 总0s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[步骤1] 容器准备 — 开始
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+检测 GPU 厂商并确认镜像存在。
+  ▶ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null && echo "GPU_VENDOR=nvidia" || (npu-smi info 2>/dev/null && echo "GPU_VENDOR=huawei" || echo "GPU_VENDOR=unknown")
+  ▶ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null; echo "---"; nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | head -1
+    NVIDIA H20-3e, 143771 MiB  (10 lines)
+✓ GPU: 8x NVIDIA H20-3e (143GB each), vendor=nvidia
+✓ 容器创建成功: `gemma-3-1b-it_flagos_0427_1041`
+  ▶ docker exec gemma-3-1b-it_flagos_0427_1041 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -2
+  ▶ bash skills/flagos-container-preparation/tools/setup_workspace.sh gemma-3-1b-it_flagos_0427_1041 google/gemma-3-1b-it --skip-archive 2>&1 | tail -30
+    NVIDIA H20-3e, 143771 MiB

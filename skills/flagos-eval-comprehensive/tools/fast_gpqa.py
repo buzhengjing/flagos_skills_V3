@@ -25,11 +25,23 @@ import yaml
 # error_writer 集成（容器内: eval/ 目录，error_writer 在 scripts/ 目录）
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+# service_monitor: 评测期间服务活性监控（容器内 scripts/ 同目录，repo 内跨 skill）
+_this_dir = Path(__file__).resolve().parent
+for _p in [_this_dir, _this_dir.parent / "scripts",
+           _this_dir.parent.parent.parent / "flagos-service-startup" / "tools"]:
+    if (_p / "service_monitor.py").is_file():
+        sys.path.insert(0, str(_p)); break
 try:
     from error_writer import write_last_error, write_checkpoint
 except ImportError:
     def write_last_error(*a, **kw): pass
     def write_checkpoint(*a, **kw): pass
+
+try:
+    from service_monitor import ServiceMonitor, find_latest_startup_log
+except ImportError:
+    ServiceMonitor = None
+    find_latest_startup_log = None
 
 
 # =============================================================================
@@ -530,12 +542,41 @@ def run_fast_gpqa(
 
     task_cfg = TaskConfig(**task_kwargs)
 
+    # 启动服务活性监控
+    monitor = None
+    if ServiceMonitor is not None:
+        log_path = find_latest_startup_log() if find_latest_startup_log else None
+        monitor = ServiceMonitor(log_path=log_path)
+        monitor.start()
+        if log_path:
+            print(f"[MONITOR] 服务活性监控已启动 (日志: {log_path})")
+        else:
+            print(f"[MONITOR] 服务活性监控已启动 (仅进程检测)")
+
     try:
         result = run_task(task_cfg=task_cfg)
     except Exception as e:
+        if monitor and monitor.is_dead():
+            reason = monitor.death_reason()
+            print(f"\n[MONITOR] 服务崩溃: {reason.get('detail', '未知')}")
+            if reason.get('log_line'):
+                print(f"[MONITOR] 日志: {reason['log_line']}")
+            monitor.stop()
+            return {'error': f"服务崩溃 ({reason.get('type', 'unknown')}): {reason.get('detail', '')}", 'service_crashed': True, 'crash_reason': reason}
         print(f"[ERROR] 评测失败: {e}")
         traceback.print_exc()
         return {'error': str(e)}
+    finally:
+        if monitor:
+            monitor.stop()
+
+    # 评测完成后检查服务状态
+    if monitor and monitor.is_dead():
+        reason = monitor.death_reason()
+        print(f"\n[MONITOR] ⚠ 评测期间服务崩溃: {reason.get('detail', '未知')}")
+        if reason.get('log_line'):
+            print(f"[MONITOR] 日志: {reason['log_line']}")
+        print("[MONITOR] 评测结果可能不完整")
 
     # Step 8: 解析结果
     score, raw_details = parse_result(result)
@@ -560,7 +601,12 @@ def run_fast_gpqa(
         'total_duration_seconds': total_elapsed,
         'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
         'work_dir': work_dir,
-        '_meta': {
+    }
+    if monitor and monitor.is_dead():
+        reason = monitor.death_reason()
+        report['service_crashed'] = True
+        report['crash_reason'] = reason
+    report['_meta'] = {
             'model': '模型名称或路径',
             'benchmark': '评测基准名称（固定 gpqa_diamond）',
             'mode': '评测模式: standard（普通模型）/ thinking（思维链模型）',
@@ -575,7 +621,6 @@ def run_fast_gpqa(
             'eval_duration_seconds': '实际评测阶段耗时（秒）',
             'total_duration_seconds': '总耗时（含探测，秒）',
             'work_dir': 'evalscope 原始输出目录（含预测、报告、日志）',
-        },
     }
 
     # 写 JSON 报告

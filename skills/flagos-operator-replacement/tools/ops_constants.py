@@ -32,6 +32,7 @@ OPERATOR_GROUPS = {
         "abs", "neg", "tanh", "sigmoid", "gelu", "silu", "relu",
         "add", "sub", "mul", "div", "add_scalar", "sub_scalar", "mul_scalar",
         "div_scalar",
+        "floor_div",
     ],
     "index": [
         "gather", "scatter", "scatter_add_0", "index", "index_select",
@@ -40,7 +41,7 @@ OPERATOR_GROUPS = {
     "reduce": [
         "cumsum", "sort", "sort_stable", "argmax", "arange_start",
         "sum", "mean", "max", "min", "softmax", "log_softmax",
-        "layer_norm", "rms_norm", "group_norm",
+        "layer_norm", "group_norm",
     ],
 }
 
@@ -61,6 +62,7 @@ RUNTIME_TO_ATEN_MAP = {
     "conv_depthwise2d": "_conv_depthwise2d",
     "new_zeros": "new_zeros",
     "new_ones": "new_ones",
+    "floor_div": "floor_divide",
 }
 
 # aten 算子名 -> 运行时函数名 反向映射
@@ -92,6 +94,7 @@ OP_RISK_LEVELS = {
         "cos", "sin", "pow_scalar", "reciprocal", "exp", "log", "sqrt", "rsqrt",
         "abs", "neg", "tanh", "relu",
         "add", "sub", "mul", "div", "add_scalar", "sub_scalar", "mul_scalar", "div_scalar",
+        "floor_div",
         # index 低频
         "scatter", "scatter_add_0", "index", "slice_scatter", "select_scatter",
         # reduce 低频

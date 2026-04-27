@@ -52,8 +52,8 @@ provides:
 **启动前互斥检查**：性能测试启动前，必须确认没有正在运行的精度评测进程。并发执行会互相抢占 GPU 资源，导致结果不可信。
 
 ```bash
-# 检查是否有评测进程在运行（eval_aime.py / eval_erqa.py / eval_monitor.py）
-docker exec $CONTAINER bash -c "pgrep -f 'eval_aime\|eval_erqa\|eval_monitor' && echo 'BLOCKED: 评测进程运行中，等待结束' && exit 1 || echo 'OK: 无评测进程'"
+# 检查是否有评测进程在运行（fast_gpqa.py / eval_aime.py / eval_erqa.py / eval_monitor.py）
+docker exec $CONTAINER bash -c "pgrep -f 'fast_gpqa\|eval_aime\|eval_erqa\|eval_monitor' && echo 'BLOCKED: 评测进程运行中，等待结束' && exit 1 || echo 'OK: 无评测进程'"
 ```
 
 如果检测到评测进程，**必须等待其结束后再启动性能测试**，禁止强杀评测进程。
@@ -411,6 +411,8 @@ ISSUE_EOF"
 - 主流程步骤6使用 `--strategy quick`（4k_input_1k_output 并发 64 单数据点）
 - 性能对比必须通过 `performance_compare.py` 执行，禁止手动计算 ratio
 - output-name 标准命名：V1=`native_performance`，V2=`flagos_performance`
+- `benchmark_runner.py` 仅接受以下参数：`--config`、`--strategy`、`--output-name`、`--output-dir`、`--mode`、`--test-case`、`--dry-run`。`--quick` 为 `--strategy quick` 的向后兼容别名，优先使用 `--strategy`。禁止传入 `--host`、`--port`、`--model-name`、`--json` 等未定义参数，host/port/model 由 config 文件和 context.yaml 自动提供
+- 禁止使用 `pgrep -f benchmark_runner` 轮询等待 benchmark 完成。benchmark_runner.py 是同步脚本，直接等待其返回即可。如必须后台轮询，使用 `pgrep -f '[b]enchmark_runner'` 避免自匹配
 
 执行顺序（固定）：
 1. 关闭 flaggems → 启动服务 → benchmark V1 → 停服务
@@ -418,16 +420,3 @@ ISSUE_EOF"
 3. `performance_compare.py` 对比，ratio ≥ 80%?
    - 达标 → `workflow.performance_ok=true`，进入步骤8
    - 不达标 → 必须按顺序：① 标记 `performance_ok=false` ② issue_reporter.py --type performance-degraded ③ 追加 `logs/issues_performance.log` → 触发步骤7
-
-**服务启动必须内联传递 USE_FLAGGEMS 环境变量**（`/etc/environment` 和 `.bashrc` 持久化对 `docker exec -d bash -c` 无效）：
-```bash
-# V1 (native) — 必须 USE_FLAGGEMS=0
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 vllm serve ... > /flagos-workspace/logs/startup_native.log 2>&1"
-# 或通过 start_service.sh
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode native"
-
-# V2 (flagos) — 必须 USE_FLAGGEMS=1
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1"
-# 或通过 start_service.sh
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos"
-```

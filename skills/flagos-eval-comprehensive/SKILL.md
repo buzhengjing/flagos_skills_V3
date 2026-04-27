@@ -91,6 +91,7 @@ eval:
   results: {}
   v1_score: <V1 GPQA Diamond 分数>
   v2_score: <V2 GPQA Diamond 分数>
+  v3_score: <V3 调优后 GPQA Diamond 分数, 仅步骤5触发时有值>
   accuracy_diff: <V1 - V2 精度下降, 正值=V2低于V1>
   accuracy_aligned: <true|false>
   accuracy_threshold: 5.0
@@ -132,6 +133,12 @@ eval:
 - **截断检测**：评测前发样题检查 `finish_reason`，如果为 `length` 自动翻倍 max_tokens（在 max_model_len 允许范围内）
 - **自动选并发**：三阶段探测 — 1 直接 API 调用测单条推理延迟（剥离框架开销）2 基于延迟 + thinking 特性估算候选并发 3 快速验证（每档 3 题并发测试，选吞吐最高且无错误的）
 - **thinking 模型保守策略**：thinking 模型输出长度波动大，候选并发范围更保守（如延迟 ≤10s → [8,16,32]，而非 standard 的 [16,32,64]）
+
+## 禁止行为
+
+- 禁止因吞吐量低而手动降低 max_tokens。V1 和 V2 必须使用完全相同的 max_tokens 配置
+- max_tokens 由 fast_gpqa.py 自动计算，编排层不得覆盖
+- 如果 V2 推理慢，应等待完成而非降低参数
 
 ## 使用方式
 
@@ -246,7 +253,7 @@ sleep 5
 
 **步骤4 — V2 (FlagGems) 精度**（始终执行）：
 
-1. 启用 FlagGems（调用 service-startup skill 以 flagos 模式启动）
+1. 启用 FlagGems（调用 service-startup skill 以 flagos 模式启动）。**注意**：如果 context.yaml 的 `optimization.disabled_ops` 非空（步骤3崩溃诊断已禁用部分算子），必须使用 `toggle_flaggems.py --action modify-enable --disabled-ops '<disabled_ops>'` 而非 `--action enable`，否则已禁用算子会被重新加载导致再次崩溃。
 
 2. 运行评测：
 ```bash
@@ -516,7 +523,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 |----------|------|
 | `--v1` | V1 (Native) 评测结果 JSON |
 | `--v2` | V2 (FlagGems) 评测结果 JSON |
-| `--threshold` | 偏差阈值百分比（默认 5.0%） |
+| `--threshold` | 下降阈值百分比（默认 5.0%） |
 | `--json` | JSON 格式输出 |
 | `--output` | 结果输出文件路径 |
 
@@ -687,16 +694,16 @@ V2精度下降 >5% 或评测过程中服务端报错时，必须追加写入 `lo
 ```bash
 docker exec $CONTAINER bash -c "cat >> /flagos-workspace/logs/issues_accuracy.log << 'ISSUE_EOF'
 [$(date '+%Y-%m-%d %H:%M:%S')] <版本> | <问题摘要>
-  详情: <V1/V2 分数、偏差值，或错误信息>
+  详情: <V1/V2 分数、下降值，或错误信息>
   操作: <排查措施，如 diagnose_ops.py 分组测试、禁用算子>
-  结果: <措施结果，如偏差降至 X%、服务恢复>
+  结果: <措施结果，如下降降至 X%、服务恢复>
 ISSUE_EOF"
 ```
 
 记录场景：
 - V1 vs V2 精度下降 >5%（记录双方分数和下降值）
 - 评测过程中服务端 CUDA error / OOM / 进程崩溃
-- 算子排查每轮结果（禁用了哪些算子、重测后的偏差）
+- 算子排查每轮结果（禁用了哪些算子、重测后的下降）
 
 ## D2 — 评测端/网络问题处理
 
@@ -776,19 +783,6 @@ ISSUE_EOF"
    - 下降 ≤5%（含V2高于V1）→ `workflow.accuracy_ok=true`，进入步骤6
    - 下降 >5% → 必须按顺序：① 标记 `accuracy_ok=false` ② issue_reporter.py --type accuracy-degraded ③ 追加 `logs/issues_accuracy.log` → 触发步骤5
    - 服务崩溃 → issue_reporter.py --type operator-crash（同步骤3）
-
-**服务启动必须内联传递 USE_FLAGGEMS 环境变量**（`/etc/environment` 和 `.bashrc` 持久化对 `docker exec -d bash -c` 无效）：
-```bash
-# V1 (native) — 必须 USE_FLAGGEMS=0
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=0 vllm serve ... > /flagos-workspace/logs/startup_native.log 2>&1"
-# 或通过 start_service.sh
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode native"
-
-# V2 (flagos) — 必须 USE_FLAGGEMS=1
-docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH USE_FLAGGEMS=1 vllm serve ... > /flagos-workspace/logs/startup_flagos.log 2>&1"
-# 或通过 start_service.sh
-docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH bash /flagos-workspace/scripts/start_service.sh --mode flagos"
-```
 
 精度评测+精度调优全部完成后才进入性能测试。
 
