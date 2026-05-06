@@ -3,6 +3,7 @@
 从 context.yaml 加载配置，并提供配置验证和自动填充
 """
 import os
+import json
 import subprocess
 from dataclasses import dataclass, field
 from typing import List
@@ -162,13 +163,13 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     gpu = ctx.get('gpu', {})
     config.chip.vendor = gpu.get('vendor', 'auto')
 
-    # flagtree 版本从 inspection 或 env_status 读取
+    # flagtree 版本从 inspection 或 environment 读取
     inspection = ctx.get('inspection', {})
     flag_packages = inspection.get('flag_packages', {})
-    env_status = ctx.get('env_status', {})
+    environment = ctx.get('environment', {})
     flagtree_ver = flag_packages.get('flagtree', '') or ''
-    if not flagtree_ver and env_status.get('has_flagtree'):
-        flagtree_ver = env_status.get('flagtree_version', '')
+    if not flagtree_ver and environment.get('has_flagtree'):
+        flagtree_ver = environment.get('flagtree_version', '')
     if flagtree_ver:
         config.chip.tree = flagtree_ver
 
@@ -224,25 +225,31 @@ def load_config_from_context(context_path: str) -> PipelineConfig:
     # results_dir 用于 README 自动读取评测结果
     workspace = ctx.get('workspace', {})
     container_workspace = workspace.get('container_path', '/flagos-workspace')
-    config.publish.results_dir = f"{container_workspace}/results"
+    host_workspace = workspace.get('host_path', '')
+    # 优先使用宿主机路径（脚本在宿主机执行），回退到容器路径
+    if host_workspace:
+        config.publish.results_dir = os.path.join(host_workspace, "results")
+    else:
+        config.publish.results_dir = f"{container_workspace}/results"
 
     # 宿主机工作目录（数据回传目标，应为 /data/flagos-workspace/<model> 格式）
     config.host_workspace_base = workspace.get('host_path') or ''
 
-    # plugin 模式下读取 plugin_workflow 字段
-    plugin_wf = ctx.get('plugin_workflow', {})
-    if plugin_wf.get('triggered'):
-        # plugin 模式下读取步骤8已发布的仓库信息，用于 README 更新
-        release_section = ctx.get('release', {})
-        ms_url = str(release_section.get('modelscope_url', ''))
-        hf_url = str(release_section.get('huggingface_url', ''))
-        if ms_url:
-            # 从 URL 提取 model_id：https://modelscope.cn/models/FlagRelease/xxx → FlagRelease/xxx
-            parts = ms_url.rstrip('/').split('/models/')
-            if len(parts) == 2:
-                config.publish.base_modelscope_model_id = parts[1]
-        if hf_url:
-            parts = hf_url.rstrip('/').split('huggingface.co/')
+    # 始终读取 release 段（步骤8产出），plugin 模式下用于定位原仓库
+    # 即使 plugin_workflow.triggered 未设置，--plugin-mode 参数也可能启用 plugin 模式
+    release_section = ctx.get('release', {})
+    ms_url = str(release_section.get('modelscope_url', ''))
+    hf_url = str(release_section.get('huggingface_url', ''))
+    if ms_url:
+        parts = ms_url.rstrip('/').split('/models/')
+        if len(parts) == 2:
+            config.publish.base_modelscope_model_id = parts[1]
+    if hf_url:
+        parts = hf_url.rstrip('/').split('huggingface.co/')
+        if len(parts) == 2:
+            config.publish.base_huggingface_repo_id = parts[1]
+        if not config.publish.base_huggingface_repo_id:
+            parts = hf_url.rstrip('/').split('hf-mirror.com/')
             if len(parts) == 2:
                 config.publish.base_huggingface_repo_id = parts[1]
 
@@ -284,6 +291,15 @@ def _clean_model_name_for_tag(name: str) -> str:
     clean = re.sub(r'[^a-zA-Z0-9.\-]', '-', name.lower())
     clean = re.sub(r'-+', '-', clean).strip('-')
     return clean
+
+
+def _read_json_field(filepath: str, field: str):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get(field)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return None
 
 
 def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
@@ -355,7 +371,7 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
             config.model_info.output_name = f"{model_name}-{vendor_name}"
 
     if not config.model_info.flagrelease_name and config.model_info.output_name:
-        suffix = "-plugin-FlagOS" if config.plugin_image_mode else "-FlagOS"
+        suffix = "-FlagOS"
         config.model_info.flagrelease_name = f"{config.model_info.output_name}{suffix}"
 
     if not config.model_info.flagrelease_name_pre and model_name:
@@ -407,6 +423,29 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
     if not config.publish.huggingface_repo_id and config.model_info.flagrelease_name:
         config.publish.huggingface_repo_id = f"FlagRelease/{config.model_info.flagrelease_name}"
 
+    # ==================== Plugin 模式覆盖 ====================
+    if config.plugin_image_mode:
+        # 指向步骤8原仓库，不创建新仓库
+        if config.publish.base_modelscope_model_id:
+            config.publish.modelscope_model_id = config.publish.base_modelscope_model_id
+        if config.publish.base_huggingface_repo_id:
+            config.publish.huggingface_repo_id = config.publish.base_huggingface_repo_id
+
+        # 用 plugin 评测分数覆盖 evaluation_results
+        results_dir = config.publish.results_dir
+        if results_dir and os.path.isdir(results_dir):
+            plugin_path = os.path.join(results_dir, "gpqa_plugin.json")
+            native_path = os.path.join(results_dir, "gpqa_native.json")
+            if os.path.exists(plugin_path):
+                plugin_score = _read_json_field(plugin_path, "score")
+                native_score = _read_json_field(native_path, "score")
+                if plugin_score is not None:
+                    config.model_info.evaluation_results = [{
+                        "metric": "GPQA (plugin)",
+                        "origin": native_score if native_score is not None else "N/A",
+                        "flagos": plugin_score,
+                    }]
+
     # ==================== 命令 ====================
     if config.model_info.container_run_cmd and config.publish.image_target_tag:
         config.model_info.container_run_cmd = config.model_info.container_run_cmd.replace(
@@ -414,24 +453,12 @@ def auto_fill_config(config: PipelineConfig) -> PipelineConfig:
         )
 
     if not config.model_info.serve_infer_cmd:
-        api_endpoint = "http://localhost:8000/v1"
-        api_endpoint_masked = re.sub(r'http://[\d.]+:', 'http://<ip>:', api_endpoint)
-        model_id = config.model_info.output_name.lower().replace('-', '_') if config.model_info.output_name else "model"
-        config.model_info.serve_infer_cmd = f'''from openai import OpenAI
-
-client = OpenAI(
-    api_key="EMPTY",
-    base_url="{api_endpoint_masked}"
-)
-
-response = client.chat.completions.create(
-    model="{model_id}",
-    messages=[
-        {{"role": "system", "content": "You are a helpful assistant."}},
-        {{"role": "user", "content": "Hello!"}}
-    ]
-)
-print(response.choices[0].message.content)'''
+        config.model_info.serve_infer_cmd = '''curl http://localhost:8000/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "flagOS",
+    "messages": [{"role": "user", "content": "你好"}]
+  }' '''
 
     # ==================== 上传文件列表 ====================
     if not config.publish.upload_files:

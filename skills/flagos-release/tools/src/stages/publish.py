@@ -110,7 +110,17 @@ class PublishStage(BaseStage):
 
         # 4. 发布到 ModelScope
         ms_failed = False
-        if publish_config.publish_modelscope:
+        if self.config.plugin_image_mode:
+            # plugin 模式：只更新步骤8原仓库的 README，不创建新仓库、不上传权重
+            if publish_config.base_modelscope_model_id and readme_path:
+                success = self._update_repo_readme(
+                    publish_config.base_modelscope_model_id, "modelscope", readme_path)
+                if not success:
+                    ms_failed = True
+                    print("  ⚠ 更新 ModelScope README 失败，继续执行 HuggingFace")
+            else:
+                self.skip_step("更新 ModelScope README", "无步骤8仓库信息或无 README")
+        elif publish_config.publish_modelscope:
             success = self._publish_to_modelscope(readme_path)
             if not success:
                 ms_failed = True
@@ -120,23 +130,23 @@ class PublishStage(BaseStage):
 
         # 5. 发布到 HuggingFace
         hf_failed = False
-        if publish_config.publish_huggingface:
+        if self.config.plugin_image_mode:
+            # plugin 模式：只更新步骤8原仓库的 README
+            if publish_config.base_huggingface_repo_id and readme_path:
+                success = self._update_repo_readme(
+                    publish_config.base_huggingface_repo_id, "huggingface", readme_path)
+                if not success:
+                    hf_failed = True
+                    print("  ⚠ 更新 HuggingFace README 失败")
+            else:
+                self.skip_step("更新 HuggingFace README", "无步骤8仓库信息或无 README")
+        elif publish_config.publish_huggingface:
             success = self._publish_to_huggingface(readme_path)
             if not success:
                 hf_failed = True
                 print("  ⚠ HuggingFace 发布失败")
         else:
             self.skip_step("发布到 HuggingFace", "配置跳过")
-
-        # 6. Plugin 模式：更新步骤8已发布仓库的 README
-        if self.config.plugin_image_mode:
-            plugin_image_url = self.config.publish.harbor_path or ""
-            if publish_config.base_modelscope_model_id:
-                self._update_existing_readme(
-                    publish_config.base_modelscope_model_id, "modelscope", plugin_image_url)
-            if publish_config.base_huggingface_repo_id:
-                self._update_existing_readme(
-                    publish_config.base_huggingface_repo_id, "huggingface", plugin_image_url)
 
         # 6. 数据回传到宿主机
         self._sync_to_host()
@@ -154,6 +164,20 @@ class PublishStage(BaseStage):
             print(f"\n⚠ {self.name} 完成，但部分平台失败: {', '.join(failures)} (总耗时 {duration:.2f}s)")
         else:
             print(f"\n+ {self.name} 完成 (总耗时 {duration:.2f}s)")
+
+        # 输出结构化摘要，供编排层写入 context.yaml release 字段
+        model_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name or ""
+        ms_model_id = publish_config.modelscope_model_id or (f"FlagRelease/{model_name}" if model_name else "")
+        hf_repo_id = publish_config.huggingface_repo_id or (f"FlagRelease/{model_name}" if model_name else "")
+        release_summary = {
+            "harbor_image": publish_config.harbor_path or "",
+            "modelscope_model_id": ms_model_id if not ms_failed else "",
+            "modelscope_url": f"https://modelscope.cn/models/{ms_model_id}" if ms_model_id and not ms_failed else "",
+            "huggingface_repo_id": hf_repo_id if not hf_failed else "",
+            "huggingface_url": f"https://hf-mirror.com/{hf_repo_id}" if hf_repo_id and not hf_failed else "",
+        }
+        print(f"\n[RELEASE_SUMMARY]{json.dumps(release_summary, ensure_ascii=False)}[/RELEASE_SUMMARY]")
+
         return self.make_result(not harbor_failed and not upload_failed)
 
     def _sync_to_host(self):
@@ -597,15 +621,6 @@ class PublishStage(BaseStage):
             placeholder = "{{" + key + "}}"
             readme_content = readme_content.replace(placeholder, str(value))
 
-        if not self.config.config_persisted:
-            import re
-            readme_content = re.sub(
-                r'\n### Operator Configuration\n.*?(?=\n## |\Z)',
-                '',
-                readme_content,
-                flags=re.DOTALL
-            )
-
         output_path = self._get_readme_output_path()
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
@@ -725,13 +740,16 @@ class PublishStage(BaseStage):
         vars["flagrelease_name"] = model_info.flagrelease_name or model_info.output_name
         vars["output_name"] = model_info.output_name
         vars["source_of_model_weights"] = model_info.source_of_model_weights
+        vars["new_model_introduction"] = model_info.new_model_introduction or "新模型介绍，待定...."
 
         if self.env_info and self.env_info.vendor:
             vars["vendor"] = self.env_info.vendor.value
             vars["vendor_cn_name"] = self.env_info.vendor_cn_name
+            vars["vendor_display"] = self.env_info.vendor.value.capitalize()
         else:
             vars["vendor"] = model_info.vendor.lower() if model_info.vendor else "unknown"
             vars["vendor_cn_name"] = model_info.vendor or "Unknown"
+            vars["vendor_display"] = model_info.vendor.capitalize() if model_info.vendor else "Unknown"
 
         if self.env_info:
             vars["driver_version"] = self.env_info.driver_version or "N/A"
@@ -766,34 +784,62 @@ class PublishStage(BaseStage):
             vars["vllm_row"] = ""
 
         vars["image_harbor_path"] = model_info.image_harbor_path or self.config.publish.harbor_path or "N/A"
+        image_harbor = vars["image_harbor_path"]
+        vars["image_pull_cmd"] = f"docker pull {image_harbor}" if image_harbor != "N/A" else ""
         vars["weights_local_path"] = self.config.publish.weights_dir or "/data/models/" + (model_info.source_of_model_weights.split("/")[-1] if model_info.source_of_model_weights else "model")
 
-        vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else "# 请在配置文件的 model_info.container_run_cmd 中填写容器启动命令"
-        vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else "# Serve start command"
-        vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else "# Inference code"
+        vars["container_run_cmd"] = model_info.container_run_cmd.strip() if model_info.container_run_cmd else ""
+        vars["serve_start_cmd"] = model_info.serve_start_cmd.strip() if model_info.serve_start_cmd else ""
+        vars["serve_infer_cmd"] = model_info.serve_infer_cmd.strip() if model_info.serve_infer_cmd else self._default_curl_cmd()
 
         vars["evaluation_table"] = self._generate_evaluation_table()
 
         return vars
 
+    def _default_curl_cmd(self) -> str:
+        """生成默认的 curl 调用命令"""
+        return '''curl http://localhost:8000/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "flagOS",
+    "messages": [{"role": "user", "content": "你好"}]
+  }' '''
+
     def _generate_evaluation_table(self) -> str:
-        """从 evaluation_results 或 results_dir 自动生成 Markdown 表格"""
-        # 优先使用配置中手动填写的 evaluation_results
+        """生成固定 3 行指标的评测表格（GPQA_Diamond / ERQA / Aime24），严格按厂商模版格式"""
+        flagrelease_name = self.config.model_info.flagrelease_name or self.config.model_info.output_name or "model"
+        col_origin = f"{flagrelease_name}-Origin"
+        col_flagos = f"{flagrelease_name}-FlagOS"
+
         results = self.config.model_info.evaluation_results
         if not results:
-            # 尝试从 results_dir 自动读取
             results = self._load_results_from_dir()
-        if not results:
-            return "| Metrics | Origin | FlagOS |\n|---------|--------|--------|\n| N/A | N/A | N/A |"
 
-        table = "| Metrics | Origin | FlagOS |\n|---------|--------|--------|\n"
+        scores = {}
         for item in results:
-            metric = item.get('metric', 'N/A')
-            origin = item.get('origin', 'N/A')
-            flagos = item.get('flagos', 'N/A')
-            table += f"| {metric} | {origin} | {flagos} |\n"
+            metric = item.get('metric', '')
+            scores[metric] = {
+                'origin': item.get('origin', '-'),
+                'flagos': item.get('flagos', '-'),
+            }
 
-        return table.strip()
+        fixed_metrics = ["GPQA_Diamond", "ERQA", "Aime24"]
+
+        header = f"| Metrics      | {col_origin} | {col_flagos} |"
+        separator = f"|--------------|{''.ljust(len(col_origin) + 2, '-')}|{''.ljust(len(col_flagos) + 2, '-')}|"
+
+        rows = [header, separator]
+        for metric in fixed_metrics:
+            data = scores.get(metric, {})
+            origin = data.get('origin', '-')
+            flagos = data.get('flagos', '-')
+            if origin is None or origin == 'N/A':
+                origin = '-'
+            if flagos is None or flagos == 'N/A':
+                flagos = '-'
+            rows.append(f"| {metric} | {origin} | {flagos} |")
+
+        return "\n".join(rows)
 
     def _load_results_from_dir(self) -> List[dict]:
         """从 results_dir 自动读取精度评测结果，返回兼容 evaluation_results 的格式"""
@@ -803,22 +849,32 @@ class PublishStage(BaseStage):
 
         results = []
 
-        # 读取 GPQA 精度结果（优先使用调优后 V3 分数）
         gpqa_native_path = os.path.join(results_dir, "gpqa_native.json")
-        gpqa_flagos_path = os.path.join(results_dir, "gpqa_flagos.json")
-        gpqa_optimized_path = os.path.join(results_dir, "gpqa_flagos_optimized.json")
-
         native_score = self._read_json_field(gpqa_native_path, "score")
-        optimized_score = self._read_json_field(gpqa_optimized_path, "score")
-        flagos_score = optimized_score if optimized_score is not None else self._read_json_field(gpqa_flagos_path, "score")
 
-        if native_score is not None or flagos_score is not None:
-            metric_label = "GPQA (tuned)" if optimized_score is not None else "GPQA"
-            results.append({
-                "metric": metric_label,
-                "origin": native_score if native_score is not None else "N/A",
-                "flagos": flagos_score if flagos_score is not None else "N/A",
-            })
+        if self.config.plugin_image_mode:
+            # plugin 模式：读取 gpqa_plugin.json
+            gpqa_plugin_path = os.path.join(results_dir, "gpqa_plugin.json")
+            plugin_score = self._read_json_field(gpqa_plugin_path, "score")
+            if native_score is not None or plugin_score is not None:
+                results.append({
+                    "metric": "GPQA (plugin)",
+                    "origin": native_score if native_score is not None else "N/A",
+                    "flagos": plugin_score if plugin_score is not None else "N/A",
+                })
+        else:
+            # 主流程：读取 gpqa_flagos / gpqa_flagos_optimized
+            gpqa_flagos_path = os.path.join(results_dir, "gpqa_flagos.json")
+            gpqa_optimized_path = os.path.join(results_dir, "gpqa_flagos_optimized.json")
+            optimized_score = self._read_json_field(gpqa_optimized_path, "score")
+            flagos_score = optimized_score if optimized_score is not None else self._read_json_field(gpqa_flagos_path, "score")
+            if native_score is not None or flagos_score is not None:
+                metric_label = "GPQA (tuned)" if optimized_score is not None else "GPQA"
+                results.append({
+                    "metric": metric_label,
+                    "origin": native_score if native_score is not None else "N/A",
+                    "flagos": flagos_score if flagos_score is not None else "N/A",
+                })
 
         return results
 
@@ -833,63 +889,120 @@ class PublishStage(BaseStage):
             return None
 
     def _generate_readme_builtin(self) -> Optional[str]:
-        """使用内置简单模板生成 README"""
+        """使用内置模板生成 README（与 README_TEMPLATE.md 结构一致）"""
         model_info = self.config.model_info
-
-        env_table = self._build_environment_table()
+        vendor_display = model_info.vendor.capitalize() if model_info.vendor else "Unknown"
+        flagrelease_name = model_info.flagrelease_name or model_info.output_name or "model"
+        new_model_intro = model_info.new_model_introduction or "新模型介绍，待定...."
         eval_table = self._generate_evaluation_table()
+        docker_version = model_info.docker_version or "N/A"
+        os_info = model_info.ubuntu_version or "Linux"
+        image_harbor = model_info.image_harbor_path or self.config.publish.harbor_path or ""
+        image_pull_cmd = f"docker pull {image_harbor}" if image_harbor else ""
+        container_run_cmd = model_info.container_run_cmd or ""
+        serve_start_cmd = model_info.serve_start_cmd or ""
+        serve_infer_cmd = model_info.serve_infer_cmd or self._default_curl_cmd()
+        source = model_info.source_of_model_weights or "xxx/xxxxxxxx"
 
-        container_run_cmd = model_info.container_run_cmd or "# 请在配置文件的 model_info.container_run_cmd 中填写容器启动命令"
-        serve_start_cmd = model_info.serve_start_cmd or "# Serve start command"
-        serve_infer_cmd = model_info.serve_infer_cmd or "# Inference code"
+        readme_content = f"""# Introduction
+{new_model_intro}
 
-        readme_content = f"""# {model_info.flagrelease_name}
+### Integrated Deployment
+- Out-of-the-box inference scripts with pre-configured hardware and software parameters\t
+- Released **FlagOS-{vendor_display}** container image supporting deployment within minutes
+### Consistency Validation
+- Rigorously evaluated through benchmark testing: Performance and results from the FlagOS software stack are compared against native stacks on multiple public.\t
 
-## Model Information
 
-| Item | Value |
-|------|-------|
-| Model Name | {model_info.output_name} |
-| Chip Vendor | {model_info.vendor} |
-| Source | {model_info.source_of_model_weights} |
+# Evaluation Results
+## Benchmark Result
+{eval_table}
 
-## Test Environment
+# User Guide
+Environment Setup
 
-{env_table}
+| Item             | Version              |
+|------------------|----------------------|
+| Docker Version   | {docker_version} |
+| Operating System | {os_info} |
 
-## Quick Start
+## Operation Steps
 
-### 1. Pull and Run Container
+### Download FlagOS Image
+```bash
+{image_pull_cmd}
+```
 
+### Download Open-source Model Weights
+```bash
+pip install modelscope
+modelscope download --model FlagRelease/{flagrelease_name} --local_dir /data/{flagrelease_name}
+```
+
+### Start the Container
 ```bash
 {container_run_cmd}
 ```
-
-### 2. Start Service
-
+### Start the Server
 ```bash
 {serve_start_cmd}
 ```
 
-### 3. Inference Example
-
-```python
+## Service Invocation
+### Invocation Script
+```bash
 {serve_infer_cmd}
 ```
 
-## Evaluation Results
 
-{eval_table}
+### AnythingLLM Integration Guide
 
-## Docker Image
+#### 1. Download & Install
 
-```
-{model_info.image_harbor_path}
-```
+- Visit the official site: https://anythingllm.com/
+- Choose the appropriate version for your OS (Windows/macOS/Linux)
+- Follow the installation wizard to complete the setup
 
----
+#### 2. Configuration
 
-*This README was auto-generated by FlagRelease*
+- Launch AnythingLLM
+- Open settings (bottom left, fourth tab)
+- Configure core LLM parameters
+- Click "Save Settings" to apply changes
+
+#### 3. Model Interaction
+
+- After model loading is complete:
+- Click **"New Conversation"**
+- Enter your question (e.g., "Explain the basics of quantum computing")
+- Click the send button to get a response
+# Technical Overview
+**FlagOS** is a fully open-source system software stack designed to unify the "model\\u2013system\\u2013chip" layers and foster an open, collaborative ecosystem. It enables a "develop once, run anywhere" workflow across diverse AI accelerators, unlocking hardware performance, eliminating fragmentation among vendor-specific software stacks, and substantially lowering the cost of porting and maintaining AI workloads. With core technologies such as the **FlagScale**, together with vllm-plugin-fl, distributed training/inference framework, **FlagGems** universal operator library, **FlagCX** communication library, and **FlagTree** unified compiler, the **FlagRelease** platform leverages the **FlagOS** stack to automatically produce and release various combinations of \\<chip + open-source model\\>. This enables efficient and automated model migration across diverse chips, opening a new chapter for large model deployment and application.
+## FlagGems
+FlagGems is a high-performance, generic operator library implemented in [Triton](https://github.com/openai/triton) language. It is built on a collection of backend-neutral kernels that aims to accelerate LLM (Large-Language Models) training and inference across diverse hardware platforms.
+## FlagTree
+FlagTree is an open source, unified compiler for multiple AI chips project dedicated to developing a diverse ecosystem of AI chip compilers and related tooling platforms, thereby fostering and strengthening the upstream and downstream Triton ecosystem. Currently in its initial phase, the project aims to maintain compatibility with existing adaptation solutions while unifying the codebase to rapidly implement single-repository multi-backend support. For upstream model users, it provides unified compilation capabilities across multiple backends; for downstream chip manufacturers, it offers examples of Triton ecosystem integration.
+## FlagScale and vllm-plugin-fl
+Flagscale is a comprehensive toolkit designed to support the entire lifecycle of large models. It builds on the strengths of several prominent open-source projects, including [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) and [vLLM](https://github.com/vllm-project/vllm), to provide a robust, end-to-end solution for managing and scaling large models.
+vllm-plugin-fl is a vLLM plugin built on the FlagOS unified multi-chip backend, to help flagscale support multi-chip on vllm framework.
+## **FlagCX**
+FlagCX is a scalable and adaptive cross-chip communication library. It serves as a platform where developers, researchers, and AI engineers can collaborate on various projects, contribute to the development of cutting-edge AI solutions, and share their work with the global community.
+
+## **FlagEval Evaluation Framework**
+ FlagEval is a comprehensive evaluation system and open platform for large models launched in 2023. It aims to establish scientific, fair, and open benchmarks, methodologies, and tools to help researchers assess model and training algorithm performance. It features:
+ - **Multi-dimensional Evaluation**: Supports 800+ model evaluations across NLP, CV, Audio, and Multimodal fields, covering 20+ downstream tasks including language understanding and image-text generation.
+ - **Industry-Grade Use Cases**: Has completed horizontal evaluations of mainstream large models, providing authoritative benchmarks for chip-model performance validation.
+
+# Contributing
+
+We warmly welcome global developers to join us:
+
+1. Submit Issues to report problems
+2. Create Pull Requests to contribute code
+3. Improve technical documentation
+4. Expand hardware adaptation support
+# License
+The model weights are derived from {source} and are open\\u2011sourced under the Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0.txt
 """
 
         output_path = self._get_readme_output_path()
@@ -1027,10 +1140,10 @@ class PublishStage(BaseStage):
         private_label = '私有' if publish_config.private else '公开'
 
         sdk_script = f"""
-import sys
+import os, sys
 from modelscope.hub.api import HubApi
 api = HubApi()
-token = '{token}'
+token = os.environ.get('MODELSCOPE_API_TOKEN', '')
 if token:
     api.login(token)
 model_id = '{model_id}'
@@ -1049,18 +1162,14 @@ print('开始上传...')
 api.upload_folder(repo_id=model_id, folder_path='{container_upload_dir}')
 print(f'已发布到 ModelScope: {{model_id}}')
 """
-        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
+        token_env = f"MODELSCOPE_API_TOKEN={token} " if token else ""
+        cmd = f"{token_env}PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 ModelScope",
             timeout=UPLOAD_TIMEOUT, in_container=True
         )
         if result:
             print(f"  + 已发布到 ModelScope: {model_id}")
-            self.steps.append(StepResult(
-                step_name="发布到 ModelScope",
-                status=StepStatus.SUCCESS,
-                output=f"https://modelscope.cn/models/{model_id}"
-            ))
             return True
 
         print(f"  x SDK 发布到 ModelScope 失败")
@@ -1088,14 +1197,16 @@ print(f'已发布到 ModelScope: {{model_id}}')
 
     def _get_container_upload_dir(self) -> str:
         """获取容器内上传目录路径（模型权重所在路径）"""
-        weights_dir = self.config.publish.weights_dir
-        if weights_dir:
-            return weights_dir
+        # 优先使用 serve_start_cmd 中解析的容器内模型路径
         serve_cmd = self.config.model_info.serve_start_cmd or ""
         if "vllm serve " in serve_cmd:
             parts = serve_cmd.split("vllm serve ", 1)[1].split()
             if parts:
                 return parts[0].strip().rstrip("\\")
+        # weights_dir 可能是宿主机路径，但在容器模式下通常与容器内路径一致
+        weights_dir = self.config.publish.weights_dir
+        if weights_dir:
+            return weights_dir
         return "/data/models"
 
     def _docker_cp_readme_to_container(self, readme_path: Optional[str], container_upload_dir: str) -> bool:
@@ -1161,11 +1272,6 @@ print(f'已发布到 ModelScope: {{model_id}}')
             if result:
                 success = True
                 print(f"  + 已发布到 ModelScope: {model_id}")
-                self.steps.append(StepResult(
-                    step_name="发布到 ModelScope",
-                    status=StepStatus.SUCCESS,
-                    output=f"https://modelscope.cn/models/{model_id}"
-                ))
                 break
             else:
                 if attempt < UPLOAD_MAX_RETRIES - 1:
@@ -1230,7 +1336,7 @@ print(f'已发布到 ModelScope: {{model_id}}')
 import os
 os.environ['HF_ENDPOINT'] = '{hf_endpoint}'
 from huggingface_hub import HfApi, login
-token = '{token}'
+token = os.environ.get('HF_TOKEN', '')
 if token:
     login(token=token)
 api = HfApi()
@@ -1247,18 +1353,14 @@ print('开始上传...')
 api.upload_folder(repo_id=repo_id, folder_path='{container_upload_dir}')
 print(f'已发布到 HuggingFace: {{repo_id}}')
 """
-        cmd = f"PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
+        token_env = f"HF_TOKEN={token} " if token else ""
+        cmd = f"{token_env}HF_ENDPOINT={hf_endpoint} PATH=/opt/conda/bin:$PATH python3 -c {repr(sdk_script)}"
         result, stdout, stderr = self.run_command(
             cmd=cmd, step_name="SDK 上传到 HuggingFace",
             timeout=UPLOAD_TIMEOUT, in_container=True
         )
         if result:
             print(f"  + 已发布到 HuggingFace: {repo_id}")
-            self.steps.append(StepResult(
-                step_name="发布到 HuggingFace",
-                status=StepStatus.SUCCESS,
-                output=f"https://huggingface.co/{repo_id}"
-            ))
             return True
 
         print(f"  x SDK 发布到 HuggingFace 失败")
@@ -1300,8 +1402,8 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if not success:
                 return False
 
-        private_flag = "--private" if publish_config.private else ""
-        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli upload {repo_id} {container_upload_dir} {private_flag}".strip()
+        private_flag = "--private " if publish_config.private else ""
+        upload_cmd = f"PATH=/opt/conda/bin:$PATH {token_env}{endpoint_env}huggingface-cli upload {private_flag}{repo_id} {container_upload_dir}".strip()
 
         success = False
         current_delay = UPLOAD_RETRY_DELAY
@@ -1314,11 +1416,6 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
             if result:
                 success = True
                 print(f"  + 已发布到 HuggingFace: {repo_id}")
-                self.steps.append(StepResult(
-                    step_name="发布到 HuggingFace",
-                    status=StepStatus.SUCCESS,
-                    output=f"https://huggingface.co/{repo_id}"
-                ))
                 break
             else:
                 if attempt < UPLOAD_MAX_RETRIES - 1:
@@ -1331,83 +1428,97 @@ print(f'已发布到 HuggingFace: {{repo_id}}')
 
         return success
 
-    def _update_existing_readme(self, repo_id: str, platform: str, plugin_image_url: str) -> bool:
-        """更新已发布仓库的 README，追加 plugin 镜像地址段落"""
-        import tempfile
-        step_name = f"更新 {platform} 已发布 README"
+    def _update_repo_readme(self, repo_id: str, platform: str, readme_path: str) -> bool:
+        """更新已发布仓库的 README（plugin 模式：覆盖原仓库 README）"""
+        step_name = f"更新 {platform} 仓库 README"
         print(f"\n--- {step_name} ---")
         print(f"  目标仓库: {repo_id}")
 
-        plugin_section = f"""
-
-## Plugin-Enabled Version (vllm-plugin-FL)
-
-Plugin 版本镜像包含 vllm-plugin-FL 组件，提供更优的多芯片推理支持。
-
-### 下载 Plugin 版本镜像
-```bash
-docker pull {plugin_image_url}
-```
-"""
-        output_dir = self._get_upload_directory(self.config.publish.readme_output_path)
-        base_readme_path = os.path.join(output_dir, "README.md") if output_dir else None
-
-        if not base_readme_path or not os.path.exists(base_readme_path):
-            print(f"  x 未找到已发布的 README: {base_readme_path}")
+        if not os.path.exists(readme_path):
+            print(f"  x README 文件不存在: {readme_path}")
             return False
 
-        try:
-            with open(base_readme_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            print(f"  x 读取 README 失败: {e}")
+        container = self.config.container_name
+        if not container:
+            print(f"  x 无容器名，无法在容器内执行上传")
             return False
 
-        if "Plugin-Enabled Version" in content:
-            print(f"  - README 已包含 Plugin 段落，跳过")
-            return True
+        # 将 README 复制到容器内临时目录
+        container_tmp = "/tmp/plugin_readme_upload"
+        subprocess.run(
+            ["docker", "exec", container, "mkdir", "-p", container_tmp],
+            capture_output=True, timeout=10
+        )
+        cp_result = subprocess.run(
+            ["docker", "cp", readme_path, f"{container}:{container_tmp}/README.md"],
+            capture_output=True, text=True, timeout=30
+        )
+        if cp_result.returncode != 0:
+            print(f"  x 复制 README 到容器失败: {cp_result.stderr}")
+            return False
 
-        updated_content = content + plugin_section
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_readme = os.path.join(tmpdir, "README.md")
-            with open(tmp_readme, 'w', encoding='utf-8') as f:
-                f.write(updated_content)
-
-            if platform == "modelscope":
-                token = self.config.publish.modelscope_token
-                if not token:
-                    print(f"  x 无 ModelScope token，跳过")
-                    return False
-                cmd = f"modelscope upload --model {repo_id} {tmpdir} --include README.md"
-                env_extra = {"MODELSCOPE_API_TOKEN": token}
-            elif platform == "huggingface":
-                token = self.config.publish.huggingface_token
-                if not token:
-                    print(f"  x 无 HuggingFace token，跳过")
-                    return False
-                cmd = f"huggingface-cli upload {repo_id} {tmp_readme} README.md"
-                env_extra = {"HF_TOKEN": token}
-            else:
-                print(f"  x 未知平台: {platform}")
+        # 构建上传命令
+        if platform == "modelscope":
+            token = self.config.publish.modelscope_token
+            if not token:
+                print(f"  x 无 ModelScope token，跳过")
                 return False
-
-            env = os.environ.copy()
-            env.update(env_extra)
-            result, stdout, stderr = self.run_command(
-                cmd=cmd,
-                step_name=step_name,
-                timeout=120,
-                env=env
-            )
-
-            if result:
-                print(f"  + 已更新 {platform} 仓库 README: {repo_id}")
-                with open(base_readme_path, 'w', encoding='utf-8') as f:
-                    f.write(updated_content)
-                return True
-            else:
-                print(f"  x 更新 {platform} README 失败")
-                if stderr:
-                    print(f"    错误: {stderr[:200]}")
+            if not self._ensure_container_package("modelscope"):
+                print(f"  x 容器内安装 modelscope 失败")
                 return False
+            shell_cmd = f"PATH=/opt/conda/bin:$PATH modelscope upload {repo_id} {container_tmp}/README.md README.md"
+            docker_cmd = ["docker", "exec",
+                          "-e", f"MODELSCOPE_API_TOKEN={token}",
+                          container, "bash", "-c", shell_cmd]
+        elif platform == "huggingface":
+            token = self.config.publish.huggingface_token
+            if not token:
+                print(f"  x 无 HuggingFace token，跳过")
+                return False
+            if not self._ensure_container_package("huggingface_hub"):
+                print(f"  x 容器内安装 huggingface_hub 失败")
+                return False
+            hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+            shell_cmd = f"PATH=/opt/conda/bin:$PATH huggingface-cli upload {repo_id} {container_tmp}/README.md README.md"
+            docker_cmd = ["docker", "exec",
+                          "-e", f"HF_TOKEN={token}",
+                          "-e", f"HF_ENDPOINT={hf_endpoint}",
+                          container, "bash", "-c", shell_cmd]
+        else:
+            print(f"  x 未知平台: {platform}")
+            return False
+
+        # 带重试的上传
+        current_delay = UPLOAD_RETRY_DELAY
+        for attempt in range(UPLOAD_MAX_RETRIES):
+            print(f"[{self.name}] 执行: {step_name} (尝试 {attempt+1}/{UPLOAD_MAX_RETRIES})")
+            try:
+                result = subprocess.run(
+                    docker_cmd, capture_output=True, text=True, timeout=300
+                )
+                if result.returncode == 0:
+                    print(f"  + 已更新 {platform} 仓库 README: {repo_id}")
+                    self.steps.append(StepResult(
+                        step_name=step_name,
+                        status=StepStatus.SUCCESS,
+                        output=result.stdout
+                    ))
+                    return True
+                else:
+                    stderr = result.stderr or result.stdout
+                    print(f"  x 更新 {platform} README 失败: {stderr[:200] if stderr else '未知错误'}")
+            except subprocess.TimeoutExpired:
+                print(f"  x 更新 {platform} README 超时")
+                stderr = "命令执行超时"
+
+            if attempt < UPLOAD_MAX_RETRIES - 1:
+                print(f"    等待 {current_delay} 秒后重试...")
+                time.sleep(current_delay)
+                current_delay = min(current_delay * 2, UPLOAD_MAX_DELAY)
+
+        self.steps.append(StepResult(
+            step_name=step_name,
+            status=StepStatus.FAILED,
+            output=f"重试 {UPLOAD_MAX_RETRIES} 次后仍失败"
+        ))
+        return False

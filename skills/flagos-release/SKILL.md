@@ -356,30 +356,18 @@ python3 skills/flagos-release/tools/main.py \
 | 步骤 | 主流程（步骤8） | Plugin 模式（步骤13） |
 |------|---------------|---------------------|
 | 镜像 tag | `{date_tag}` | `{date_tag}-plugin` |
-| 仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | `FlagRelease/{Model}-{vendor}-plugin-FlagOS` |
-| commit/tag/push | 从 existing_harbor_image 判断是否跳过 | 始终执行（plugin 版本是新镜像） |
-| README | 生成标准 README | 生成 plugin 版本 README |
-| 已发布仓库更新 | 不更新 | 在步骤8仓库的 README 中追加 plugin 镜像地址 |
+| 仓库命名 | `FlagRelease/{Model}-{vendor}-FlagOS` | 复用步骤8仓库（不创建新仓库） |
+| commit/tag/push | 正常执行 | 正常执行（plugin 版本是新镜像） |
+| README | 生成标准 README | 用 plugin 镜像+评测数据重新生成 README |
+| ModelScope/HuggingFace | 创建仓库 + 上传权重 + README | 只更新步骤8仓库的 README（覆盖） |
 
-### README 更新已发布仓库
+### README 更新步骤8仓库
 
-Plugin 发布成功后，需更新步骤 8 已发布仓库的 README，追加 plugin 镜像段落：
-
-```markdown
-## Plugin-Enabled Version (vllm-plugin-FL)
-
-Plugin 版本镜像包含 vllm-plugin-FL 组件，提供更优的多芯片推理支持。
-
-### 下载 Plugin 版本镜像
-```bash
-docker pull {plugin_image_harbor_path}
-```
-```
+Plugin 发布成功后，用 plugin 镜像地址和评测数据重新生成 README，覆盖上传到步骤8已发布的 ModelScope/HuggingFace 仓库。README 中的镜像地址、评测结果均替换为 plugin 版本数据。
 
 更新方式：
-1. 从本地 output 目录读取步骤8生成的 README
-2. 追加 plugin 镜像段落
-3. 重新上传到步骤8的 ModelScope/HuggingFace 仓库
+1. 生成包含 plugin 镜像地址和评测数据的 README
+2. 将 README 复制到容器内，通过容器内 CLI 上传到步骤8的原仓库
 
 ### 编排层后续操作
 

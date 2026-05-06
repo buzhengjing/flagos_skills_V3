@@ -310,7 +310,7 @@ def generate_text_report(data: ReportData) -> str:
                     lines.append(f"      第{i}轮: 禁用 {disabled_op} → ratio {ratio_str} ({result_str})")
         else:
             perf_data = data.get("perf", default={}) or {}
-            cur_ratio = perf_data.get("ratio_pct") or (optimization.get("current_ratio") if isinstance(optimization, dict) else None)
+            cur_ratio = perf_data.get("ratio_pct") if perf_data.get("ratio_pct") is not None else (optimization.get("current_ratio") if isinstance(optimization, dict) else None)
             if cur_ratio is not None:
                 lines.append(f"  性能调优: 未触发 (ratio {cur_ratio}% ≥ 80%)")
             else:
@@ -364,7 +364,7 @@ def generate_text_report(data: ReportData) -> str:
         lines.append(data.perf_compare_table)
     elif data.native_perf or data.flagos_perf:
         perf = data.get("perf", default={}) or {}
-        min_ratio = perf.get("ratio_pct") or perf.get("min_ratio")
+        min_ratio = perf.get("ratio_pct") if perf.get("ratio_pct") is not None else perf.get("min_ratio")
         if min_ratio is not None:
             lines.append("")
             lines.append("性能对比:")
@@ -660,7 +660,7 @@ def generate_json_report(data: ReportData) -> dict:
             "ok": wf.get("accuracy_ok"),
         },
         "performance": {
-            "min_ratio": perf.get("ratio_pct") or perf.get("min_ratio"),
+            "min_ratio": perf.get("ratio_pct") if perf.get("ratio_pct") is not None else perf.get("min_ratio"),
             "target_ratio": optimization.get("target_ratio", 80.0),
             "ok": wf.get("performance_ok"),
         },

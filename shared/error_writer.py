@@ -192,9 +192,11 @@ def _sync_error_to_context(record: dict, log_dir: str):
         "recoverable": True,
     }, ensure_ascii=False)
 
+    python_bin = "/opt/conda/bin/python3" if os.path.isfile("/opt/conda/bin/python3") else "python3"
+
     try:
         subprocess.run(
-            ["python3", update_script,
+            [python_bin, update_script,
              "--json-set", f"workflow.last_error={error_json}",
              "--json"],
             capture_output=True, text=True, timeout=10,

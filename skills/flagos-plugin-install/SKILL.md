@@ -254,5 +254,5 @@ python3 skills/flagos-release/tools/main.py \
 
 `--plugin-mode` 标志使发布脚本：
 - 镜像 tag 追加 `-plugin` 后缀
-- 上传到新仓库 `FlagRelease/{Model}-{vendor}-plugin-FlagOS`
-- 发布完成后更新步骤 8 已发布仓库的 README（追加 plugin 镜像地址段落）
+- 复用步骤8原仓库（不创建新仓库）
+- 用 plugin 镜像地址和评测数据重新生成 README，覆盖上传到步骤8的 ModelScope/HuggingFace 仓库

@@ -1,11 +1,12 @@
 # Introduction
-Leveraging the cross-chip capabilities of FlagOS, a unified open-source system software stack purpose-built for diverse AI chips, the FlagOS community completed full adaptation, accuracy alignment, enabling the simultaneous adaptation and launch of {{flagrelease_name}} on {{vendor_cn_name}} chips:
+{{new_model_introduction}}
 
 ### Integrated Deployment
-- Out-of-the-box inference scripts with pre-configured hardware and software parameters
-- Released **FlagOS-{{vendor}}** container image supporting deployment within minutes
+- Out-of-the-box inference scripts with pre-configured hardware and software parameters	
+- Released **FlagOS-{{vendor_display}}** container image supporting deployment within minutes
 ### Consistency Validation
-- Rigorously evaluated through benchmark testing: Performance and results from the FlagOS software stack are compared against native stacks on multiple public.
+- Rigorously evaluated through benchmark testing: Performance and results from the FlagOS software stack are compared against native stacks on multiple public.	
+
 
 # Evaluation Results
 ## Benchmark Result
@@ -23,13 +24,13 @@ Environment Setup
 
 ### Download FlagOS Image
 ```bash
-docker pull {{image_harbor_path}}
+{{image_pull_cmd}}
 ```
 
 ### Download Open-source Model Weights
 ```bash
 pip install modelscope
-modelscope download --model {{source_of_model_weights}} --local_dir {{weights_local_path}}
+modelscope download --model FlagRelease/{{flagrelease_name}} --local_dir /data/{{flagrelease_name}}
 ```
 
 ### Start the Container
@@ -41,17 +42,9 @@ modelscope download --model {{source_of_model_weights}} --local_dir {{weights_lo
 {{serve_start_cmd}}
 ```
 
-### Operator Configuration
-The image has been pre-configured with the final tuned FlagGems operator set. Starting the service directly uses the qualified operator configuration — no additional environment variables or parameters needed.
-
-To view the operator configuration details:
-```bash
-cat /root/flaggems_op_config.json
-```
-
 ## Service Invocation
 ### Invocation Script
-```python
+```bash
 {{serve_infer_cmd}}
 ```
 
@@ -93,6 +86,7 @@ FlagCX is a scalable and adaptive cross-chip communication library. It serves as
  FlagEval is a comprehensive evaluation system and open platform for large models launched in 2023. It aims to establish scientific, fair, and open benchmarks, methodologies, and tools to help researchers assess model and training algorithm performance. It features:
  - **Multi-dimensional Evaluation**: Supports 800+ model evaluations across NLP, CV, Audio, and Multimodal fields, covering 20+ downstream tasks including language understanding and image-text generation.
  - **Industry-Grade Use Cases**: Has completed horizontal evaluations of mainstream large models, providing authoritative benchmarks for chip-model performance validation.
+
 # Contributing
 
 We warmly welcome global developers to join us:
@@ -102,4 +96,4 @@ We warmly welcome global developers to join us:
 3. Improve technical documentation
 4. Expand hardware adaptation support
 # License
-本模型的权重来源于{{source_of_model_weights}}，以apache2.0协议开源: https://www.apache.org/licenses/LICENSE-2.0.txt.
+The model weights are derived from {{source_of_model_weights}} and are open‑sourced under the Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0.txt

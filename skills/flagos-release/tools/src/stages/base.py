@@ -2,6 +2,7 @@
 阶段基类
 定义所有阶段的通用接口和功能
 """
+import re
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -68,7 +69,8 @@ class BaseStage(ABC):
         check: bool = True,
         shell: bool = True,
         in_container: bool = False,
-        container_name: str = None
+        container_name: str = None,
+        env: dict = None
     ) -> Tuple[bool, str, str]:
         """执行命令"""
         start_time = time.time()
@@ -81,6 +83,9 @@ class BaseStage(ABC):
             shell = False
 
         display_cmd = cmd if isinstance(cmd, str) else " ".join(cmd)
+        display_cmd = re.sub(
+            r'(MODELSCOPE_API_TOKEN|HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=[^\s]+',
+            r'\1=***', display_cmd)
         print(f"[{self.name}] 执行: {step_name}")
         print(f"  命令: {display_cmd[:200]}..." if len(display_cmd) > 200 else f"  命令: {display_cmd}")
 
@@ -90,7 +95,8 @@ class BaseStage(ABC):
                 shell=shell,
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
+                env=env
             )
 
             duration = time.time() - start_time
