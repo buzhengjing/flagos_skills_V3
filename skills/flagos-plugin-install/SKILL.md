@@ -223,6 +223,22 @@ Plugin 安装失败（install 返回 `success=false` 或 verify 返回 `installe
 | Trace 文件 | `traces/03-07_*.json` | `traces/10-12_*.json` |
 | 日志命名 | `startup_flagos.log` | `startup_plugin.log` |
 
+**步骤 10 算子控制（必须使用环境变量，禁止控制文件）**：
+
+```bash
+# 1. 从 context.yaml 获取 disabled_ops 列表（逗号分隔）
+# 2. 调用 apply_op_config.py 生成 env_inline
+docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/apply_op_config.py \
+    --mode custom --flagos-blacklist '${DISABLED_OPS_COMMA_SEPARATED}'"
+# 3. 使用输出的 env_inline 作为启动命令前缀
+docker exec -d $CONTAINER bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH \
+    USE_FLAGGEMS=1 VLLM_FL_PREFER_ENABLED=true VLLM_FL_FLAGOS_BLACKLIST='${DISABLED_OPS}' \
+    vllm serve ... > /flagos-workspace/logs/startup_plugin.log 2>&1"
+```
+
+> ⚠️ Plugin 模式下 `VLLM_FL_PREFER_ENABLED=true` 会使注入代码 `pass`，跳过控制文件逻辑。
+> 必须通过 `VLLM_FL_FLAGOS_BLACKLIST` 环境变量传递禁用算子，`/root/flaggems_ops_control.json` 在此场景无效。
+
 **步骤 10 服务崩溃处理**：
 ```bash
 # 服务崩溃 → 写 issue + 停止

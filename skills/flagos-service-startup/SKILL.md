@@ -573,7 +573,11 @@ environment:
 
 如果 flagos 模式启动失败：
 1. **备份崩溃日志**（避免重试时被覆盖）：`cp startup_default.log startup_default_crashed.log`
-2. **算子级诊断重试**（最多 2 轮）：
+2. **清理 Triton/FlagGems 编译缓存**（确保重试时暴露所有问题算子，不依赖旧缓存侥幸通过）：
+   ```bash
+   ${CMD_PREFIX} bash -c "rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null && echo 'Triton/FlagGems cache cleared'"
+   ```
+3. **算子级诊断重试**（最多 2 轮）：
    ```bash
    ${CMD_PREFIX} python3 /flagos-workspace/scripts/diagnose_ops.py crash-log \
      --log-path /flagos-workspace/logs/startup_default_crashed.log --json
@@ -584,9 +588,9 @@ environment:
        --action modify-enable --disabled-ops "<crashed_op1>,<crashed_op2>" --json
      ```
    - 重启成功 → 记录 `disabled_ops` 到 context.yaml，继续正常流程
-   - 重启仍失败 → 再次 crash-log 解析，累积禁用算子，最多 2 轮
-3. `crashed_ops` 为空或 2 轮重试全部失败 → 切回 Native 验证
-4. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
+   - 重启仍失败 → 再次 crash-log 解析，累积禁用算子，最多 2 轮（每轮重试前均需清理缓存）
+4. `crashed_ops` 为空或 2 轮重试全部失败 → 切回 Native 验证
+5. Native 也失败 → 报告环境问题；Native 成功 → 确认是 FlagGems 问题
 
 ### 问题日志写入
 
@@ -642,6 +646,7 @@ ISSUE_EOF"
 | 日志活跃但长时间未就绪 | CUDA graph 编译或 Triton 内核编译耗时长 | 正常现象，动态模式会自动延长等待 |
 | Thinking model 评测分数异常低 | max_model_len 过小，推理链被截断 | 重启服务，加大 `--max-model-len` 至 32768+ |
 | OOM: max_model_len 过大 | KV cache 显存预分配超限 | 降低 max-model-len（thinking model 最低 16384） |
+| Triton 缓存隐藏问题算子 | 崩溃重试时旧缓存命中，跳过有 bug 的编译路径，导致问题延迟暴露 | 崩溃后重试前必须清理 `/root/.triton/cache/`、`/root/.flaggems/code_cache/` |
 
 ---
 
@@ -649,12 +654,13 @@ ISSUE_EOF"
 
 **FlagGems 模式启动失败处理**（不含超时，超时属于正常等待）：
 1. 备份崩溃日志：`cp startup_default.log startup_default_crashed.log`
-2. 调用 `diagnose_ops.py crash-log` 解析崩溃日志
-3. `crashed_ops` 非空 → 禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（最多 2 轮）
-4. 重试成功 → 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
-5. 重试全部失败或 `crashed_ops` 为空 → 调用 `issue_reporter.py full --type operator-crash`
-6. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
-7. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
+2. 清理 Triton/FlagGems 编译缓存：`rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`
+3. 调用 `diagnose_ops.py crash-log` 解析崩溃日志
+4. `crashed_ops` 非空 → 禁用问题算子（`toggle_flaggems.py --action modify-enable --disabled-ops`）→ 重启（最多 2 轮，每轮重试前均需清理缓存）
+5. 重试成功 → 记录 `disabled_ops` 到 context.yaml，`workflow.service_ok = true`，继续正常流程
+6. 重试全部失败或 `crashed_ops` 为空 → 调用 `issue_reporter.py full --type operator-crash`
+7. 排除操作失误：native 模式也失败 → 环境问题，需人工介入
+8. 确认是 FlagGems 问题（非硬件）→ `workflow.service_ok = false` → 提交 issue 后**停止任务**，不继续步骤4/6/7 的精度性能评测（FlagGems 完全不可用时评测无意义）→ 直接到步骤8发布（私有，附带崩溃原因）
 
 **崩溃重试时的服务启动方式**：禁用算子后重启服务时，**必须使用 `start_service.sh`**（而非直接 `docker exec -d` 拼接 vllm 命令），确保 `FLAGGEMS_CONTROL_MODE` 等环境变量被正确加载：
 ```bash

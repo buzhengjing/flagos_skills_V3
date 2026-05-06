@@ -578,10 +578,11 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     """重启服务：停止 → 启动 → 等待就绪"""
     print("\n[重启服务]")
 
-    # 清除 Triton cache
-    print("  清除 Triton cache...")
+    # 清除 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
+    print("  清除 Triton/FlagGems cache...")
     run_cmd("rm -rf ~/.triton/cache/ 2>/dev/null", check=False)
     run_cmd("rm -rf /tmp/triton_cache/ 2>/dev/null", check=False)
+    run_cmd("rm -rf ~/.flaggems/code_cache/ 2>/dev/null", check=False)
 
     # 停止
     print("  停止服务...")

@@ -339,7 +339,10 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 21. **性能测试 output-name 标准命名**：V1=`native_performance`，V2=`flagos_performance`，V3=`flagos_optimized`
 22. **工具脚本必须从项目目录或容器内 `/flagos-workspace` 执行**，禁止复制到 `/tmp`
 23. **步骤5与4、7与6严禁同时进行（GPU 互斥）**。整体串行：4 → 5 → 6 → 7
-24. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。任何需要启动 FlagGems 服务的步骤，如果 `optimization.disabled_ops` 非空，必须通过白名单控制文件启动：将启用算子写入 `/root/flaggems_ops_control.json`（`{"include": [启用算子]}`），`start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`。禁止使用 `toggle_flaggems.py --action enable`（会重置为全量开启）
+24. **禁用算子逐步累计，全流程传递**。步骤3崩溃诊断 → 步骤5精度调优 → 步骤7性能调优 → 步骤10-12 Plugin，每步在前序基础上累加禁用。算子控制方式按场景区分：
+    - **非 plugin 场景（`vllm_flaggems`）**：通过白名单控制文件启动 — 将启用算子写入 `/root/flaggems_ops_control.json`（`{"include": [启用算子]}`），`start_service.sh` 会自动从控制文件推断 `FLAGGEMS_CONTROL_MODE=only_enable`
+    - **Plugin 场景（`vllm_plugin_flaggems`，含步骤 10-12）**：通过 `VLLM_FL_FLAGOS_BLACKLIST` 环境变量内联传递禁用算子列表。使用 `apply_op_config.py --mode custom --flagos-blacklist "op1,op2,..."` 生成 `env_inline`，禁止使用控制文件（plugin 模式下 `VLLM_FL_PREFER_ENABLED=true` 会跳过控制文件逻辑）
+    - 两种场景均禁止使用 `toggle_flaggems.py --action enable`（会重置为全量开启）
 25. **步骤7性能算子调优 elimination 策略不限轮次上限**，每轮 benchmark 使用 quick 模式，达标即停。步骤5精度调优最多 3 轮（见 flagos-eval-comprehensive SKILL.md）
 26. **步骤5/7的 trace 文件独立**，不混入步骤4/6的 trace
 27. **Claude Code Bash 工具受沙箱限制**。外部路径文件读写必须通过 `docker exec` 或 `docker cp`。禁止直接操作 `/data/...` 等宿主机路径
@@ -354,6 +357,7 @@ docker exec $CONTAINER bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-works
 36. **Plugin 镜像 tag 在原 date_tag 后追加 `-plugin`**。如 `202603301143-plugin`
 37. **V1 和 V2 精度评测必须使用完全相同的参数**。包括 max_tokens、题目数量、评测脚本版本，禁止任何一方使用不同配置
 38. **`operator_search.py` 失败时禁止手动重试循环**。编排层不得在 operator_search.py 返回失败后自行构造重试逻辑，应直接标记失败并继续流程
+39. **服务启动崩溃后重试前必须清理 Triton/FlagGems 编译缓存**。`rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/`。确保重试在干净状态下暴露所有问题算子，禁止依赖旧缓存侥幸通过
 
 ---
 

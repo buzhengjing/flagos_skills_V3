@@ -702,6 +702,11 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 08_release --ledger-status pending --ledger-notes '段1越界回滚' \
         --json" >/dev/null 2>&1
+    for STEP_KEY in 09_plugin_install 10_plugin_service_startup 11_plugin_accuracy 12_plugin_performance 13_plugin_release; do
+        docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+            --ledger-update ${STEP_KEY} --ledger-status pending --ledger-notes '段1越界回滚' \
+            --json" >/dev/null 2>&1
+    done
     # 回滚 workflow 状态字段
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --set workflow.accuracy_ok=false --set workflow.performance_ok=false \
@@ -757,15 +762,22 @@ print(ctx.get('workflow',{}).get('service_ok', True))
 " 2>/dev/null) || SERVICE_OK="True"
 
 SKIP_SEG2=false
+IS_NATIVE=false
 if [ "${SERVICE_OK}" = "False" ]; then
     echo "⚠ service_ok=false（FlagGems 不可用），跳过段2（步骤4-7），直接进入段3发布"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段2 跳过：service_ok=false"
     SKIP_SEG2=true
 fi
+if [ "${SEG_ENV}" = "native" ]; then
+    IS_NATIVE=true
+    echo "ℹ env_type=native（纯原生环境），段2仅执行步骤4/6，跳过步骤5/7（无 FlagGems 算子调优）"
+fi
 
 if [ "${SKIP_SEG2}" = "false" ]; then
 # ===== 段2: 4/5/6/7 (精度评测 + 精度调优 + 性能评测 + 性能调优) =====
 PROMPT_SEG2="容器名: ${SEG_CTR}，模型名: ${MODEL}，env_type: ${SEG_ENV}
+
+**变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
 
 按 CLAUDE.md 工作流定义执行步骤4精度评测、步骤5精度算子调优（如需）、步骤6性能评测、步骤7性能算子调优（如需）。
@@ -850,6 +862,19 @@ GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
 禁止更新 ledger 中 08_release 及之后步骤的状态。违反此约束将导致重复发布。
 完成标志：输出 \"[段2] 步骤4/5/6/7全部完成，context 已同步\" 后停止所有操作。"
 
+# native 场景追加硬性约束：只执行步骤4/6，跳过5/7
+if [ "${IS_NATIVE}" = "true" ]; then
+    PROMPT_SEG2="${PROMPT_SEG2}
+
+**⚠ native 场景硬性约束（最高优先级）**：
+env_type=native 表示纯原生环境，无 FlagGems。本段**只执行步骤4（精度评测）和步骤6（性能评测）**。
+- **绝对禁止**执行步骤5（精度算子调优）和步骤7（性能算子调优）
+- 即使 accuracy_ok=false 或 performance_ok=false，也**不触发**算子调优
+- 步骤5/7 直接标记为 skipped（skip_reason='native 场景无 FlagGems'）
+- 精度评测只有 V1（native 模式），无 V2 对比
+- 性能评测只有 V1（native 模式），无 V2 对比"
+fi
+
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║  段2/3  精度评测 + 精度调优 + 性能评测 + 性能调优           ║"
@@ -924,6 +949,9 @@ if [ "$SEG2_STATUS" != "complete" ]; then
     fi
     echo "  段2 重试后 ledger 状态:"
     print_ledger_summary "${CTX_FILE}"
+    # 重试后更新 SEG_CTR（防止容器名变更导致后续段使用旧值）
+    CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || true
+    [ -n "$(echo "$CTX_INFO" | cut -d'|' -f1)" ] && SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 fi
 
 # ===== 段2越界检测：如果段2执行了步骤8+的操作，回滚 context 中的越界状态 =====
@@ -998,6 +1026,8 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 
 # ===== 段3: 8 (打包发布) =====
 PROMPT_SEG3="容器名: ${SEG_CTR}，模型名: ${MODEL}
+
+**变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
 
 按 CLAUDE.md 工作流定义执行步骤8自动发布。
@@ -1148,13 +1178,19 @@ CTX_INFO=$(read_context "${MODEL}" 2>/dev/null) || {
 SEG_CTR=$(echo "$CTX_INFO" | cut -d'|' -f1)
 echo "  容器名: ${SEG_CTR}"
 
-# 读取 qualified 状态
+# 读取 qualified 状态（含兜底计算：如果 qualified 字段未设置但三个条件都满足，自动判定为 True）
 QUALIFIED=$(python3 -c "
 import yaml
 try:
     with open('${CTX_FILE}') as f:
         ctx = yaml.safe_load(f)
-    print(ctx.get('workflow',{}).get('qualified', False))
+    wf = ctx.get('workflow', {})
+    qualified = wf.get('qualified', False)
+    if not qualified:
+        # 兜底：独立计算 qualified = service_ok AND accuracy_ok AND performance_ok
+        if wf.get('service_ok') and wf.get('accuracy_ok') and wf.get('performance_ok'):
+            qualified = True
+    print(qualified)
 except: print('False')
 " 2>/dev/null || echo "False")
 
@@ -1201,6 +1237,8 @@ print(f'''- container_name: {ctr.get('name','')}
 
     # ===== 段4: 9-13 (Plugin 验证 + 发布) =====
     PROMPT_SEG4="容器名: ${SEG_CTR}，模型名: ${MODEL}
+
+**变量定义（后续命令中直接使用）**：CONTAINER=${SEG_CTR}
 ${COMMON_TOKENS}
 
 按 CLAUDE.md 工作流定义执行步骤 9-13 Plugin 验证流程。
@@ -1326,8 +1364,8 @@ try:
 except: pass
 " 2>/dev/null) || DIAG_CONTAINER=""
 fi
-# fallback: 容器模式下直接用脚本变量
-[ -z "${DIAG_CONTAINER}" ] && DIAG_CONTAINER="${CONTAINER:-}"
+# fallback: 容器模式下直接用脚本变量；镜像模式下用段间传递的 SEG_CTR
+[ -z "${DIAG_CONTAINER}" ] && DIAG_CONTAINER="${CONTAINER:-${SEG_CTR:-}}"
 
 if [ -n "${DIAG_CONTAINER}" ] && docker inspect --type=container "${DIAG_CONTAINER}" &>/dev/null; then
     ALL_DONE=$(docker exec "${DIAG_CONTAINER}" bash -c "
@@ -1378,6 +1416,11 @@ if [ -n "${DIAG_CONTAINER}" ] && docker inspect --type=container "${DIAG_CONTAIN
     mkdir -p "${HOST_BASE}/config"
     docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${HOST_BASE}/config/context_snapshot.yaml" 2>/dev/null && \
         echo "  ✓ context_snapshot.yaml 已同步" || echo "  ⚠ context_snapshot.yaml 同步失败"
+    # context_final（全流程结束时的最终状态）
+    if [ ! -f "${HOST_BASE}/config/context_final.yaml" ]; then
+        docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${HOST_BASE}/config/context_final.yaml" 2>/dev/null && \
+            echo "  ✓ context_final.yaml 已同步（兜底）" || true
+    fi
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底同步完成"
 
     # ========== 兜底：Harbor 发布（如 Claude 未执行） ==========

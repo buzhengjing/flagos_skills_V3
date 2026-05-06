@@ -135,6 +135,11 @@ fi
 
 LOG_FILE="/flagos-workspace/logs/startup_${MODE}.log"
 
+# FlagGems 模式启动前清理 Triton/FlagGems 编译缓存（约束39：避免旧缓存隐藏问题算子）
+if [ "$USE_FLAGGEMS_FLAG" = "1" ]; then
+    rm -rf /root/.triton/cache/ /tmp/triton_cache/ /root/.flaggems/code_cache/ 2>/dev/null || true
+fi
+
 # 构建启动命令
 if [ "$FRAMEWORK" = "vllm" ]; then
     CMD="vllm serve '${MODEL_PATH}' \

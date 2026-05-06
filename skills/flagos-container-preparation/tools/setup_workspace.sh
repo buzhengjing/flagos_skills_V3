@@ -244,6 +244,8 @@ SCRIPT_MAP=(
     "skills/flagos-eval-comprehensive/tools/accuracy_compare.py:scripts/accuracy_compare.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa.py:scripts/fast_gpqa.py"
     "skills/flagos-eval-comprehensive/tools/fast_gpqa_config.yaml:scripts/fast_gpqa_config.yaml"
+    # 远端评测监控
+    "skills/flagos-eval-comprehensive/tools/eval_monitor.py:scripts/eval_monitor.py"
     # 评测配置模板
     "skills/flagos-eval-comprehensive/tools/config.yaml:eval/config.yaml"
     # Plugin 安装
