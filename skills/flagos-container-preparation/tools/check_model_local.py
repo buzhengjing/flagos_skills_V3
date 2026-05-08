@@ -31,8 +31,18 @@ import sys
 
 DEFAULT_SEARCH_PATHS = ["/data", "/nfs", "/share", "/models", "/home"]
 CONTAINER_SEARCH_PATHS = ["/data", "/models", "/root", "/home", "/workspace", "/mnt", "/opt"]
-DEFAULT_MAX_DEPTH = 4
+DEFAULT_MAX_DEPTH = 3
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv", ".cache", ".trash"}
+
+# 快速路径：高概率模型目录（优先搜索，命中则跳过全量遍历）
+FAST_PATHS = [
+    "/data/models", "/data/flagos-workspace", "/data/pretrained",
+    "/models", "/nfs/models", "/share/models",
+    "/home/models", "/root/models",
+]
+
+# 搜索超时（秒），超时后返回已找到的结果
+DEFAULT_SEARCH_TIMEOUT = 60
 
 # 权重文件排除模式
 EXCLUDE_BIN = re.compile(r"^(optimizer|training_args|scheduler)", re.IGNORECASE)
@@ -108,24 +118,55 @@ def has_weight_files(dir_path: str) -> bool:
     return False
 
 
-def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> list:
+def search_model_dirs(model_name: str, search_paths: list, max_depth: int,
+                      timeout: int = DEFAULT_SEARCH_TIMEOUT, fast: bool = False) -> list:
     """在宿主机路径下搜索目录名匹配的模型目录。
 
     三种匹配策略（按优先级）：
     1. 精确匹配：目录名 == model_name（大小写不敏感）
     2. 包含匹配：目录名包含 model_name
     3. config 匹配：目录名不匹配，但 config.json 中 _name_or_path 包含模型名
+
+    Args:
+        timeout: 搜索超时秒数，超时后返回已找到的结果
+        fast: 快速模式，只搜索高概率路径
     """
+    import time
+    start_time = time.time()
+
     exact_matches = []
     contain_matches = []
     config_matches = []
     model_lower = model_name.lower()
 
+    # 快速路径优先搜索
+    fast_search_paths = [p for p in FAST_PATHS if os.path.isdir(p)]
+    if fast:
+        search_paths = fast_search_paths
+    else:
+        # 快速路径放在前面，全量路径放后面
+        seen = set()
+        ordered_paths = []
+        for p in fast_search_paths + search_paths:
+            if p not in seen and os.path.isdir(p):
+                seen.add(p)
+                ordered_paths.append(p)
+        search_paths = ordered_paths
+
     for root_path in search_paths:
         if not os.path.isdir(root_path):
             continue
 
+        # 超时检查
+        if time.time() - start_time > timeout:
+            break
+
         for dirpath, dirnames, filenames in os.walk(root_path):
+            # 超时检查（每个目录检查一次）
+            if time.time() - start_time > timeout:
+                dirnames.clear()
+                break
+
             # 计算当前深度
             depth = dirpath[len(root_path):].count(os.sep)
             if depth >= max_depth:
@@ -143,11 +184,13 @@ def search_model_dirs(model_name: str, search_paths: list, max_depth: int) -> li
                 full_path = os.path.join(dirpath, d)
                 if d_lower == model_lower:
                     exact_matches.append(full_path)
+                    # 精确匹配命中，快速模式下直接返回
+                    if fast and exact_matches:
+                        return exact_matches, contain_matches, config_matches
                 elif model_lower in d_lower:
                     contain_matches.append(full_path)
 
             # 策略 3：当前目录有 config.json + 权重文件，检查 config 内容
-            # 仅对目录名未匹配的目录执行（避免重复）
             dir_basename = os.path.basename(dirpath).lower()
             if dir_basename != model_lower and model_lower not in dir_basename:
                 if "config.json" in filenames and has_weight_files(dirpath):
@@ -677,7 +720,9 @@ def run_container_mode(args, parsed: dict) -> dict:
     # --- Step 2: 宿主机搜索 + 挂载检查 ---
     host_search_paths = DEFAULT_SEARCH_PATHS
     print(f"[2/3] 在宿主机搜索模型 {model_name} ...")
-    exact, contain, config = search_model_dirs(model_name, host_search_paths, args.max_depth)
+    search_timeout = 10 if args.fast else args.timeout
+    exact, contain, config = search_model_dirs(model_name, host_search_paths, args.max_depth,
+                                               timeout=search_timeout, fast=args.fast)
 
     host_candidates = []
     for path in exact:
@@ -777,6 +822,8 @@ def main():
     parser.add_argument("--download-dir", default=None, help="自动下载目标目录")
     parser.add_argument("--no-download", action="store_true", help="禁用自动下载，仅搜索本地")
     parser.add_argument("--container-model-path", default=None, help="容器内模型下载路径（如 /data/models/Qwen3-8B）")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_SEARCH_TIMEOUT, help=f"搜索超时秒数 (默认 {DEFAULT_SEARCH_TIMEOUT})")
+    parser.add_argument("--fast", action="store_true", help="快速模式：只搜索高概率路径，10s 超时")
     args = parser.parse_args()
 
     # 参数校验
@@ -821,8 +868,10 @@ def main():
         download_dir = args.download_dir
 
     # 搜索
+    search_timeout = 10 if args.fast else args.timeout
     exact_matches, contain_matches, config_matches = search_model_dirs(
-        parsed["model_name"], search_paths, args.max_depth
+        parsed["model_name"], search_paths, args.max_depth,
+        timeout=search_timeout, fast=args.fast
     )
 
     # 校验所有候选

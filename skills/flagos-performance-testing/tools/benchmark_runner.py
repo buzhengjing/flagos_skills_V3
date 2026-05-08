@@ -224,12 +224,36 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
         t = threading.Thread(target=read_stderr, daemon=True)
         t.start()
 
-        # 实时逐行读取 stdout
+        # 心跳：每 240s 输出进度行，保持 Claude API 调用活跃（prompt cache TTL=5min）
+        heartbeat_interval = 240
+        last_heartbeat = time.time()
+        bench_start = time.time()
+
+        # 实时逐行读取 stdout（只输出关键行，详细日志写文件）
+        log_path = "/flagos-workspace/logs/benchmark_detail.log"
+        try:
+            log_f = open(log_path, "a")
+        except OSError:
+            log_f = None
+
         for line in proc.stdout:
             stdout_lines.append(line)
             stripped = line.strip()
             if stripped:
-                print(f"    | {stripped}")
+                if log_f:
+                    log_f.write(line)
+                # 只输出包含关键指标的行到 stdout
+                if any(kw in stripped.lower() for kw in ['throughput', 'tok/s', 'failed', 'error', 'result']):
+                    print(f"    | {stripped}")
+            # 心跳检查
+            now = time.time()
+            if now - last_heartbeat >= heartbeat_interval:
+                elapsed = int(now - bench_start)
+                print(f"    [heartbeat] benchmark running {elapsed}s...")
+                last_heartbeat = now
+
+        if log_f:
+            log_f.close()
 
         proc.wait()
         t.join(timeout=5)
@@ -237,8 +261,19 @@ def run_benchmark(cmd: List[str], num_prompts: int, max_concurrency: Optional[in
         full_stderr = "".join(stderr_lines)
 
         if proc.returncode != 0:
-            print(f"    FAILED (rc={proc.returncode}): {full_stderr[:200]}")
-            return {"error": full_stderr}
+            # Diagnose failure reason
+            error_reason = "unknown"
+            stderr_lower = full_stderr.lower()
+            if "out of memory" in stderr_lower or "oom" in stderr_lower or "cuda out of memory" in stderr_lower:
+                error_reason = "OOM"
+            elif "connection refused" in stderr_lower or "connection reset" in stderr_lower:
+                error_reason = "service_crashed"
+            elif "timeout" in stderr_lower or "timed out" in stderr_lower:
+                error_reason = "timeout"
+            elif proc.returncode == -9 or proc.returncode == 137:
+                error_reason = "killed_OOM"
+            print(f"    FAILED (rc={proc.returncode}, reason={error_reason}): {full_stderr[:200]}")
+            return {"error": full_stderr[:500], "error_reason": error_reason, "returncode": proc.returncode}
 
         metrics = parse_output(full_stdout)
         throughput = metrics.get('Output token throughput (tok/s)', 'N/A')

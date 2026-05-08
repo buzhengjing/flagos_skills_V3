@@ -102,9 +102,39 @@ python3 skills/flagos-container-preparation/tools/check_model_local.py \
 
 ## 入口 2 — 已有镜像
 
-1. 自动检测 GPU 厂商
+1. 自动检测 GPU 厂商（确定性检测，禁止试错）
 2. **根据 GPU 厂商选择对应模板**，填充变量后生成 docker run 命令并自动执行
 3. 验证容器状态
+
+### GPU 厂商确定性检测
+
+容器创建后，使用 `detect_gpu.sh` 一次性确定厂商：
+
+```bash
+bash skills/flagos-container-preparation/tools/detect_gpu.sh --container $CONTAINER
+```
+
+输出 JSON：`{"vendor": "metax", "method": "which mx-smi", "gpu_model": "C550", "gpu_count": 4}`
+
+如果容器尚未创建（需要先确定模板），使用镜像预判：
+
+```bash
+bash skills/flagos-container-preparation/tools/detect_gpu.sh --image $IMAGE
+```
+
+**检测优先级**（脚本内部顺序，禁止 Claude 自行尝试其他命令）：
+1. `which nvidia-smi` → NVIDIA
+2. `which mx-smi` → MetaX（沐曦）
+3. `which mthreads-gmi` → Moore Threads（摩尔线程）
+4. `which ixsmi` → Iluvatar（天数智芯）
+5. `which npu-smi` → Ascend（华为昇腾）
+6. `which hy-smi` → Hygon（海光）
+7. `which xpu-smi` → KunlunXin（昆仑芯）
+8. `which cnmon` → Cambricon（寒武纪）
+9. `which tsm_smi` → TsingMicro（清微智能）
+10. 以上均失败 → 检查环境变量（MACA_PATH=MetaX, CUDA_HOME=NVIDIA 等）
+
+**禁止行为**：禁止在宿主机执行 nvidia-smi/mx-smi 等命令（GPU 驱动在容器内），禁止 `ls /dev/nvidia*`（沙箱拦截）。
 
 ### docker run 命令模板
 

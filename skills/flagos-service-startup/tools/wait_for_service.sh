@@ -592,7 +592,19 @@ print(json.dumps({
         fi
     fi
 
-    # === 进度输出 ===
+    # === 进度输出（含 cache 续期心跳） ===
+    # 每 240s 输出一次心跳行，确保 Claude API 调用不超过 5 分钟间隔（prompt cache TTL）
+    HEARTBEAT_INTERVAL=240
+    if [ -z "${LAST_HEARTBEAT:-}" ]; then
+        LAST_HEARTBEAT=$START_TIME
+    fi
+    NOW_HB=$(date +%s)
+    SINCE_HEARTBEAT=$((NOW_HB - LAST_HEARTBEAT))
+    if [ "$SINCE_HEARTBEAT" -ge "$HEARTBEAT_INTERVAL" ]; then
+        echo "[heartbeat] ${ELAPSED}s elapsed, phase: $(phase_label "$CURRENT_PHASE"), still waiting..."
+        LAST_HEARTBEAT=$NOW_HB
+    fi
+
     if [ "$DYNAMIC_MODE" = true ]; then
         PHASE_TEXT=$(phase_label "$CURRENT_PHASE")
         NOW=$(date +%s)

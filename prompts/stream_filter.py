@@ -50,6 +50,25 @@ RE_VERDICT = re.compile(
 # 时间戳前缀检测: [2026-04-09 15:10:07] 格式
 RE_HAS_TIMESTAMP = re.compile(r'^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}')
 
+# Token/凭据脱敏正则 — 匹配常见 token 格式并替换为 ***
+RE_TOKEN_PATTERNS = [
+    re.compile(r'(MODELSCOPE_TOKEN|MS_TOKEN|ms_token)\s*[=:]\s*\S+', re.IGNORECASE),
+    re.compile(r'(HF_TOKEN|HUGGING_FACE_HUB_TOKEN|hf_token)\s*[=:]\s*\S+', re.IGNORECASE),
+    re.compile(r'(GITHUB_TOKEN|GH_TOKEN|gh_token|ghp_)\S*', re.IGNORECASE),
+    re.compile(r'(HARBOR_PASSWORD|harbor_password)\s*[=:]\s*\S+', re.IGNORECASE),
+    re.compile(r'(token|password|secret|credential)\s*[=:]\s*["\']?[A-Za-z0-9_\-]{8,}["\']?', re.IGNORECASE),
+    re.compile(r'\b(ghp_[A-Za-z0-9]{36,})\b'),
+    re.compile(r'\b(hf_[A-Za-z0-9]{20,})\b'),
+    re.compile(r'\b(ms_[A-Za-z0-9]{20,})\b'),
+]
+
+
+def sanitize_tokens(line: str) -> str:
+    """脱敏所有 token/凭据字段"""
+    for pat in RE_TOKEN_PATTERNS:
+        line = pat.sub(lambda m: m.group(0).split('=')[0] + '=***' if '=' in m.group(0) else '***', line)
+    return line
+
 
 # ============================================================================
 # 精简模式 — 终端显示过滤规则
@@ -642,6 +661,7 @@ _terminal_logger = None
 
 def out(text: str, colors: Colors = None, end: str = '\n'):
     """输出到终端，可选着色，同时写入终端日志"""
+    text = sanitize_tokens(text)
     if colors:
         text = colorize_line(text, colors)
     print(text, end=end, flush=True)

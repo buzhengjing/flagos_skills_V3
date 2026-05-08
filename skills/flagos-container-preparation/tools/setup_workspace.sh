@@ -258,6 +258,7 @@ SCRIPT_MAP=(
     "shared/update_context.py:scripts/update_context.py"
     # GPU 统一检测
     "shared/detect_gpu.py:scripts/detect_gpu.py"
+    "skills/flagos-container-preparation/tools/detect_gpu.sh:scripts/detect_gpu.sh"
     # 错误/检查点持久化
     "shared/error_writer.py:scripts/error_writer.py"
     # 故障诊断工具

@@ -150,6 +150,11 @@ def main():
         help="只执行 Harbor 推送（commit→tag→push），跳过 README/ModelScope/HuggingFace"
     )
     parser.add_argument(
+        "--skip-harbor",
+        action="store_true",
+        help="跳过 Harbor 推送（已有镜像时），只执行 README/ModelScope/HuggingFace"
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="详细输出模式"
@@ -190,6 +195,11 @@ def main():
         config.publish.generate_readme = False
         config.publish.publish_modelscope = False
         config.publish.publish_huggingface = False
+
+    if args.skip_harbor:
+        config.stages_to_run = ["publish"]
+        config.publish.tag_image = False
+        config.publish.push_harbor = False
 
     # 自动填充配置
     print("正在检测环境信息...")
