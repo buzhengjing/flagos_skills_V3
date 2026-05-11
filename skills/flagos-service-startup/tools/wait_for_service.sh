@@ -596,7 +596,7 @@ print(json.dumps({
     # 每 240s 输出一次心跳行，确保 Claude API 调用不超过 5 分钟间隔（prompt cache TTL）
     HEARTBEAT_INTERVAL=240
     if [ -z "${LAST_HEARTBEAT:-}" ]; then
-        LAST_HEARTBEAT=$START_TIME
+        LAST_HEARTBEAT=$(date +%s)
     fi
     NOW_HB=$(date +%s)
     SINCE_HEARTBEAT=$((NOW_HB - LAST_HEARTBEAT))

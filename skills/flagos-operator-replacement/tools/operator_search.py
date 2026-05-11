@@ -37,6 +37,7 @@ else:
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 import traceback
@@ -600,8 +601,15 @@ def restart_service(stop_cmd: str, startup_cmd: str,
     # 启动（后台执行，避免 vllm 等服务进程阻塞脚本）
     log_path = "/flagos-workspace/logs/startup_search.log"
     if env_inline:
-        # env_inline 必须在 nohup 前面，否则 nohup 会把 VAR=val 当命令名
-        bg_cmd = f"{env_inline} nohup {startup_cmd} > {log_path} 2>&1 &"
+        # env_inline 中的变量必须覆盖 startup_cmd 中的同名变量
+        effective_cmd = startup_cmd
+        for assignment in env_inline.split():
+            if "=" in assignment:
+                var_name = assignment.split("=", 1)[0]
+                effective_cmd = re.sub(
+                    rf'\b{re.escape(var_name)}=\S*\s*', '', effective_cmd
+                ).strip()
+        bg_cmd = f"{env_inline} nohup {effective_cmd} > {log_path} 2>&1 &"
         print(f"  启动服务（内联 env vars，后台）...")
     else:
         bg_cmd = f"nohup {startup_cmd} > {log_path} 2>&1 &"
@@ -745,11 +753,14 @@ def preflight_framework_check(service_startup_cmd: str,
     print("[Preflight] 验证 plugin 框架开销")
     print("=" * 60)
 
-    # 以 USE_FLAGGEMS=0 启动（完全禁用 FlagGems，仅保留 plugin 框架）
-    env_inline = "USE_FLAGGEMS=0 VLLM_FL_PREFER_ENABLED=false"
+    # 以 native 模式启动（完全禁用 FlagGems，仅保留 plugin 框架）
+    # 直接替换 --mode 参数，避免 start_service.sh 内部 export USE_FLAGGEMS 覆盖外部 env_inline
+    preflight_cmd = re.sub(r'--mode[= ]\S+', '--mode native', service_startup_cmd)
+    if preflight_cmd == service_startup_cmd and '--mode' not in service_startup_cmd:
+        preflight_cmd = service_startup_cmd + " --mode native"
     svc_port = _read_service_port()
-    if not restart_service(SERVICE_STOP_CMD, service_startup_cmd, wait_script,
-                           env_inline=env_inline, port=svc_port,
+    if not restart_service(SERVICE_STOP_CMD, preflight_cmd, wait_script,
+                           port=svc_port,
                            model_name=model_name, max_timeout=max_timeout):
         return {"pass": False, "ratio": 0, "throughput": 0,
                 "message": "ERROR: 框架预检服务启动失败"}
@@ -824,11 +835,14 @@ def _read_service_port() -> Optional[int]:
 
 
 def _read_gpu_count() -> int:
-    """从 context.yaml 读取 GPU 数量，fallback 到 SMI 工具探测"""
+    """从 context.yaml 读取服务所需 GPU 数（优先 tp_size），fallback 到 SMI 工具探测"""
     try:
         import yaml
         with open("/flagos-workspace/shared/context.yaml", "r") as f:
             ctx = yaml.safe_load(f) or {}
+        tp_size = ctx.get("runtime", {}).get("tp_size")
+        if tp_size and int(tp_size) > 0:
+            return int(tp_size)
         gpu_count = ctx.get("gpu", {}).get("count")
         if gpu_count:
             return int(gpu_count)

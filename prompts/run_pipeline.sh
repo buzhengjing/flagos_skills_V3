@@ -331,6 +331,10 @@ ${STEP1}
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
 - service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
 
+**步骤3正常完成时必须设置 workflow.service_ok=true**：
+- FlagGems 模式（V2）启动验证通过 → 立即设置 workflow.service_ok=true（通过 update_context.py --set workflow.service_ok=true）
+- 不要等到崩溃重试才设置，正常启动成功也必须显式设置
+
 完成步骤3后，通过 docker cp 同步 context 到宿主机：
   docker cp \${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
 （如果 mount_mode=mounted，也可：cp /data/flagos-workspace/${MODEL}/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml）
@@ -388,6 +392,10 @@ ${STEP1}
 - 非算子原因（非硬件）导致的 FlagGems 崩溃 → 同样设置 workflow.service_ok=false
 - service_ok=false 时：用 USE_FLAGGEMS=0 启动 native 服务验证环境可用性，但不影响 service_ok 判定
 - service_ok 含义：FlagGems 模式是否可用（native 能启动但 FlagGems 不能 → service_ok=false）
+
+**步骤3正常完成时必须设置 workflow.service_ok=true**：
+- FlagGems 模式（V2）启动验证通过 → 立即设置 workflow.service_ok=true（通过 update_context.py --set workflow.service_ok=true）
+- 不要等到崩溃重试才设置，正常启动成功也必须显式设置
 
 完成步骤3后，通过 docker cp 同步 context 到宿主机：
   docker cp ${CONTAINER}:/flagos-workspace/shared/context.yaml /data/flagos-workspace/${MODEL}/config/context_snapshot.yaml
@@ -814,10 +822,23 @@ if [ -n "${SEG1_OVERFLOW}" ]; then
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --ledger-update 08_release --ledger-status pending --ledger-notes '段1越界回滚' \
         --json" >/dev/null 2>&1
-    # 回滚 workflow 状态字段
+    # 回滚 workflow 状态字段（service_ok 基于步骤3 ledger 实际结果推导）
+    SEG1_SVC_OK=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+ledger = ctx.get('workflow_ledger', {}).get('steps', [])
+for s in (ledger if isinstance(ledger, list) else []):
+    if isinstance(s, dict) and s.get('step') == '03_service_startup' and s.get('status') == 'success':
+        print('true')
+        break
+else:
+    print('false')
+" 2>/dev/null) || SEG1_SVC_OK="false"
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
         --set workflow.accuracy_ok=false --set workflow.performance_ok=false \
         --set workflow.qualified=false --set workflow.all_done=false \
+        --set workflow.service_ok=${SEG1_SVC_OK} \
         --json" >/dev/null 2>&1
     # 回滚 timing 中越界步骤的计时
     docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
@@ -861,11 +882,20 @@ print(f'''- 模型路径(容器内): {mdl.get('container_path','')}
 " 2>/dev/null || echo "  (context 摘要提取失败)")
 
 # 检查 service_ok：FlagGems 崩溃且无法恢复时跳过精度/性能评测，直接到发布
+# 交叉验证：如果 workflow.service_ok=false 但 ledger 步骤3为 success，以 ledger 为准（修正遗漏）
 SERVICE_OK=$(python3 -c "
 import yaml
 with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
     ctx = yaml.safe_load(f)
-print(ctx.get('workflow',{}).get('service_ok', True))
+wf_svc_ok = ctx.get('workflow',{}).get('service_ok', True)
+if wf_svc_ok in (False, 'false', 'False'):
+    # 交叉验证 ledger：步骤3成功则 service_ok 应为 true
+    ledger = ctx.get('workflow_ledger', {}).get('steps', [])
+    for s in (ledger if isinstance(ledger, list) else []):
+        if isinstance(s, dict) and s.get('step') == '03_service_startup' and s.get('status') == 'success':
+            wf_svc_ok = True
+            break
+print(wf_svc_ok)
 " 2>/dev/null) || SERVICE_OK="True"
 
 SKIP_SEG2=false
@@ -873,6 +903,16 @@ if [ "${SERVICE_OK}" = "False" ]; then
     echo "⚠ service_ok=false（FlagGems 不可用），跳过段2（步骤4-7），直接进入段3发布"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 段2 跳过：service_ok=false"
     SKIP_SEG2=true
+elif [ "${SERVICE_OK}" = "True" ]; then
+    # 确保 context 中 service_ok 与 ledger 一致（修正段1遗漏写入的情况）
+    docker exec "${SEG_CTR}" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+        --set workflow.service_ok=true --json" >/dev/null 2>&1
+    MOUNT_MODE=$(docker exec "${SEG_CTR}" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+    if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null
+    else
+        docker cp "${SEG_CTR}:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null
+    fi
 fi
 
 if [ "${SKIP_SEG2}" = "false" ]; then
@@ -1143,6 +1183,53 @@ fi
 echo ""
 
 fi  # end SKIP_SEG2 check
+
+# 段2被跳过时初始化计时变量，避免后续汇总报错 unbound variable
+SEG2_MIN=${SEG2_MIN:-0}
+SEG2_SEC=${SEG2_SEC:-0}
+
+# ===== 段间兜底：检查 v3 结果文件是否存在但 context 未更新 =====
+reconcile_performance_state() {
+    local CONTAINER="$1"
+    local v3_exists=$(docker exec "$CONTAINER" bash -c "test -f /flagos-workspace/results/v3_performance.json && echo yes || echo no" 2>/dev/null)
+
+    if [[ "$v3_exists" == "yes" ]]; then
+        local ctx_perf_ok=$(docker exec "$CONTAINER" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import yaml
+with open('/flagos-workspace/shared/context.yaml') as f:
+    ctx = yaml.safe_load(f)
+print(ctx.get('workflow',{}).get('performance_ok', False))
+\"" 2>/dev/null)
+
+        if [[ "$ctx_perf_ok" == "False" ]]; then
+            local v3_ratio=$(docker exec "$CONTAINER" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import json
+with open('/flagos-workspace/results/v3_performance.json') as f:
+    d = json.load(f)
+# 取 warm average ratio
+for case in d.values():
+    if isinstance(case, dict) and 'ratio_vs_native' in case.get('64', {}):
+        print(case['64']['ratio_vs_native'])
+        break
+else:
+    print(0)
+\"" 2>/dev/null)
+
+            if (( $(echo "${v3_ratio:-0} >= 80" | bc -l 2>/dev/null) )); then
+                echo "  ⚠ 兜底修复：v3_performance.json ratio=${v3_ratio}% ≥ 80%，但 context.performance_ok=false"
+                echo "    自动修正 workflow 状态..."
+                docker exec "$CONTAINER" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+                    --set 'workflow.performance_ok=true' \
+                    --set 'workflow.qualified=true' \
+                    --set 'optimization.current_ratio=0.${v3_ratio%%.*}'" 2>/dev/null
+                # 同步到宿主机 snapshot
+                docker cp "$CONTAINER:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
+reconcile_performance_state "${SEG_CTR}"
 
 # 从 context_snapshot 提取段3所需的关键参数
 SEG3_CTX_SUMMARY=$(python3 -c "
@@ -1736,7 +1823,23 @@ except: print('True')
         fi
 
         # 性能不达标但 issue 文件缺失 → 兜底调用 issue_reporter.py
+        # 前置验证：检查是否有实际 benchmark 数据（段2被跳过时无数据，不应生成空 issue）
         if [ "${PERF_OK}" = "False" ]; then
+            PERF_HAS_DATA=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    bm = ctx.get('benchmark', {})
+    native_tps = float(bm.get('native', bm).get('output_tps', 0))
+    # 有 native benchmark 数据才说明步骤6确实执行过
+    print('true' if native_tps > 0 else 'false')
+except:
+    print('false')
+" 2>/dev/null) || PERF_HAS_DATA="false"
+            if [ "${PERF_HAS_DATA}" = "false" ]; then
+                echo "  ℹ 性能 performance_ok=false 但无 benchmark 数据（步骤6未执行），跳过 issue 生成"
+            else
             PERF_ISSUE_EXISTS=$(docker exec "${DIAG_CONTAINER}" bash -c "ls /flagos-workspace/results/issue_performance-degraded_*.md 2>/dev/null | head -1" 2>/dev/null || echo "")
             PERF_ISSUE_LOG=$(docker exec "${DIAG_CONTAINER}" bash -c "[ -s /flagos-workspace/logs/issues_performance.log ] && echo 'exists' || echo ''" 2>/dev/null || echo "")
             if [ -z "${PERF_ISSUE_EXISTS}" ] || [ -z "${PERF_ISSUE_LOG}" ]; then
@@ -1751,10 +1854,35 @@ except: print('True')
                 # 同步到宿主机
                 docker cp "${DIAG_CONTAINER}:/flagos-workspace/results/." "${HOST_BASE}/results/" 2>/dev/null
             fi
+            fi
         fi
 
         # 精度不达标但 issue 文件缺失 → 兜底调用 issue_reporter.py
+        # 前置验证：检查实际偏差是否超阈值（V1/V2 均为 0 时偏差为 0，不应生成 issue）
         if [ "${ACC_OK}" = "False" ]; then
+            ACC_REAL_DEGRADED=$(python3 -c "
+import yaml
+try:
+    with open('${CONTEXT_SNAP}') as f:
+        ctx = yaml.safe_load(f)
+    ev = ctx.get('eval', {})
+    v1 = float(ev.get('v1_score', 0))
+    v2 = float(ev.get('v2_score', 0))
+    threshold = float(ev.get('accuracy_threshold', 5.0))
+    diff = abs(v1 - v2)
+    # V1/V2 均为 0 或偏差在阈值内 → 不是真正的精度退化
+    if v1 == 0 and v2 == 0:
+        print('false')
+    elif diff <= threshold:
+        print('false')
+    else:
+        print('true')
+except:
+    print('true')
+" 2>/dev/null) || ACC_REAL_DEGRADED="true"
+            if [ "${ACC_REAL_DEGRADED}" = "false" ]; then
+                echo "  ℹ 精度 accuracy_ok=false 但实际偏差未超阈值（V1/V2 均为 0 或偏差 ≤5%），跳过 issue 生成"
+            else
             ACC_ISSUE_EXISTS=$(docker exec "${DIAG_CONTAINER}" bash -c "ls /flagos-workspace/results/issue_accuracy-degraded_*.md 2>/dev/null | head -1" 2>/dev/null || echo "")
             ACC_ISSUE_LOG=$(docker exec "${DIAG_CONTAINER}" bash -c "[ -s /flagos-workspace/logs/issues_accuracy.log ] && echo 'exists' || echo ''" 2>/dev/null || echo "")
             if [ -z "${ACC_ISSUE_EXISTS}" ] || [ -z "${ACC_ISSUE_LOG}" ]; then
@@ -1767,6 +1895,7 @@ except: print('True')
                     --json" 2>&1 && \
                     echo "  ✓ 精度 issue 文件已生成" || echo "  ⚠ 精度 issue 文件生成失败"
                 docker cp "${DIAG_CONTAINER}:/flagos-workspace/results/." "${HOST_BASE}/results/" 2>/dev/null
+            fi
             fi
         fi
     fi

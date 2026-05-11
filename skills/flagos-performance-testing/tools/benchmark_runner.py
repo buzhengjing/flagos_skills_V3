@@ -98,7 +98,11 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                 if not config["model"].get("tokenizer_path"):
                     config["model"]["tokenizer_path"] = ctx.get("model", {}).get("container_path", "")
                 if not config["model"].get("name"):
-                    config["model"]["name"] = ctx.get("model", {}).get("name", "")
+                    svc_model_id = svc.get("model_id", "")
+                    if svc_model_id:
+                        config["model"]["name"] = svc_model_id
+                    else:
+                        config["model"]["name"] = ctx.get("model", {}).get("name", "").split("/")[-1]
                 print(f"[INFO] 从 context.yaml 补充了缺失配置")
             except Exception as e:
                 print(f"[WARN] 读取 context.yaml 失败: {e}")
