@@ -2,14 +2,15 @@
 # FlagOS 全自动迁移流程 — 一键启动脚本（V1+V2+V3 算子调优）
 #
 # 用法:
-#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]
+#   bash prompts/run_pipeline.sh <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose]
 #
 # 自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址
-# 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载
+# 模型路径：仅需模型名，自动搜索宿主机路径；未找到则容器内自动下载。也可通过 --model-path 显式指定
 #
 # 示例:
 #   bash prompts/run_pipeline.sh qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
 #   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass
+#   bash prompts/run_pipeline.sh harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B
 #
 # 向后兼容（已弃用）:
 #   bash prompts/run_pipeline.sh --image <镜像地址> <模型名> [<宿主机模型路径>] <tokens...>
@@ -94,13 +95,14 @@ if [[ "${1:-}" == "--image" ]]; then
 else
     # 统一格式：7 个位置参数
     if [ $# -lt 7 ]; then
-        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--verbose]"
+        echo "用法: $0 <容器名或镜像地址> <模型名> <MODELSCOPE_TOKEN> <HF_TOKEN> <GITHUB_TOKEN> <HARBOR_USER> <HARBOR_PASSWORD> [--model-path <路径>] [--verbose]"
         echo ""
         echo "自动识别：第一参数若为已有容器则走容器模式，否则视为镜像地址"
         echo ""
         echo "示例:"
         echo "  $0 qwen3-8b-test Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
         echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass"
+        echo "  $0 harbor.baai.ac.cn/flagrelease/qwen3:latest Qwen3-8B ms_xxx hf_xxx ghp_xxx harbor_user harbor_pass --model-path /data/models/Qwen3-8B"
         echo "  加 --verbose 显示全量终端输出（调试用）"
         exit 1
     fi
@@ -112,9 +114,27 @@ else
     export GITHUB_TOKEN="$5"
     export HARBOR_USER="$6"
     export HARBOR_PASSWORD="$7"
-    if [[ "${8:-}" == "--verbose" ]]; then
-        FILTER_FLAGS="--verbose"
-    fi
+    shift 7
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --verbose)
+                FILTER_FLAGS="--verbose"
+                shift
+                ;;
+            --model-path)
+                if [ -z "${2:-}" ]; then
+                    echo "错误: --model-path 需要指定路径"
+                    exit 1
+                fi
+                MODEL_PATH="$2"
+                shift 2
+                ;;
+            *)
+                echo "警告: 未知参数 '$1'，已忽略"
+                shift
+                ;;
+        esac
+    done
 
     # 自动识别：含冒号(:)或斜杠(/)的视为镜像地址，否则尝试 docker inspect 判断
     if [[ "$TARGET" == *":"* ]] || [[ "$TARGET" == *"/"* ]]; then
@@ -163,6 +183,22 @@ except:
     CONTAINER_MODEL_PATH="${MODEL_PATH}"
 fi
 
+# 用户通过 --model-path 显式指定时，设置相关变量
+if [ -n "$MODEL_PATH" ] && [ -z "${MODEL_FOUND_ON_HOST:-}" ]; then
+    if ! $IMAGE_MODE; then
+        echo "警告: --model-path 在容器模式下无效（容器已有自己的文件系统），已忽略"
+        MODEL_PATH=""
+    elif [ ! -d "$MODEL_PATH" ]; then
+        echo "错误: 指定的模型路径不存在: ${MODEL_PATH}"
+        exit 1
+    else
+        MODEL_FOUND_ON_HOST=true
+        CONTAINER_MODEL_PATH="${MODEL_PATH}"
+        USER_SPECIFIED_MODEL_PATH=true
+        echo "[pre-flight] 使用指定模型路径: ${MODEL_PATH}"
+    fi
+fi
+
 # ========== Banner ==========
 echo "============================================================"
 echo "  FlagOS 全自动迁移流程"
@@ -175,7 +211,11 @@ fi
 echo "  模型: ${MODEL}"
 if $IMAGE_MODE; then
     if $MODEL_FOUND_ON_HOST; then
-        echo "  模型路径: ${MODEL_PATH} (自动检测)"
+        if [ -n "${USER_SPECIFIED_MODEL_PATH:-}" ]; then
+            echo "  模型路径: ${MODEL_PATH} (用户指定)"
+        else
+            echo "  模型路径: ${MODEL_PATH} (自动检测)"
+        fi
     else
         echo "  模型路径: ${MODEL_PATH} (预创建，容器内下载)"
     fi
