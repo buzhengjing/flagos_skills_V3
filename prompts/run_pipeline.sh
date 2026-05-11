@@ -28,6 +28,30 @@ if ! docker ps &>/dev/null; then
     exit 1
 fi
 
+# ========== 宿主机 Python 依赖检查 ==========
+if ! command -v python3 &>/dev/null; then
+    echo "错误: python3 未安装，请先安装 Python 3"
+    exit 1
+fi
+
+HOST_PY_DEPS=("yaml:pyyaml" "huggingface_hub:huggingface_hub")
+MISSING_PKGS=()
+for dep in "${HOST_PY_DEPS[@]}"; do
+    mod="${dep%%:*}"
+    pkg="${dep##*:}"
+    if ! python3 -c "import ${mod}" 2>/dev/null; then
+        MISSING_PKGS+=("${pkg}")
+    fi
+done
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo "[pre-flight] 安装缺失的宿主机 Python 依赖: ${MISSING_PKGS[*]}"
+    pip3 install "${MISSING_PKGS[@]}" -q 2>/dev/null || \
+    pip3 install "${MISSING_PKGS[@]}" -q -i https://mirrors.aliyun.com/pypi/simple/ 2>/dev/null || \
+    pip3 install "${MISSING_PKGS[@]}" -q -i https://pypi.tuna.tsinghua.edu.cn/simple/ 2>/dev/null || \
+    { echo "错误: 宿主机 Python 依赖安装失败: ${MISSING_PKGS[*]}"; exit 1; }
+fi
+
 # ========== 参数解析与自动识别 ==========
 IMAGE_MODE=false
 MODEL_PATH=""
@@ -1461,12 +1485,12 @@ except:
             if [ "${FALLBACK_SERVICE_OK}" != "True" ]; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底跳过：服务未启动成功，不具备发布条件"
             else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
-            python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" --only-harbor 2>&1 && \
-                echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
-            # 重新同步 context 和 traces（main.py 可能更新了）
-            docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
-            docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 兜底发布：Claude 未完成 Harbor push，自动补执行..."
+                python3 skills/flagos-release/tools/main.py --from-context "${CONTEXT_SNAP}" --only-harbor 2>&1 && \
+                    echo "  ✓ 兜底 Harbor 发布成功" || echo "  ✗ 兜底 Harbor 发布失败"
+                # 重新同步 context 和 traces（main.py 可能更新了）
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/shared/context.yaml" "${CONTEXT_SNAP}" 2>/dev/null
+                docker cp "${DIAG_CONTAINER}:/flagos-workspace/traces/." "${HOST_BASE}/traces/" 2>/dev/null
             fi
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Harbor 发布已完成，跳过兜底"
