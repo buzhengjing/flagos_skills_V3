@@ -293,7 +293,8 @@ if $IMAGE_MODE; then
    - **降级策略**：模板失败 → 检查变量值修正后重试 → 仍失败则 docker inspect 借鉴已有容器挂载配置重试一次 → 仍失败则终止
    - 容器名自动生成为 <model_short_name>_flagos（如 Qwen3-8B_flagos）
    - 如同名容器已存在，追加时间戳：<model_short_name>_flagos_<MMDD_HHMM>
-   - 镜像模式下禁止复用已有容器，必须 docker run 新建${DOWNLOAD_NOTE}
+   - 镜像模式下禁止复用已有容器，必须 docker run 新建
+   - **旧容器镜像校验**：如果 docker inspect 发现同名容器已存在，必须校验其镜像（docker inspect --format '{{.Config.Image}}' <container>）是否与目标镜像 ${IMAGE} 一致。不一致 → 该旧容器来自不同镜像，忽略它，docker run 新建（追加时间戳后缀）。禁止复用不同镜像创建的旧容器${DOWNLOAD_NOTE}
    - bash skills/flagos-container-preparation/tools/setup_workspace.sh \${CONTAINER} ${MODEL} --skip-archive 部署工具脚本（宿主机已归档，跳过容器内归档避免移走正在写入的日志）
    - 写入容器内 /flagos-workspace/shared/context.yaml（entry.type=new_container, image.name=${IMAGE}）+ traces/01_container_preparation.json
 STEP1_EOF
@@ -341,10 +342,13 @@ ${STEP1}
 
 **⚠ 段边界（硬性约束 — 最高优先级）**：
 - 本段**只执行步骤1/2/3**，步骤3完成并同步 context_snapshot.yaml 后**必须立即停止**
-- **绝对禁止**执行步骤4（精度评测）、步骤5、步骤6、步骤7 或任何后续步骤
-- **绝对禁止**启动 benchmark、eval、算子调优等属于步骤4-7的操作
+- **绝对禁止**执行步骤4（精度评测）、步骤5、步骤6（性能评测）、步骤7 或任何后续步骤
+- **绝对禁止**启动 benchmark_runner.py、fast_gpqa.py、operator_search.py 等属于步骤4-7的操作
+- **绝对禁止**在步骤3中运行任何性能测试或精度评测，benchmark 属于步骤6，不属于步骤3
 - **禁止**更新 ledger 中 04_quick_accuracy 及之后步骤的状态。违反此约束将导致后续段重复执行
-- 步骤3完成 = V1/V2 服务启动验证通过 + context 同步。验证通过后停止服务、同步 context，然后立即结束
+- **步骤3「验证通过」的定义**：仅指 curl /v1/models 返回模型列表 + 一次简单 chat completion 请求返回正常响应。不包含 benchmark、不包含性能测试、不包含精度评测
+- **步骤3 服务启动顺序（必须严格遵守）**：① docker exec -d 启动服务进程 → ② wait_for_service.sh 等待就绪 → ③ curl 验证。禁止在启动服务之前运行 wait_for_service.sh
+- **步骤3 GPU 配置**：使用步骤2.4 检测到的 GPU 配置，禁止在步骤3中自行修改 MACA_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES 的值
 - 步骤4-13 由后续独立会话执行，本段无权触碰
 完成标志：输出 \"[段1] 步骤1/2/3全部完成，context 已同步\" 后**立即停止所有操作，不再执行任何命令**。"
 else
@@ -403,10 +407,13 @@ ${STEP1}
 
 **⚠ 段边界（硬性约束 — 最高优先级）**：
 - 本段**只执行步骤1/2/3**，步骤3完成并同步 context_snapshot.yaml 后**必须立即停止**
-- **绝对禁止**执行步骤4（精度评测）、步骤5、步骤6、步骤7 或任何后续步骤
-- **绝对禁止**启动 benchmark、eval、算子调优等属于步骤4-7的操作
+- **绝对禁止**执行步骤4（精度评测）、步骤5、步骤6（性能评测）、步骤7 或任何后续步骤
+- **绝对禁止**启动 benchmark_runner.py、fast_gpqa.py、operator_search.py 等属于步骤4-7的操作
+- **绝对禁止**在步骤3中运行任何性能测试或精度评测，benchmark 属于步骤6，不属于步骤3
 - **禁止**更新 ledger 中 04_quick_accuracy 及之后步骤的状态。违反此约束将导致后续段重复执行
-- 步骤3完成 = V1/V2 服务启动验证通过 + context 同步。验证通过后停止服务、同步 context，然后立即结束
+- **步骤3「验证通过」的定义**：仅指 curl /v1/models 返回模型列表 + 一次简单 chat completion 请求返回正常响应。不包含 benchmark、不包含性能测试、不包含精度评测
+- **步骤3 服务启动顺序（必须严格遵守）**：① docker exec -d 启动服务进程 → ② wait_for_service.sh 等待就绪 → ③ curl 验证。禁止在启动服务之前运行 wait_for_service.sh
+- **步骤3 GPU 配置**：使用步骤2.4 检测到的 GPU 配置，禁止在步骤3中自行修改 MACA_VISIBLE_DEVICES/CUDA_VISIBLE_DEVICES 的值
 - 步骤4-13 由后续独立会话执行，本段无权触碰
 完成标志：输出 \"[段1] 步骤1/2/3全部完成，context 已同步\" 后**立即停止所有操作，不再执行任何命令**。"
 fi
@@ -1230,6 +1237,156 @@ else:
 }
 
 reconcile_performance_state "${SEG_CTR}"
+
+# ===== 段间兜底：步骤6 benchmark 数据存在但未生成对比结果 =====
+reconcile_perf_compare() {
+    local CONTAINER="$1"
+    # 检查是否有 V1/V2 benchmark 结果但没有 performance_compare 结果
+    local has_native=$(docker exec "$CONTAINER" bash -c "test -f /flagos-workspace/results/native_performance.json && echo yes || echo no" 2>/dev/null)
+    local has_flagos=$(docker exec "$CONTAINER" bash -c "test -f /flagos-workspace/results/flagos_performance.json && echo yes || echo no" 2>/dev/null)
+    local has_compare=$(docker exec "$CONTAINER" bash -c "test -f /flagos-workspace/results/performance_compare.json && echo yes || echo no" 2>/dev/null)
+
+    if [[ "$has_native" == "yes" && "$has_flagos" == "yes" && "$has_compare" != "yes" ]]; then
+        echo "  ⚠ 兜底修复：V1/V2 benchmark 数据存在但未生成对比结果，补调 performance_compare.py..."
+        docker exec "$CONTAINER" bash -c "cd /flagos-workspace && PATH=/opt/conda/bin:\$PATH python3 scripts/performance_compare.py \
+            --native-result results/native_performance.json \
+            --flagos-result results/flagos_performance.json \
+            --output results/performance_compare.json --json" 2>&1 | tail -5
+        # 从对比结果更新 performance_ok
+        local min_ratio=$(docker exec "$CONTAINER" bash -c "PATH=/opt/conda/bin:\$PATH python3 -c \"
+import json
+with open('/flagos-workspace/results/performance_compare.json') as f:
+    d = json.load(f)
+print(d.get('min_ratio', 0))
+\"" 2>/dev/null)
+        if [ -n "$min_ratio" ]; then
+            local perf_ok="false"
+            if (( $(echo "${min_ratio} >= 80" | bc -l 2>/dev/null) )); then
+                perf_ok="true"
+            fi
+            docker exec "$CONTAINER" bash -c "PATH=/opt/conda/bin:\$PATH python3 /flagos-workspace/scripts/update_context.py \
+                --set workflow.performance_ok=${perf_ok} --set performance.min_ratio=${min_ratio} --json" >/dev/null 2>&1
+            # 同步到宿主机
+            MOUNT_MODE=$(docker exec "$CONTAINER" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+            if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+                cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+            else
+                docker cp "$CONTAINER:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml"
+            fi
+            echo "  ✓ 性能对比补生成完成：min_ratio=${min_ratio}%, performance_ok=${perf_ok}"
+        fi
+    fi
+}
+
+reconcile_perf_compare "${SEG_CTR}"
+
+# ===== 段间兜底：performance_ok=false 且步骤7未执行，补跑性能算子调优 =====
+reconcile_step7() {
+    local CONTAINER="$1"
+    # 检查条件：performance_ok=false + 步骤7 ledger 为 pending + env_type 非 native
+    local need_step7=$(python3 -c "
+import yaml
+with open('/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml') as f:
+    ctx = yaml.safe_load(f)
+wf = ctx.get('workflow', {})
+env_type = ctx.get('environment', {}).get('env_type', '')
+perf_ok = wf.get('performance_ok', True)
+svc_ok = wf.get('service_ok', True)
+# 检查步骤7 ledger 状态
+ledger = ctx.get('workflow_ledger', {}).get('steps', [])
+step7_status = 'pending'
+if isinstance(ledger, list):
+    for s in ledger:
+        if isinstance(s, dict) and '07' in str(s.get('step', '')):
+            step7_status = s.get('status', 'pending')
+elif isinstance(ledger, dict):
+    for k, s in ledger.items():
+        if '07' in str(k) or '07' in str(s.get('step', '')):
+            step7_status = s.get('status', 'pending') if isinstance(s, dict) else 'pending'
+# 需要补跑的条件
+if perf_ok in (False, 'false', 'False') and svc_ok in (True, 'true', 'True') and env_type != 'native' and step7_status in ('pending', ''):
+    print('yes')
+else:
+    print('no')
+" 2>/dev/null) || need_step7="no"
+
+    if [[ "$need_step7" != "yes" ]]; then
+        return 0
+    fi
+
+    echo ""
+    echo "  ⚠ 检测到 performance_ok=false 且步骤7（性能算子调优）未执行，启动补跑..."
+
+    # 构造步骤7专用 prompt
+    local STEP7_PROMPT="容器名: ${CONTAINER}，模型名: ${MODEL}
+${COMMON_TOKENS}
+
+**任务：仅执行步骤7（性能算子调优）**
+
+前段已完成步骤4精度评测和步骤6性能评测，结果为 performance_ok=false（V2/V1 ratio < 80%）。
+现在需要通过 operator_search.py 逐步禁用性能问题算子，直到 ratio ≥ 80% 或算子用尽。
+
+**执行方式（硬性约束）**：
+- **必须**通过容器内 operator_search.py run 执行完整自动化循环
+- **禁止**手动拼 toggle_flaggems.py + benchmark_runner.py 循环
+- 调用方式：
+  docker exec \${CONTAINER} bash -c \"PATH=/opt/conda/bin:\\\$PATH python3 /flagos-workspace/scripts/operator_search.py run \\
+    --state-path /flagos-workspace/results/operator_config.json \\
+    --perf-config /flagos-workspace/scripts/config/perf_config.yaml \\
+    --service-startup-cmd 'bash /flagos-workspace/scripts/start_service.sh' \\
+    --max-rounds 50\"
+- operator_search.py 已封装 next→配置→重启→benchmark→update 全流程
+
+**完成后**：
+1. 读取 operator_search.py 的输出结果，更新 context.yaml：
+   - optimization.disabled_ops = 禁用的算子列表
+   - optimization.current_ratio = 最终 ratio
+   - workflow.performance_ok = true/false（ratio ≥ 80% 则 true）
+   - 如果达标：workflow.qualified = accuracy_ok && performance_ok
+2. 更新 ledger：--ledger-update 07_performance_tuning --ledger-status success/failed
+3. 写入 trace：traces/07_performance_tuning.json
+4. 同步 context_snapshot.yaml 到宿主机
+5. 如果禁用了算子 → 调用 issue_reporter.py full --type performance-degraded
+
+GITHUB_TOKEN=${GITHUB_TOKEN}（issue 提交时通过 docker exec -e 传入）。
+
+**context.yaml 更新方式**：使用容器内 update_context.py 工具。
+
+**进度输出**：[步骤7] 性能算子调优 — 开始/完成
+
+**段边界**：只执行步骤7，完成后立即停止。禁止执行步骤8或任何其他步骤。"
+
+    # 执行步骤7补跑
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "[补跑] 步骤7 性能算子调优 — 开始"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local STEP7_START_TS=$(date +%s)
+    claude -p "${STEP7_PROMPT}" \
+        --permission-mode auto \
+        --output-format stream-json \
+        --verbose \
+        --debug-file "${DEBUG_FILE}.step7_补跑" \
+        --max-turns 150 \
+        2>&1 | tee -a "${LOG_FILE}" \
+             | tee >(python3 "${SCRIPT_DIR}/stream_to_debug_log.py" >> "${FULL_LOG}") \
+             | python3 "${SCRIPT_DIR}/stream_filter.py" --pipeline-log "${PIPELINE_LOG}" --terminal-log "${TERMINAL_LOG}" --start-step 7 --cost-file "${LOG_DIR}/step7_retry_cost.txt" ${FILTER_FLAGS} || true
+    local STEP7_END_TS=$(date +%s)
+    local STEP7_ELAPSED=$(( STEP7_END_TS - STEP7_START_TS ))
+    echo "[补跑] 步骤7 性能算子调优 — 完成 ($(( STEP7_ELAPSED / 60 ))m $(( STEP7_ELAPSED % 60 ))s)"
+
+    # 补跑后同步 context
+    MOUNT_MODE=$(docker exec "$CONTAINER" cat /flagos-workspace/.mount_mode 2>/dev/null || echo "internal")
+    if [ "$MOUNT_MODE" = "mounted" ] || [ "$MOUNT_MODE" = "symlink" ]; then
+        cp "/data/flagos-workspace/${MODEL}/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null
+    else
+        docker cp "$CONTAINER:/flagos-workspace/shared/context.yaml" "/data/flagos-workspace/${MODEL}/config/context_snapshot.yaml" 2>/dev/null
+    fi
+
+    # 重新检查 performance state
+    reconcile_performance_state "$CONTAINER"
+}
+
+reconcile_step7 "${SEG_CTR}"
 
 # 从 context_snapshot 提取段3所需的关键参数
 SEG3_CTX_SUMMARY=$(python3 -c "

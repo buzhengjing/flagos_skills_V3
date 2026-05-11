@@ -619,6 +619,7 @@ ISSUE_EOF"
 - 已输出服务连接信息
 - gems.txt 已检查（flagos 模式）
 - context.yaml 已更新
+- **`workflow.service_ok = true` 已设置**（FlagGems 模式启动成功时必须显式设置，不论是正常启动还是崩溃重试后成功）
 - 对应 trace 文件已写入：
   - 步骤3初始启动 → `traces/03_service_startup.json`
   - 步骤4/6中的 native/flagos 模式切换 → 记录在 `traces/04_quick_accuracy.json` 或 `traces/06_quick_performance.json` 的 actions 中
@@ -642,6 +643,22 @@ ISSUE_EOF"
 | 日志活跃但长时间未就绪 | CUDA graph 编译或 Triton 内核编译耗时长 | 正常现象，动态模式会自动延长等待 |
 | Thinking model 评测分数异常低 | max_model_len 过小，推理链被截断 | 重启服务，加大 `--max-model-len` 至 32768+ |
 | OOM: max_model_len 过大 | KV cache 显存预分配超限 | 降低 max-model-len（thinking model 最低 16384） |
+| GPU 设备不可用 | 容器创建时 GPU 参数错误或驱动异常 | `docker restart` 恢复；无效则按下方"容器重建"流程处理 |
+
+### GPU 不可用时的容器重建
+
+如果服务启动时发现 GPU 设备不可用（如 `/dev/dri` 或 `/dev/mxcd` 不存在、驱动报错 `MetaX Sysfs File Unaccessible`），且 `docker restart` 无法恢复，需要重建容器时：
+
+1. **禁止凭记忆或猜测拼 docker run 命令**
+2. **必须参考 `skills/flagos-container-preparation/SKILL.md` 中对应 GPU 厂商的 docker run 模板**：
+   - NVIDIA: `--gpus=all --network=host`
+   - MetaX: `--privileged --device=/dev/dri --device=/dev/mxcd --net=host --ipc=host`
+   - Ascend: `--privileged --device=/dev/davinci* --network=host`
+   - Moore Threads: `--privileged --device=/dev/mthreads --network=host`
+   - Cambricon: `--privileged --device=/dev/cambricon* --network=host`
+3. 从 `context.yaml` 的 `gpu.vendor` 确定厂商，选择对应模板
+4. 保持原容器的挂载卷配置（`docker inspect --format '{{json .HostConfig.Binds}}' <old_container>`）
+5. 新容器名追加时间戳后缀，禁止覆盖旧容器
 
 ---
 
